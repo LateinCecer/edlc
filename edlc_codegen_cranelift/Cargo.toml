@@ -1,17 +1,18 @@
 [package]
 name = "edlc_codegen_cranelift"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-license = "Apache-2.0"
+license.workspace = true
 description = "Cranelift codegen backend for the EDL compiler"
-respository = "git@github.com:LateinCecer/edlc.git"
+repository.workspace = true
+authors.workspace = true
 readme = "README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { version="0.1.0" }
-edlc_layout = { version="0.1.0" }
+edlc_core = { path="../edlc_core", version="0.1.1" }
+edlc_layout = { path="../edlc_layout", version="0.1.1" }
 
 log = "0.4.22"
 cranelift = { version="0.123.0" }
@@ -25,4 +26,4 @@ anyhow = "1.0.99"
 [dev-dependencies]
 fern = { version= "0.7.1", features=["colored"] }
 humantime = "2.1.0"
-edlc_docs = { version = "0.1.0" }
+edlc_docs = { path="../edlc_docs", version = "0.1.0" }

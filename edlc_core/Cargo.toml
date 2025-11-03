@@ -1,10 +1,11 @@
 [package]
 name = "edlc_core"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-license = "Apache-2.0"
+license.workspace = true
 description = "Core library for the EDL compiler"
-respository = "git@github.com:LateinCecer/edlc.git"
+repository.workspace = true
+authors.workspace = true
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
@@ -17,6 +18,8 @@ allocator_api = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+edlc_analysis = { path="../edlc_analysis", version="0.1.1" }
+
 rand = "0.8.5"
 log = { version = "0.4.22", features = [] }
 anyhow = "1.0.89"
@@ -27,7 +30,6 @@ nalgebra = { version = "0.32.6", optional = true }
 clap = { version = "4.5.44", features = ["derive"] }
 cust = { version="0.3.2", git="https://github.com/LateinCecer/Rust-CUDA.git", optional = true }
 regex = "1.11.1"
-edlc_analysis = { version="0.1.0" }
 
 [dev-dependencies]
 fern = { version="0.6.2", features = ["colored"] }

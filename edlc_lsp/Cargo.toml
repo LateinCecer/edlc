@@ -1,18 +1,18 @@
 [package]
 name = "edlc_lsp"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-license = "Apache-2.0"
+license.workspace = true
 description = "EDLc Language Sever Protocol implementation"
-respository = "git@github.com:LateinCecer/edlc.git"
+repository.workspace = true
+authors.workspace = true
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-tower-lsp = "0.20.0"
+edlc_core = { path="../edlc_core", version="0.1.1" }
 
+tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 tokio-macros = "2.3.0"
-
-edlc_core = { version="0.1.0" }

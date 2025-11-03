@@ -1,10 +1,11 @@
 [package]
 name = "edlc_analysis"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
-license = "Apache-2.0"
+license.workspace = true
 description = "Code analysis utils EDL compiler"
-respository = "git@github.com:LateinCecer/edlc.git"
+repository.workspace = true
+authors.workspace = true
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]

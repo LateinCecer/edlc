@@ -1,17 +1,19 @@
 [package]
 name = "edlc_docs"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
-license = "Apache-2.0"
+license.workspace = true
 description = "HTML renderer for documentation for the EDL compiler"
-respository = "git@github.com:LateinCecer/edlc.git"
+repository.workspace = true
+authors.workspace = true
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { version="0.1.0" }
-edlc_layout = { version="0.1.0" }
+edlc_core = { path="../edlc_core", version="0.1.1" }
+edlc_layout = { path="../edlc_layout", version="0.1.1" }
+
 serde = { version = "1.0.216", features = ["derive"] }
 serde_json = "1.0.133"
 build_html = "2.5.0"

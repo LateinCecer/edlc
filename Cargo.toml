@@ -1,6 +1,6 @@
 
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
   "edlc_core",
   "edlc_codegen_cranelift",
@@ -9,3 +9,10 @@ members = [
   "edlc_lsp",
   "edlc_analysis",
 ]
+
+[workspace.package]
+version = "0.1.1"
+repository = "https://github.com/LateinCecer/edlc"
+authors = ["Adrian Paskert"]
+license = "Apache-2.0"
+
