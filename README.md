@@ -156,6 +156,10 @@ fn main() -> Result<(), anyhow::Error> {
 }
 ```
 
+## Out of Tree Projects
+
+1. https://github.com/LateinCecer/tree-sitter-edl.git
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
