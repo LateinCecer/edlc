@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Cranelift codegen backend for the EDL compiler"
-# respository = ""
+respository = "git@github.com:LateinCecer/edlc.git"
 readme = "README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { path="../edlc_core" }
-edlc_layout = { path="../edlc_layout" }
+edlc_core = { path="../edlc_core", version="0.1.0" }
+edlc_layout = { path="../edlc_layout", version="0.1.0" }
 
 log = "0.4.22"
 cranelift = { version="0.123.0" }

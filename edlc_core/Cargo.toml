@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Core library for the EDL compiler"
-# respository = ""
+respository = "git@github.com:LateinCecer/edlc.git"
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
@@ -27,7 +27,7 @@ nalgebra = { version = "0.32.6", optional = true }
 clap = { version = "4.5.44", features = ["derive"] }
 cust = { version="0.3.3", git="https://github.com/LateinCecer/Rust-CUDA.git", optional = true }
 regex = "1.11.1"
-edlc_analysis = { path="../edlc_analysis" }
+edlc_analysis = { path="../edlc_analysis", version="0.1.0" }
 
 [dev-dependencies]
 fern = { version="0.6.2", features = ["colored"] }

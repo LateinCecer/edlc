@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "EDLc Language Sever Protocol implementation"
-# respository = ""
+respository = "git@github.com:LateinCecer/edlc.git"
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
@@ -15,4 +15,4 @@ tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
 tokio-macros = "2.3.0"
 
-edlc_core = { path="../edlc_core" }
+edlc_core = { path="../edlc_core", version="0.1.0" }

@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Adrian Paskert <a.paskert@uni-muenster.de>"]
 license = "Apache-2.0"
-# respository = ""
+respository = "git@github.com:LateinCecer/edlc.git"
 readme = "../README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
@@ -17,4 +17,4 @@ proc-macro = true
 syn = "2.0.61"
 quote = "1.0.36"
 proc-macro2 = "1.0.82"
-edlc_core = { path="../edlc_core" }
+edlc_core = { path="../edlc_core", version="0.1.0" }
