@@ -1,0 +1,28 @@
+[package]
+name = "edlc_codegen_cranelift"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Cranelift codegen backend for the EDL compiler"
+# respository = ""
+readme = "README.md"
+keywords = ["compiler", "edl"]
+categories = ["compilers", "science"]
+
+[dependencies]
+edlc_core = { path="../edlc_core" }
+edlc_layout = { path="../edlc_layout" }
+
+log = "0.4.22"
+cranelift = { version="0.123.0" }
+cranelift-codegen = { version="0.123.0" }
+cranelift-jit = { version= "0.123.0", features = ["memmap2"] }
+cranelift-module = { version="0.123.0" }
+cranelift-native = { version="0.123.0" }
+anyhow = "1.0.99"
+
+
+[dev-dependencies]
+fern = { version= "0.7.1", features=["colored"] }
+humantime = "2.1.0"
+edlc_docs = { path="../edlc_docs" }

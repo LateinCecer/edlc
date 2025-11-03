@@ -1,0 +1,20 @@
+[package]
+name = "edlc_layout"
+description = "derive layouts for EDL types"
+version = "0.1.0"
+edition = "2021"
+authors = ["Adrian Paskert <a.paskert@uni-muenster.de>"]
+license = "Apache-2.0"
+# respository = ""
+readme = "../README.md"
+keywords = ["compiler", "edl"]
+categories = ["compilers", "science"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2.0.61"
+quote = "1.0.36"
+proc-macro2 = "1.0.82"
+edlc_core = { path="../edlc_core" }

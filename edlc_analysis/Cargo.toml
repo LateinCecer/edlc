@@ -1,0 +1,13 @@
+[package]
+name = "edlc_analysis"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Code analysis utils EDL compiler"
+# respository = ""
+readme = "../README.md"
+keywords = ["compiler", "edl"]
+categories = ["compilers", "science"]
+
+[dependencies]
+

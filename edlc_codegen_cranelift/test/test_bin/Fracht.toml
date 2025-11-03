@@ -1,0 +1,8 @@
+[package]
+name = "test-bin"
+description = "test_bin is a test fracht used to test the package compiling system for the EDL compiler"
+authors = ["LateinCecker"]
+version = "0.1.0"
+
+[dependencies]
+test-lib = "0.1.0"

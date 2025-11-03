@@ -1,0 +1,5 @@
+[package]
+name = "test-lib"
+description = "test_lib is a test fracht used to test the library compiling system for the EDL compiler"
+authors = ["LateinCecker"]
+version = "0.1.0"

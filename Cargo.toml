@@ -1,0 +1,11 @@
+
+[workspace]
+resolver = "2"
+members = [
+  "edlc_core",
+  "edlc_codegen_cranelift",
+  "edlc_docs",
+  "edlc_layout",
+  "edlc_lsp",
+  "edlc_analysis",
+]
