@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::ops::Index;
 use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
@@ -36,6 +37,7 @@ use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
+use crate::mir::mir_expr::mir_block_param::MirBlockParam;
 use crate::resolver::ScopeId;
 
 pub mod mir_array_init;
@@ -57,6 +59,8 @@ mod mir_switch;
 mod mir_jump;
 mod mir_esacpe;
 pub mod mir_type_init;
+mod mir_graph;
+pub mod mir_block_param;
 
 pub trait MirTreeWalker<B: Backend> {
     /// Walks through the MIR source tree and performs a specific task on all elements that pass the
@@ -76,6 +80,213 @@ pub trait MirTreeWalker<B: Backend> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct MirExprUid(usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MirExprId {
+    id: usize,
+    pub ty: MirExprVariant,
+}
+
+/// Variants of expressions.
+/// This is necessary, since we flatten MIR expressions into a flat container for efficiency
+/// reasons.
+/// Notice that several of the old expression types are missing; if-expressions, loops, breaks,
+/// continues and early returns.
+/// All of these expressions are effectively de-sugared into control flow graph edges and don't
+/// really exist as a concept in the MIR representation as of
+/// (issue #3)[https://github.com/LateinCecer/edlc/issues/3#issue-3595330650].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MirExprVariant {
+    ArrayInit,
+    As,
+    Call,
+    Literal,
+    Variable,
+    Constant,
+    Assign,
+    Let,
+    Data,
+    Offset,
+    Init,
+    Param,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MirExprContainer {
+    array_inits: Vec<MirArrayInit>,
+    ases: Vec<MirAs>,
+    call: Vec<MirCall>,
+    literals: Vec<MirLiteral>,
+    variables: Vec<MirVariable>,
+    constants: Vec<MirConstant>,
+    assigns: Vec<MirAssign>,
+    lets: Vec<MirLet>,
+    data: Vec<MirData>,
+    offsets: Vec<MirOffset>,
+    type_inits: Vec<MirTypeInit>,
+    block_params: Vec<MirBlockParam>,
+}
+
+
+impl MirExprContainer {
+    pub fn insert_array_init(&mut self, expr: MirArrayInit) -> MirExprId {
+        self.array_inits.push(expr);
+        MirExprId {
+            id: self.array_inits.len() - 1,
+            ty: MirExprVariant::ArrayInit,
+        }
+    }
+
+    pub fn insert_as(&mut self, expr: MirAs) -> MirExprId {
+        self.ases.push(expr);
+        MirExprId {
+            id: self.ases.len() - 1,
+            ty: MirExprVariant::As,
+        }
+    }
+
+    pub fn insert_call(&mut self, expr: MirCall) -> MirExprId {
+        self.call.push(expr);
+        MirExprId {
+            id: self.call.len() - 1,
+            ty: MirExprVariant::Call,
+        }
+    }
+
+    pub fn insert_literal(&mut self, expr: MirLiteral) -> MirExprId {
+        self.literals.push(expr);
+        MirExprId {
+            id: self.literals.len() - 1,
+            ty: MirExprVariant::Literal,
+        }
+    }
+
+    pub fn insert_variable(&mut self, expr: MirVariable) -> MirExprId {
+        self.variables.push(expr);
+        MirExprId {
+            id: self.variables.len() - 1,
+            ty: MirExprVariant::Variable,
+        }
+    }
+
+    pub fn insert_constants(&mut self, expr: MirConstant) -> MirExprId {
+        self.constants.push(expr);
+        MirExprId {
+            id: self.constants.len() - 1,
+            ty: MirExprVariant::Constant,
+        }
+    }
+
+    pub fn insert_assign(&mut self, expr: MirAssign) -> MirExprId {
+        self.assigns.push(expr);
+        MirExprId {
+            id: self.assigns.len() - 1,
+            ty: MirExprVariant::Assign,
+        }
+    }
+
+    pub fn insert_let(&mut self, expr: MirLet) -> MirExprId {
+        self.lets.push(expr);
+        MirExprId {
+            id: self.lets.len() - 1,
+            ty: MirExprVariant::Let,
+        }
+    }
+
+    pub fn insert_data(&mut self, expr: MirData) -> MirExprId {
+        self.data.push(expr);
+        MirExprId {
+            id: self.data.len() - 1,
+            ty: MirExprVariant::Data,
+        }
+    }
+
+    pub fn insert_offset(&mut self, expr: MirOffset) -> MirExprId {
+        self.offsets.push(expr);
+        MirExprId {
+            id: self.offsets.len() - 1,
+            ty: MirExprVariant::Offset,
+        }
+    }
+
+    pub fn insert_type_init(&mut self, expr: MirTypeInit) -> MirExprId {
+        self.type_inits.push(expr);
+        MirExprId {
+            id: self.type_inits.len() - 1,
+            ty: MirExprVariant::Init,
+        }
+    }
+
+    pub fn insert_block_param(&mut self, expr: MirBlockParam) -> MirExprId {
+        self.block_params.push(expr);
+        MirExprId {
+            id: self.block_params.len() - 1,
+            ty: MirExprVariant::Param,
+        }
+    }
+
+    pub fn insert_empty(
+        &mut self,
+        reg: &MirTypeRegistry,
+        src: ModuleSrc,
+        pos: SrcPos,
+        scope: ScopeId
+    ) -> MirExprId {
+        self.insert_type_init(MirTypeInit {
+            ty: reg.empty(),
+            id: MirUid::default(),
+            src,
+            pos,
+            scope,
+            inits: vec![],
+        })
+    }
+
+    pub fn get_type(&self, expr: MirExprId, reg: &MirTypeRegistry) -> MirTypeId {
+        match expr.ty {
+            MirExprVariant::ArrayInit => {
+                self.array_inits[expr.id].ty
+            }
+            MirExprVariant::As => {
+                self.ases[expr.id].ty
+            }
+            MirExprVariant::Call => {
+                self.call[expr.id].ret
+            }
+            MirExprVariant::Literal => {
+                self.literals[expr.id].ty
+            }
+            MirExprVariant::Variable => {
+                self.variables[expr.id].ty
+            }
+            MirExprVariant::Constant => {
+                self.constants[expr.id].ty
+            }
+            MirExprVariant::Assign => {
+                reg.empty()
+            }
+            MirExprVariant::Let => {
+                reg.empty()
+            }
+            MirExprVariant::Data => {
+                self.data[expr.id].ty
+            }
+            MirExprVariant::Offset => {
+                self.offsets[expr.id].ty
+            }
+            MirExprVariant::Init => {
+                self.type_inits[expr.id].ty
+            }
+            MirExprVariant::Param => {
+                self.block_params[expr.id].ty
+            }
+        }
+    }
+}
+
+trait MirElement {
+    fn variant() -> MirExprVariant;
+}
 
 
 #[derive(Debug, Clone, PartialEq)]
