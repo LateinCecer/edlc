@@ -18,7 +18,7 @@ use crate::mir::mir_type::MirTypeId;
 
 /// A block parameter is a temporary MIR value that is taken from the block parameters of a block.
 #[derive(Clone, Debug, PartialEq)]
-pub struct MirBlockParam {
+pub struct MirTempVarUsage {
     pub ty: MirTypeId,
     pub block: MirBlockRef,
     pub var: MirTempVar,

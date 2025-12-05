@@ -37,7 +37,7 @@ use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_expr::mir_block_param::MirBlockParam;
+use crate::mir::mir_expr::mir_temp_var::MirTempVarUsage;
 use crate::resolver::ScopeId;
 
 pub mod mir_array_init;
@@ -60,7 +60,10 @@ mod mir_jump;
 mod mir_esacpe;
 pub mod mir_type_init;
 mod mir_graph;
-pub mod mir_block_param;
+pub mod mir_temp_var;
+mod mir_clone;
+
+pub use mir_graph::*;
 
 pub trait MirTreeWalker<B: Backend> {
     /// Walks through the MIR source tree and performs a specific task on all elements that pass the
@@ -124,11 +127,26 @@ pub struct MirExprContainer {
     data: Vec<MirData>,
     offsets: Vec<MirOffset>,
     type_inits: Vec<MirTypeInit>,
-    block_params: Vec<MirBlockParam>,
+    block_params: Vec<MirTempVarUsage>,
 }
 
 
 impl MirExprContainer {
+    /// Collects all values that are used by the expression.
+    pub fn collect_vars(&self, expr: MirExprId) -> Vec<MirTempVar> {
+        todo!()
+    }
+
+    pub fn uses_var(&self, expr: MirExprId, val: &MirTempVar) -> bool {
+        todo!()
+    }
+
+    /// Replaces a value in the expression with another value.
+    /// This is used mainly for splitting non-SSA values into SSA values.
+    pub fn replace_var(&mut self, expr: MirExprId, var: &MirTempVar, repl: &MirTempVar) {
+        todo!()
+    }
+
     pub fn insert_array_init(&mut self, expr: MirArrayInit) -> MirExprId {
         self.array_inits.push(expr);
         MirExprId {
@@ -217,7 +235,7 @@ impl MirExprContainer {
         }
     }
 
-    pub fn insert_block_param(&mut self, expr: MirBlockParam) -> MirExprId {
+    pub fn insert_block_param(&mut self, expr: MirTempVarUsage) -> MirExprId {
         self.block_params.push(expr);
         MirExprId {
             id: self.block_params.len() - 1,

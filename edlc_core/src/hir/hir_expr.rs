@@ -35,7 +35,7 @@ use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::hir::{HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_expr::{MirBlockRef, MirExpr, MirFlowGraph, MirTempVar};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::hir_loop::HirLoop;
@@ -605,4 +605,29 @@ pub trait HirExpr: ResolveNames + HirTreeWalker {
     fn is_comptime(&self) -> bool;
 
     fn as_const_value(&self, phase: &mut HirPhase) -> Result<EdlConstValue, HirError>;
+}
+
+
+/// Encodes the writing state of HIR->MIR code translation.
+pub struct MirGraph<'a, 'graph, B: Backend> {
+    pub hir_phase: &'a mut HirPhase,
+    pub mir_phase: &'a mut MirPhase,
+    pub mir_funcs: &'a mut MirFuncRegistry<B>,
+    pub graph: &'graph mut MirFlowGraph,
+    pub current_block: MirBlockRef,
+}
+
+pub trait MakeGraph {
+    /// Writes an expression to the specified flow graph.
+    /// The return value of the expression will be stored to a temporary variable that is then
+    /// returned as a temporary variable by this function.
+    ///
+    /// # Note on Temporary Variables
+    ///
+    /// Temporary variables can result in the generation of actual variables during codegen, however,
+    /// in many cases this is not actually the case.
+    /// The compiler will analyse the usage of the generated variable and temporary variables without
+    /// any reads will not see the result of the expression evaluation stored _at all_.
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTempVar, HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
 }
