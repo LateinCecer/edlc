@@ -15,7 +15,7 @@
  */
 use std::fmt::{Display, Formatter};
 use crate::core::index_map::IndexMap;
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_comptime::MirComptimeEval;
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Debug, Hash)]
 pub struct ComptimeValueId(usize);
@@ -28,7 +28,7 @@ impl Display for ComptimeValueId {
 
 #[derive(Default)]
 pub struct ComptimeValueMapper {
-    values: IndexMap<Option<MirExpr>>,
+    values: IndexMap<Option<MirComptimeEval>>,
 
 }
 
@@ -40,14 +40,14 @@ impl ComptimeValueMapper {
 
     /// Gets the comptime value if it is present.
     /// If it is not present, [None] is returned.
-    pub fn get(&self, id: ComptimeValueId) -> Option<&MirExpr> {
+    pub fn get(&self, id: ComptimeValueId) -> Option<&MirComptimeEval> {
         self.values.get(id.0)
             .and_then(|val| val.as_ref())
     }
 
     /// Sets the **constant** value of a comptime value reference.
     /// If you use this function, **make sure** that the provided [value] is constant!
-    pub fn set(&mut self, id: ComptimeValueId, value: MirExpr) {
+    pub fn set(&mut self, id: ComptimeValueId, value: MirComptimeEval) {
         self.values.view_mut(id.0).set(Some(value));
     }
 }

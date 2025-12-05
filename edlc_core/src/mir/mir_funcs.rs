@@ -15,32 +15,28 @@
  */
 mod comptime_value;
 
+use crate::core::edl_error::EdlError;
+use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTypeId, EdlTypeRegistry, FmtType};
+use crate::core::index_map::IndexMap;
+use crate::core::EdlVarId;
+use crate::file::ModuleSrc;
+use crate::hir::hir_fn::HirFn;
+use crate::hir::hir_impl::HirImpl;
+use crate::hir::translation::HirTranslationError;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
+use crate::lexer::SrcPos;
+use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::MirFlowGraph;
+pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
+use crate::mir::mir_let::MirLet;
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
+use crate::mir::{MirError, MirPhase, MirUid};
+use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use log::debug;
-use crate::core::edl_error::EdlError;
-use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTypeId, EdlTypeRegistry, FmtType};
-use crate::core::EdlVarId;
-use crate::core::index_map::IndexMap;
-use crate::file::ModuleSrc;
-use crate::hir::hir_fn::HirFn;
-use crate::hir::hir_impl::HirImpl;
-use crate::hir::HirPhase;
-use crate::hir::translation::HirTranslationError;
-use crate::issue::{SrcError, TypeArgument, TypeArguments};
-use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_block::MirBlock;
-use crate::mir::mir_expr::MirTreeWalker;
-use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
-use crate::mir::{MirError, MirPhase, MirUid};
-use crate::mir::mir_expr::mir_assign::VarFinder;
-use crate::mir::mir_expr::MirExpr;
-pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueMapper, ComptimeValueId};
-use crate::mir::mir_let::MirLet;
-use crate::resolver::ScopeId;
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
 pub const INTR_SUB_USIZE: &str = "sub_usize";
@@ -781,34 +777,6 @@ pub struct UnifiedComptimeParam {
     pub value: Vec<u8>,
 }
 
-impl MirComptimeParam {
-    pub fn generate_let_expr<B: Backend>(
-        &self,
-        sig: &MirFnSignature,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &MirFuncRegistry<B>,
-    ) -> Result<MirLet, MirError<B>> {
-        let value = mir_funcs.comptime_mapper.get(self.value)
-            .ok_or(MirError::ComptimeValueUnavailable(self.value))?;
-
-        Ok(MirLet {
-            pos: *value.get_pos(),
-            src: value.get_src().clone(),
-            global: false,
-            scope: *value.get_scope(),
-            ty: value.get_type(mir_funcs, mir_phase),
-            id: mir_phase.new_id(),
-            mutable: sig.comptime_params[self.comptime_index].mutable,
-            var_id: sig.comptime_params[self.comptime_index].var_id,
-            val: Box::new(value.clone()),
-        })
-    }
-
-    pub fn get_pos<'a, B: Backend>(&self, mir_funcs: &'a MirFuncRegistry<B>) -> Option<&'a SrcPos> {
-        mir_funcs.comptime_mapper.get(self.value)
-            .map(|val| val.get_pos())
-    }
-}
 
 impl PartialEq for MirComptimeParam {
     fn eq(&self, other: &MirComptimeParam) -> bool {
@@ -922,7 +890,7 @@ pub struct MirFnParam {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFn {
     pub signature: MirFnSignature,
-    pub body: MirBlock,
+    pub body: MirFlowGraph,
     pub comptime_params: ComptimeParams,
 
     pub mir_id: Option<MirFuncId>,
@@ -962,7 +930,7 @@ impl<B: Backend> From<CompileResult<B>> for Result<(), MirError<B>> {
 
 
 impl MirFn {
-    pub fn new(signature: MirFnSignature, body: MirBlock, params: ComptimeParams, force_comptime: bool) -> Self {
+    pub fn new(signature: MirFnSignature, body: MirFlowGraph, params: ComptimeParams, force_comptime: bool) -> Self {
         MirFn {
             inline: false,
             force_comptime,
@@ -978,16 +946,17 @@ impl MirFn {
     /// Lists all the dependencies to other functions that exist in this MIR function
     /// implementation.
     pub fn dependencies<B: Backend>(&self) -> Result<FunctionDependencies, MirError<B>> {
-        let calls = self.body.walk(
-            &|item| matches!(item, MirExpr::Call(_)),
-            &|item| match item {
-                MirExpr::Call(call) => {
-                    Ok(call.func)
-                },
-                _ => panic!("illegal state")
-            }
-        )?;
-        Ok(FunctionDependencies::Resolved(calls))
+        // let calls = self.body.walk(
+        //     &|item| matches!(item, MirExpr::Call(_)),
+        //     &|item| match item {
+        //         MirExpr::Call(call) => {
+        //             Ok(call.func)
+        //         },
+        //         _ => panic!("illegal state")
+        //     }
+        // )?;
+        // Ok(FunctionDependencies::Resolved(calls))
+        todo!()
     }
 
     /// This function traverses the body of the MIR function and registers all comptime parameter
@@ -1002,14 +971,15 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         backend: &mut B,
     ) -> Result<(), MirError<B>> {
-        let _ = self.body.walk_mut(
-            &mut |item| matches!(item, MirExpr::Call(_)),
-            &mut |item| match item {
-                MirExpr::Call(call) => call.register_comptime_values(mir_phase, backend, phase),
-                _ => panic!("illegal state"),
-            }
-        )?;
-        Ok(())
+        // let _ = self.body.walk_mut(
+        //     &mut |item| matches!(item, MirExpr::Call(_)),
+        //     &mut |item| match item {
+        //         MirExpr::Call(call) => call.register_comptime_values(mir_phase, backend, phase),
+        //         _ => panic!("illegal state"),
+        //     }
+        // )?;
+        // Ok(())
+        todo!()
     }
 
     pub fn optimize<B: Backend>(
@@ -1018,27 +988,30 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         backend: &mut B,
     ) -> Result<(), MirError<B>> {
-        assert!(!mir_phase.is_optimizing, "optimization should not occur for code that \
-        is evaluated during the optimization of other code, as this leads to unsolvable \
-        dependency issues.");
+        // assert!(!mir_phase.is_optimizing, "optimization should not occur for code that \
+        // is evaluated during the optimization of other code, as this leads to unsolvable \
+        // dependency issues.");
+        //
+        // <CompileResult<B> as Into<Result<(), MirError<B>>>>::into(
+        //     self.verify(phase, mir_phase, &backend.func_reg()))?;
+        //
+        // debug!("optimizing function {} @ {}", self.signature.name, self.signature.pos);
+        // self.push_ctx(phase, mir_phase, &backend.func_reg())?;
+        // mir_phase.is_optimizing = true;
+        // self.body.optimize(mir_phase, backend, phase, true)?;
+        // mir_phase.is_optimizing = false;
+        // self.pop_ctx(phase, mir_phase, &backend.func_reg())?;
+        //
+        // self.verify(phase, mir_phase, &backend.func_reg()).into()
 
-        <CompileResult<B> as Into<Result<(), MirError<B>>>>::into(
-            self.verify(phase, mir_phase, &backend.func_reg()))?;
-
-        debug!("optimizing function {} @ {}", self.signature.name, self.signature.pos);
-        self.push_ctx(phase, mir_phase, &backend.func_reg())?;
-        mir_phase.is_optimizing = true;
-        self.body.optimize(mir_phase, backend, phase, true)?;
-        mir_phase.is_optimizing = false;
-        self.pop_ctx(phase, mir_phase, &backend.func_reg())?;
-
-        self.verify(phase, mir_phase, &backend.func_reg()).into()
+        todo!()
     }
 
     /// Checks if the function body defines a specified variable.
     fn defines_var<B: Backend>(&self, id: EdlVarId) -> Result<bool, MirError<B>> {
-        self.body.find_var_definitions().map(|vec| vec.into_iter()
-                .any(|(var, _pos)| var == id))
+        // self.body.find_var_definitions().map(|vec| vec.into_iter()
+        //         .any(|(var, _pos)| var == id))
+        todo!()
     }
 
     fn define_comptime_parameters<B: Backend>(
@@ -1046,40 +1019,42 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         funcs: &MirFuncRegistry<B>
     ) -> CompileResult<B> {
-        assert_eq!(self.comptime_params.params.len(), self.signature.comptime_params.len());
-        for (param_value, param) in self.comptime_params.params.iter().zip(self.signature.comptime_params.iter()) {
-            match self.defines_var(param.var_id) {
-                Ok(true) => {
-                    // is already defined (by a previous pass of this method)
-                    continue;
-                },
-                Ok(false) => (), // is not defined, but definable
-                Err(err) => {
-                    // something went wrong
-                    return CompileResult::Err(err);
-                }
-            }
+        // assert_eq!(self.comptime_params.params.len(), self.signature.comptime_params.len());
+        // for (param_value, param) in self.comptime_params.params.iter().zip(self.signature.comptime_params.iter()) {
+        //     match self.defines_var(param.var_id) {
+        //         Ok(true) => {
+        //             // is already defined (by a previous pass of this method)
+        //             continue;
+        //         },
+        //         Ok(false) => (), // is not defined, but definable
+        //         Err(err) => {
+        //             // something went wrong
+        //             return CompileResult::Err(err);
+        //         }
+        //     }
+        //
+        //     // since the body does not define the comptime parameter yet, request it from the
+        //     // function registry and insert an artificial let-expression
+        //     if funcs.comptime_mapper.get(param_value.value).is_some() {
+        //         let let_expr = match param_value.generate_let_expr(
+        //             &self.signature,
+        //             mir_phase,
+        //             funcs,
+        //         ) {
+        //             Ok(expr) => expr,
+        //             Err(err) => {
+        //                 return CompileResult::Err(err);
+        //             },
+        //         };
+        //         debug!("  #COMPTIME inserting function parameter {:?} into function body", let_expr.var_id);
+        //         self.body.content.insert(0, let_expr.into());
+        //     } else {
+        //         return CompileResult::Deferred(param_value.value);
+        //     }
+        // }
+        // CompileResult::Ok
 
-            // since the body does not define the comptime parameter yet, request it from the
-            // function registry and insert an artificial let-expression
-            if funcs.comptime_mapper.get(param_value.value).is_some() {
-                let let_expr = match param_value.generate_let_expr(
-                    &self.signature,
-                    mir_phase,
-                    funcs,
-                ) {
-                    Ok(expr) => expr,
-                    Err(err) => {
-                        return CompileResult::Err(err);
-                    },
-                };
-                debug!("  #COMPTIME inserting function parameter {:?} into function body", let_expr.var_id);
-                self.body.content.insert(0, let_expr.into());
-            } else {
-                return CompileResult::Deferred(param_value.value);
-            }
-        }
-        CompileResult::Ok
+        todo!()
     }
 
     pub fn verify<B: Backend>(
@@ -1088,33 +1063,35 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         funcs: &MirFuncRegistry<B>,
     ) -> CompileResult<B> {
-        // look for comptime parameter values
-        match self.define_comptime_parameters(mir_phase, funcs) {
-            CompileResult::Ok => (),
-            e => {
-                return e;
-            }
-        }
-        // push context
-        if let Err(err) = self.push_ctx(phase, mir_phase, funcs) {
-            return CompileResult::Err(err);
-        }
-        // enforce comptime were necessary
-        if self.force_comptime {
-            assert!(self.signature.comptime || self.signature.comptime_only);
-            self.body.comptime = true;
-        } else if self.signature.comptime && !self.signature.comptime_only {
-            assert!(!self.body.comptime);
-        }
-        // verify body
-        if let Err(err) = self.body.verify(mir_phase, funcs, phase, true) {
-            return CompileResult::Err(err);
-        }
-        // restore initial context
-        if let Err(err) = self.pop_ctx(phase, mir_phase, funcs) {
-            return CompileResult::Err(err);
-        }
-        CompileResult::Ok
+        // // look for comptime parameter values
+        // match self.define_comptime_parameters(mir_phase, funcs) {
+        //     CompileResult::Ok => (),
+        //     e => {
+        //         return e;
+        //     }
+        // }
+        // // push context
+        // if let Err(err) = self.push_ctx(phase, mir_phase, funcs) {
+        //     return CompileResult::Err(err);
+        // }
+        // // enforce comptime were necessary
+        // if self.force_comptime {
+        //     assert!(self.signature.comptime || self.signature.comptime_only);
+        //     self.body.comptime = true;
+        // } else if self.signature.comptime && !self.signature.comptime_only {
+        //     assert!(!self.body.comptime);
+        // }
+        // // verify body
+        // if let Err(err) = self.body.verify(mir_phase, funcs, phase, true) {
+        //     return CompileResult::Err(err);
+        // }
+        // // restore initial context
+        // if let Err(err) = self.pop_ctx(phase, mir_phase, funcs) {
+        //     return CompileResult::Err(err);
+        // }
+        // CompileResult::Ok
+
+        todo!()
     }
 
     fn push_ctx<B: Backend>(
@@ -1123,20 +1100,22 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         funcs: &MirFuncRegistry<B>,
     ) -> Result<(), MirError<B>> {
-        mir_phase.push_layer();
+        // mir_phase.push_layer();
         // if the function is a maybe function, communicate this to the function body for
         // verification and optimization
-        if self.signature.comptime && !self.signature.comptime_only {
-            let edl_id = funcs.get_edl_id(self.mir_id.unwrap()).unwrap();
-            mir_phase.ctx
-                .push()
-                .set_maybe_comptime(edl_id)?;
-        }
+        // if self.signature.comptime && !self.signature.comptime_only {
+        //     let edl_id = funcs.get_edl_id(self.mir_id.unwrap()).unwrap();
+        //     mir_phase.ctx
+        //         .push()
+        //         .set_maybe_comptime(edl_id)?;
+        // }
+        //
+        // for param in self.signature.params.iter() {
+        //     mir_phase.insert_var(param.var_id, param.ty, false);
+        // }
+        // Ok(())
 
-        for param in self.signature.params.iter() {
-            mir_phase.insert_var(param.var_id, param.ty, false);
-        }
-        Ok(())
+        todo!()
     }
 
     fn pop_ctx<B: Backend>(
@@ -1145,11 +1124,13 @@ impl MirFn {
         mir_phase: &mut MirPhase,
         _backend: &MirFuncRegistry<B>,
     ) -> Result<(), MirError<B>> {
-        if self.signature.comptime && !self.signature.comptime_only {
-            mir_phase.ctx.pop()?;
-        }
-        mir_phase.pop_layer();
-        Ok(())
+        // if self.signature.comptime && !self.signature.comptime_only {
+        //     mir_phase.ctx.pop()?;
+        // }
+        // mir_phase.pop_layer();
+        // Ok(())
+
+        todo!()
     }
 }
 

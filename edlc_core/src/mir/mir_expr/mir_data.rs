@@ -14,15 +14,14 @@
  *    limitations under the License.
  */
 
-use std::mem;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_type::MirTypeId;
+use crate::mir::{MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
+use std::mem;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirData {
@@ -32,6 +31,18 @@ pub struct MirData {
     pub id: MirUid,
     pub ty: MirTypeId,
     pub value: Vec<u8>,
+}
+
+impl MirGraphElement for MirData {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
+    }
+
+    fn uses_var(&self, _val: &MirValue) -> bool {
+        false
+    }
+
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
 }
 
 impl MirData {
@@ -47,18 +58,3 @@ impl MirData {
     }
 }
 
-impl From<MirData> for MirExpr {
-    fn from(value: MirData) -> Self {
-        MirExpr::Data(value)
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirData {
-    fn is_const_expr(
-        &self,
-        _phase: &MirPhase,
-        _funcs: &MirFuncRegistry<B>
-    ) -> Result<bool, MirError<B>> {
-        Ok(true)
-    }
-}

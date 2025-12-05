@@ -14,15 +14,11 @@
  *    limitations under the License.
  */
 
-use log::info;
 use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExpr, MirTreeWalker};
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_type::MirTypeId;
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
 
@@ -33,56 +29,22 @@ pub struct MirAs {
     pub src: ModuleSrc,
     pub id: MirUid,
     pub ty: MirTypeId,
-    pub val: Box<MirExpr>,
+    pub val: MirValue,
 }
 
-impl From<MirAs> for MirExpr {
-    fn from(value: MirAs) -> Self {
-        MirExpr::As(value)
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirAs {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        self.val.is_const_expr(phase, funcs)
-    }
-}
-
-impl MirAs {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        self.val.verify(phase, funcs, hir_phase)
+impl MirGraphElement for MirAs {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![self.val]
     }
 
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        info!("Optimizing MIR as expression...");
-        self.val.optimize(phase, backend, hir_phase)
+    fn uses_var(&self, val: &MirValue) -> bool {
+        &self.val == val
+    }
+
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        if &self.val == var {
+            self.val = *repl;
+        }
     }
 }
 
-impl<B: Backend> MirTreeWalker<B> for MirAs {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk(filter, task)
-    }
-
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk_mut(filter, task)
-    }
-}

@@ -35,7 +35,7 @@ use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::hir::{HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{MirBlockRef, MirExpr, MirFlowGraph, MirTempVar};
+use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::hir_loop::HirLoop;
@@ -628,6 +628,6 @@ pub trait MakeGraph {
     /// in many cases this is not actually the case.
     /// The compiler will analyse the usage of the generated variable and temporary variables without
     /// any reads will not see the result of the expression evaluation stored _at all_.
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTempVar, HirTranslationError>
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirValue, HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
 }

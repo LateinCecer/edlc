@@ -22,7 +22,7 @@ use std::ops::AddAssign;
 use log::debug;
 use crate::core::EdlVarId;
 use crate::hir::HirPhase;
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use crate::mir::{MirError, MirPhase};
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
 
@@ -42,8 +42,20 @@ pub trait Backend: Sized {
     type Addr;
     type FuncGen<'a>;
     
-    fn eval_const_expr(&mut self, element: MirExpr, phase: &mut MirPhase, hir_phase: &mut HirPhase) -> Result<MirExpr, MirError<Self>>;
-    fn eval_const_bytes(&mut self, element: MirExpr, phase: &mut MirPhase, hir_phase: &mut HirPhase) -> Result<Vec<u8>, MirError<Self>>;
+    fn eval_const_expr(
+        &mut self,
+        element: MirValue,
+        graph: &mut MirFlowGraph,
+        phase: &mut MirPhase,
+        hir_phase: &mut HirPhase,
+    ) -> Result<MirExprId, MirError<Self>>;
+    fn eval_const_bytes(
+        &mut self,
+        element: MirValue,
+        graph: &MirFlowGraph,
+        phase: &mut MirPhase,
+        hir_phase: &mut HirPhase,
+    ) -> Result<Vec<u8>, MirError<Self>>;
 
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>>;
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;

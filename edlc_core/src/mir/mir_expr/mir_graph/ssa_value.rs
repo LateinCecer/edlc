@@ -1,11 +1,11 @@
-use crate::mir::mir_expr::{DefPoint, MirTempVar};
+use crate::mir::mir_expr::{DefPoint, MirValue};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SsaValue(usize);
 
 struct SsaData {
-    var: MirTempVar,
+    var: MirValue,
     definition: DefPoint,
 }
 
@@ -22,7 +22,7 @@ impl SsaCache {
     }
 
     /// Gets or inserts a new SSA value derived from a temporary variable and a definition point.
-    pub fn insert(&mut self, var: MirTempVar, def_point: DefPoint) -> SsaValue {
+    pub fn insert(&mut self, var: MirValue, def_point: DefPoint) -> SsaValue {
         let present = self.get(&var, &def_point);
         if let Some(present) = present {
             present
@@ -37,12 +37,12 @@ impl SsaCache {
     }
 
     /// Splits all values that are not in SSA form into SSA values.
-    pub fn split_vars<NewVar: FnMut(DefPoint, MirTempVar) -> MirTempVar>(
+    pub fn split_vars<NewVar: FnMut(DefPoint, MirValue) -> MirValue>(
         &mut self,
         mut create_var: NewVar
     ) {
         // find SSA value definitions that share the same variable
-        let mut duplicates = HashMap::<MirTempVar, Vec<usize>>::new();
+        let mut duplicates = HashMap::<MirValue, Vec<usize>>::new();
         for (index, data) in self.data.iter().enumerate() {
             duplicates
                 .entry(data.var)
@@ -65,7 +65,7 @@ impl SsaCache {
         }
     }
 
-    pub fn get(&self, var: &MirTempVar, def_point: &DefPoint) -> Option<SsaValue> {
+    pub fn get(&self, var: &MirValue, def_point: &DefPoint) -> Option<SsaValue> {
         self.data
             .iter()
             .enumerate()

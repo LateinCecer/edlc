@@ -16,14 +16,10 @@
 
 use crate::core::edl_type::EdlConstId;
 use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
-use crate::mir::{MirError, MirUid};
-use crate::mir::MirPhase;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_comptime::MirComptimeEval;
 use crate::mir::mir_type::MirTypeId;
-use crate::prelude::mir_funcs::MirFuncRegistry;
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
 
@@ -35,27 +31,5 @@ pub struct MirConstDef {
     pub id: MirUid,
     pub const_id: EdlConstId,
     pub ty: MirTypeId,
-    pub val: Box<MirExpr>,
-}
-
-impl MirConstDef {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        regs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        let val_ty = self.val.get_type(regs, phase);
-        if val_ty != self.ty {
-            return Err(MirError::TypeMismatch {
-                exp: self.ty,
-                got: val_ty,
-            });
-        }
-
-        phase.ctx_mut().push().set_comptime(self.pos)?;
-        self.val.verify(phase, regs, hir_phase)?;
-        phase.ctx_mut().pop()?;
-        Ok(())
-    }
+    pub val: MirComptimeEval,
 }

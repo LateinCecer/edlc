@@ -16,10 +16,6 @@
 
 use crate::mir::mir_const::MirConstDef;
 use crate::mir::mir_let::MirLet;
-use crate::mir::{MirError, MirPhase};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::prelude::HirPhase;
 
 #[derive(Debug, Default)]
 pub struct MirModule {
@@ -40,21 +36,6 @@ pub enum MirItem {
     Impl,
     Submod,
     Use
-}
-
-impl MirItem {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-        regs: &MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        match self {
-            Self::Let(item) => item.verify(phase, regs, hir_phase),
-            Self::Const(item) => item.verify(phase, regs, hir_phase),
-            _ => Ok(()),
-        }
-    }
 }
 
 impl From<MirLet> for MirItem {

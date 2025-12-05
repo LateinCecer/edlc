@@ -26,8 +26,6 @@ use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_variable::BoundsValue;
-use crate::mir::mir_expr::MirExpr;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::HirTreeWalker;

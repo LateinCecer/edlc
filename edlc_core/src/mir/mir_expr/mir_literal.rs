@@ -15,11 +15,9 @@
  */
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_type::MirTypeId;
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
 
@@ -33,10 +31,16 @@ pub struct MirLiteral {
     pub value: MirLiteralValue,
 }
 
-impl From<MirLiteral> for MirExpr {
-    fn from(value: MirLiteral) -> Self {
-        MirExpr::Literal(value)
+impl MirGraphElement for MirLiteral {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
     }
+
+    fn uses_var(&self, val: &MirValue) -> bool {
+        false
+    }
+
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
 }
 
 
@@ -70,8 +74,3 @@ impl MirLiteralValue {
     }
 }
 
-impl<B: Backend> IsConstExpr<B> for MirLiteral {
-    fn is_const_expr(&self, _phase: &MirPhase, _funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        Ok(true)
-    }
-}
