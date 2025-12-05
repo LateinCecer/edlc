@@ -21,17 +21,17 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_condition::MirCondition;
-use crate::mir::mir_expr::mir_if::MirIf;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::{MirError, MirPhase};
+use crate::mir::mir_expr::MirValue;
 use crate::prelude::{report_infer_error, HirErrorType};
 use crate::resolver::ScopeId;
 
@@ -697,121 +697,23 @@ impl HirExpr for HirIf {
     }
 }
 
-impl IntoMir for HirCondition {
-    type MirRepr = MirCondition;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirCondition {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        match self {
-            Self::Plane(val, _) => {
-                let val = val.mir_repr(phase, mir_phase, mir_funcs)?;
-                if val.get_type(mir_funcs, mir_phase) != mir_phase.types.bool() {
-                    return Err(HirTranslationError::MirError(
-                        *val.get_pos(),
-                        format!("conditions must be a bool; {:?} != bool",
-                                val.get_type(mir_funcs, mir_phase)),
-                    ));
-                }
-                Ok(MirCondition::Plane(Box::new(val)))
-            }
-            Self::Match {} => Ok(MirCondition::Match {}),
-        }
+        todo!()
     }
 }
 
-impl IntoMir for HirIf {
-    type MirRepr = MirIf;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirIf {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let mut if_else_blocks = vec![];
-
-        let return_ty = &self.info.as_ref().unwrap().finalized_type;
-        let EdlMaybeType::Fixed(return_ty) = return_ty else {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: return_ty.clone(),
-                pos: self.pos,
-            });
-        };
-        if !return_ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: EdlMaybeType::Fixed(return_ty.clone()),
-                pos: self.pos,
-            });
-        }
-
-        let ty = mir_phase.types.mir_id(&return_ty, &phase.types)?;
-
-        // fill blocks
-        for (cond, block) in self.if_else_blocks.iter() {
-            let cond = cond.mir_repr(phase, mir_phase, mir_funcs)?;
-            let block = block.mir_repr(phase, mir_phase, mir_funcs)?;
-
-            if cond.mir_type_id(mir_funcs, mir_phase) != mir_phase.types.bool() {
-                return Err(HirTranslationError::MirError(
-                    *cond.pos(),
-                    format!("conditions must be a bool; {:?} != bool",
-                            cond.mir_type_id(mir_funcs, mir_phase)),
-                ));
-            }
-            if !block.terminates(&mir_phase.types).map_err(|err: MirError<B>| HirTranslationError::MirError(
-                block.pos,
-                format!("{err}"),
-            ))? && block.ty != ty {
-                return Err(HirTranslationError::MirError(
-                    block.pos,
-                    format!("else-if chain type mismatch: block has type {:?} but the type of the \
-                    entire structure is suppose to be {:?}", block.ty, ty),
-                ));
-            }
-
-            if_else_blocks.push((cond, block));
-        }
-        // type check and return final else block
-        let else_block = if let Some(block) = self.else_block.as_ref() {
-            let block = block.mir_repr(phase, mir_phase, mir_funcs)?;
-            if !block.terminates(&mir_phase.types).map_err(|err: MirError<B>| HirTranslationError::MirError(
-                block.pos,
-                format!("{err}"),
-            ))? && block.ty != ty {
-                return Err(HirTranslationError::MirError(
-                    block.pos,
-                    format!("else-if chain type mismatch: block has type {:?} but the type of the \
-                    entire structure is suppose to be {:?}", block.ty, ty),
-                ));
-            }
-            Some(block)
-        } else {
-            None
-        };
-
-        Ok(MirIf {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            ty,
-            if_else_blocks,
-            else_block,
-        })
+        todo!()
     }
 }
-
-
 
 
 #[cfg(test)]

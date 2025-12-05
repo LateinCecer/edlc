@@ -13,24 +13,23 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::error::Error;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type::EdlMaybeType;
-use crate::core::edl_value::{EdlConstValue};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_break::MirBreak;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
+use std::error::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompInfo {
@@ -286,38 +285,14 @@ impl EdlFnArgument for HirBreak {
     }
 }
 
-impl IntoMir for HirBreak {
-    type MirRepr = MirBreak;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirBreak {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let loop_id = *self.loop_id.as_ref()
-            .expect("tried to lower `break` statement to MIR level before the statement \
-            was assigned to a loop");
-        let value = if let Some(val) = self.val.as_ref() {
-            Some(Box::new(val.mir_repr(phase, mir_phase, mir_funcs)?))
-        } else {
-            None
-        };
-
-        Ok(MirBreak {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            loop_id,
-            value,
-        })
+        todo!()
     }
 }
-
 
 
 #[cfg(test)]

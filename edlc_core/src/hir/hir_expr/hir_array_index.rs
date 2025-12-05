@@ -19,15 +19,15 @@ use crate::core::edl_type::{EdlMaybeType, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::hir_expr::HirTreeWalker;
 use crate::resolver::ScopeId;
 use std::error::Error;
@@ -379,40 +379,11 @@ impl EdlFnArgument for HirArrayIndex {
     }
 }
 
-impl IntoMir for HirArrayIndex {
-    type MirRepr = MirExpr;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let lhs_expr = self.lhs.mir_repr(phase, mir_phase, mir_funcs)?;
-        // in this case, we can simply create an offset into lhs
-        let mut offset = lhs_expr.into_offset(mir_phase, mir_funcs)
-            .map_err(|err| HirTranslationError::MirError(
-                self.pos,
-                err.to_string(),
-            ))?;
-        let ty = self.get_type(phase)?;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty,
-                pos: self.pos,
-            });
-        }
-        // let EdlMaybeType::Fixed(ty) = ty else { panic!() };
-        // let ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-
-        // create runtime offset
-        offset.add_array_index(
-            self.pos,
-            BoundsValue::Runtime(self.index.mir_repr(phase, mir_phase, mir_funcs)?),
-            mir_phase,
-            mir_funcs,
-        ).map_err(|err| HirTranslationError::MirError(self.pos, err.to_string()))?;
-        Ok(offset.into())
+impl MakeGraph for HirArrayIndex {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }

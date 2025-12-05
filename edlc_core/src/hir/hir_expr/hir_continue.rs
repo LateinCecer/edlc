@@ -13,24 +13,23 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::error::Error;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_continue::MirContinue;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
-use crate::prelude::HirErrorType;
 use crate::prelude::type_analysis::NodeId;
+use crate::prelude::HirErrorType;
 use crate::resolver::ScopeId;
+use std::error::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompInfo {
@@ -184,30 +183,12 @@ impl EdlFnArgument for HirContinue {
     }
 }
 
-impl IntoMir for HirContinue {
-    type MirRepr = MirContinue;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        _phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirContinue {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let loop_id = self.info
-            .as_ref()
-            .expect("Tried to lower `continue` to MIR before a loop was assigned to it")
-            .loop_id;
-
-        Ok(MirContinue {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            loop_id,
-        })
+        todo!()
     }
 }
 

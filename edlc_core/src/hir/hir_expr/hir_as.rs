@@ -15,24 +15,24 @@
  */
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
+use crate::core::edl_type;
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeRegistry};
 use crate::core::edl_value::EdlConstValue;
-use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::core::type_analysis::*;
+use crate::file::ModuleSrc;
+use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::issue;
+use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::collections::HashSet;
 use std::error::Error;
-use crate::core::edl_type;
-use crate::core::type_analysis::*;
-use crate::file::ModuleSrc;
-use crate::issue;
-use crate::issue::SrcError;
-use crate::mir::mir_expr::mir_as::MirAs;
+
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -305,41 +305,11 @@ impl HirAs {
     }
 }
 
-
-impl IntoMir for HirAs {
-    type MirRepr = MirAs;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirAs {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let EdlMaybeType::Fixed(instance) = &self.target else {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: self.target.clone(),
-                pos: self.pos,
-            });
-        };
-        if !instance.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: self.target.clone(),
-                pos: self.pos,
-            });
-        }
-        let ty = mir_phase.types.mir_id(instance, &phase.types)?;
-
-        let value = Box::new(self.val.mir_repr(phase, mir_phase, mir_funcs)?);
-        Ok(MirAs {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            ty,
-            val: value,
-        })
+        todo!()
     }
 }

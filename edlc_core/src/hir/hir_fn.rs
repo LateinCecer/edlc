@@ -26,12 +26,13 @@ use crate::documentation::{DocCompilerState, DocElement, FuncDoc, FuncParamDoc, 
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
-use crate::hir::hir_expr::{HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::{Context, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
 use crate::mir::mir_type::TMirFnCallInfo;
 use crate::mir::MirPhase;
@@ -419,30 +420,12 @@ impl DocElement for HirFnParam {
     }
 }
 
-impl IntoMir for HirFnParam {
-    type MirRepr = MirFnParam;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError> {
-        let ty = mir_phase.types.mir_id(&self.ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-
-        Ok(MirFnParam {
-            pos: self.pos,
-            name: self.name.clone(),
-            id: mir_phase.new_id(),
-            ty,
-            mutable: self.mutable,
-            comptime: self.comptime,
-            var_id: self.info.ok_or(HirTranslationError::UnresolvedParameterName {
-                pos: self.pos,
-                name: self.name.clone(),
-            })?,
-        })
+impl MakeGraph for HirFnParam {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }
 
@@ -610,9 +593,8 @@ impl HirFn {
         // compiler state, which makes the parameter stack visible in the following contexts:
         let signature = self.signature.mir_repr(
             phase, mir_phase, mir_funcs, param)?;
-        // translate body
-        let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
 
+        let mut ctx = Context::default();
         if !signature.comptime_only {
             // insert comptime parameters as `let` statements at the top of the function body
             // for param in comptime_params.iter() {
@@ -636,13 +618,21 @@ impl HirFn {
                         "comptime parameters are illegal in `comptime` functions");
                 // figure out if this is a `?comptime` function called in a `comptime` context and
                 // make the body of the function `comptime` if this is the case
-                body.comptime = true;
+                // body.comptime = true;
+                ctx = Context::MaybeComptime;
             }
         } else {
             force_comptime = true;
+            ctx = Context::Comptime;
             assert!(comptime_params.is_empty(),
                     "comptime parameters are illegal in `comptime` functions");
         }
+        // translate body
+        // let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
+        let parameters = ();
+        let return_type = ();
+        let mut body = MirFlowGraph::new(parameters, return_type, ctx);
+
         // in `mir_repr` for the signature, the type layer is pushed.
         // make sure that we pop it here
         mir_phase.types.pop_layer();

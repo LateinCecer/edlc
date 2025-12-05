@@ -19,17 +19,18 @@ use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::{edl_type, NumberLiteral};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
+use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
 use std::error::Error;
 use crate::core::type_analysis::*;
+use crate::mir::mir_expr::MirValue;
 use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -322,39 +323,35 @@ impl From<HirLiteral> for HirExpression {
 }
 
 
-impl IntoMir for HirLiteral {
-    type MirRepr = MirLiteral;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError> {
-        match &self.value {
+impl MakeGraph for HirLiteral {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        let val = match &self.value {
             LiteralValue::Bool(val) => Ok(MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
-                id: mir_phase.new_id(),
+                id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Bool(*val),
-                ty: mir_phase.types.bool(),
+                ty: graph.mir_phase.types.bool(),
             }),
             LiteralValue::Str(val) => Ok(MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
-                id: mir_phase.new_id(),
+                id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Str(val.clone()),
-                ty: mir_phase.types.str(),
+                ty: graph.mir_phase.types.str(),
             }),
             LiteralValue::Char(val) => Ok(MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
-                id: mir_phase.new_id(),
+                id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Char(*val),
-                ty: mir_phase.types.char(),
+                ty: graph.mir_phase.types.char(),
             }),
             LiteralValue::Number(num, _) => {
                 let EdlMaybeType::Fixed(ty) = &self.info.as_ref().unwrap().finalized_type else {
@@ -363,24 +360,24 @@ impl IntoMir for HirLiteral {
                 if !ty.is_fully_resolved() {
                     return Err(HirTranslationError::NumberTypeUnresolved { pos: self.pos });
                 }
-                let mir_id = mir_phase.types.mir_id(ty, &phase.types)
+                let mir_id = graph.mir_phase.types.mir_id(ty, &graph.hir_phase.types)
                     .map_err(HirTranslationError::EdlError)?;
 
                 let val = match mir_id {
-                    id if id == mir_phase.types.u8() => MirLiteralValue::U8(num.as_u8()),
-                    id if id == mir_phase.types.u16() => MirLiteralValue::U16(num.as_u16()),
-                    id if id == mir_phase.types.u32() => MirLiteralValue::U32(num.as_u32()),
-                    id if id == mir_phase.types.u64() => MirLiteralValue::U64(num.as_u64()),
-                    id if id == mir_phase.types.u128() => MirLiteralValue::U128(num.as_u128()),
-                    id if id == mir_phase.types.usize() => MirLiteralValue::Usize(num.as_usize()),
-                    id if id == mir_phase.types.i8() => MirLiteralValue::I8(num.as_i8()),
-                    id if id == mir_phase.types.i16() => MirLiteralValue::I16(num.as_i16()),
-                    id if id == mir_phase.types.i32() => MirLiteralValue::I32(num.as_i32()),
-                    id if id == mir_phase.types.i64() => MirLiteralValue::I64(num.as_i64()),
-                    id if id == mir_phase.types.i128() => MirLiteralValue::I128(num.as_i128()),
-                    id if id == mir_phase.types.isize() => MirLiteralValue::Isize(num.as_isize()),
-                    id if id == mir_phase.types.f32() => MirLiteralValue::F32(num.as_f32()),
-                    id if id == mir_phase.types.f64() => MirLiteralValue::F64(num.as_f64()),
+                    id if id == graph.mir_phase.types.u8() => MirLiteralValue::U8(num.as_u8()),
+                    id if id == graph.mir_phase.types.u16() => MirLiteralValue::U16(num.as_u16()),
+                    id if id == graph.mir_phase.types.u32() => MirLiteralValue::U32(num.as_u32()),
+                    id if id == graph.mir_phase.types.u64() => MirLiteralValue::U64(num.as_u64()),
+                    id if id == graph.mir_phase.types.u128() => MirLiteralValue::U128(num.as_u128()),
+                    id if id == graph.mir_phase.types.usize() => MirLiteralValue::Usize(num.as_usize()),
+                    id if id == graph.mir_phase.types.i8() => MirLiteralValue::I8(num.as_i8()),
+                    id if id == graph.mir_phase.types.i16() => MirLiteralValue::I16(num.as_i16()),
+                    id if id == graph.mir_phase.types.i32() => MirLiteralValue::I32(num.as_i32()),
+                    id if id == graph.mir_phase.types.i64() => MirLiteralValue::I64(num.as_i64()),
+                    id if id == graph.mir_phase.types.i128() => MirLiteralValue::I128(num.as_i128()),
+                    id if id == graph.mir_phase.types.isize() => MirLiteralValue::Isize(num.as_isize()),
+                    id if id == graph.mir_phase.types.f32() => MirLiteralValue::F32(num.as_f32()),
+                    id if id == graph.mir_phase.types.f64() => MirLiteralValue::F64(num.as_f64()),
                     _ => panic!("No such number type"),
                 };
 
@@ -388,11 +385,14 @@ impl IntoMir for HirLiteral {
                     pos: self.pos,
                     scope: self.scope,
                     src: self.src.clone(),
-                    id: mir_phase.new_id(),
+                    id: graph.mir_phase.new_id(),
                     value: val,
                     ty: mir_id,
                 })
             }
-        }
+        }?;
+        let expr_id = graph.graph.expressions.insert_literal(val);
+        graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
+        Ok(())
     }
 }

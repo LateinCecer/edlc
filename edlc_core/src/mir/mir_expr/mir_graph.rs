@@ -398,6 +398,14 @@ impl Seal {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Context {
+    Comptime,
+    MaybeComptime,
+    #[default]
+    Runtime,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 struct Block {
     active_scopes: Vec<Scope>,
@@ -406,6 +414,7 @@ struct Block {
     /// Encodes the block parameter positions for input variables that are already routed into the
     /// block.
     parameters: Vec<MirValue>,
+    ctx: Context,
 }
 
 impl Block {
@@ -651,6 +660,7 @@ pub struct BlockBuilder<'graph> {
     graph: &'graph mut MirFlowGraph,
     parent: Option<MirBlockRef>,
     create_scope: bool,
+    ctx: Context,
 }
 
 impl<'a> BlockBuilder<'a> {
@@ -661,6 +671,11 @@ impl<'a> BlockBuilder<'a> {
 
     pub fn create_scope(mut self) -> Self {
         self.create_scope = true;
+        self
+    }
+
+    pub fn with_context(mut self, ctx: Context) -> Self {
+        self.ctx = ctx;
         self
     }
 
@@ -679,6 +694,7 @@ impl<'a> BlockBuilder<'a> {
             active_scopes,
             parameters: vec![],
             seal: Seal::None,
+            ctx: self.ctx,
         });
         MirBlockRef(self.graph.blocks.len() - 1)
     }
@@ -693,7 +709,7 @@ impl Block {
 }
 
 impl MirFlowGraph {
-    pub fn new<I: Iterator<Item=MirTypeId>>(parameters: I, return_type: MirTypeId) -> Self {
+    pub fn new<I: Iterator<Item=MirTypeId>>(parameters: I, return_type: MirTypeId, ctx: Context) -> Self {
         let mut out = Self {
             blocks: vec![],
             expressions: MirExprContainer::default(),
@@ -717,6 +733,7 @@ impl MirFlowGraph {
             active_scopes: vec![scope],
             parameters,
             seal: Seal::None,
+            ctx,
         });
         out
     }
@@ -831,6 +848,7 @@ impl MirFlowGraph {
             graph: self,
             create_scope: false,
             parent: None,
+            ctx: Context::default(),
         }
     }
 

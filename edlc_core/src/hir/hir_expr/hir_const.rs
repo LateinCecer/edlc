@@ -22,14 +22,15 @@ use crate::core::type_analysis::*;
 use crate::documentation::{ConstDoc, DocCompilerState, DocElement, Modifiers};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirType;
-use crate::hir::hir_expr::HirExpression;
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpression, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, IntoEdl, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_const::MirConstDef;
+use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ResolveError, ScopeId};
@@ -283,39 +284,12 @@ impl HirConst {
     }
 }
 
-impl IntoMir for HirConst {
-    type MirRepr = MirConstDef;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let info = self.finalized_const.as_ref().ok_or(HirTranslationError::HirError(
-            HirError {
-                pos: self.pos,
-                ty: Box::new(HirErrorType::ConstantUnresolved(self.name.clone()))
-            }
-        ))?;
-
-        let ty = mir_phase.types.get_const_type(info.id)
-            .ok_or(HirError {
-                pos: self.pos,
-                ty: Box::new(HirErrorType::EdlError(EdlError::E014(info.id))),
-            })?;
-        let val = self.value.mir_repr(phase, mir_phase, mir_funcs)?;
-
-        Ok(MirConstDef {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            const_id: info.id,
-            ty,
-            val: Box::new(val),
-        })
+impl MakeGraph for HirConst {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }
 

@@ -22,17 +22,17 @@ use crate::core::EdlVarId;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::{HirTypeName, SegmentType};
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
+use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_variable::MirVariable;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
 
@@ -460,66 +460,11 @@ impl EdlFnArgument for HirName {
     }
 }
 
-impl IntoMir for HirName {
-    type MirRepr = MirExpr;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Var(var) => {
-                let var_ty = &self.infer_info.as_ref().unwrap().finalized_type;
-                // phase.vars.adapt_type(*var, &mut var_ty.clone(), &phase.types)
-                //     .map_err(|err| HirError::new_edl(self.pos, err))?;
-
-                if !var_ty.is_fully_resolved() {
-                    return Err(HirTranslationError::TypeNotFullyResolved {
-                        pos: self.pos,
-                        ty: var_ty.clone(),
-                    })
-                }
-                let EdlMaybeType::Fixed(var_ty) = var_ty else {
-                    unreachable!();
-                };
-                let var_ty = mir_phase.types.mir_id(var_ty, &phase.types)
-                    .map_err(HirTranslationError::EdlError)?;
-
-                Ok(MirVariable {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    var: *var,
-                    ty: var_ty,
-                }.into())
-            }
-            NameSource::Const(con) => {
-                let con_ty = con.get_type(&phase.types)
-                    .map_err(|err| HirError::new_edl(self.pos, err))?;
-                let con_instance = phase.types.new_type_instance(con_ty).unwrap();
-                assert!(con_instance.is_fully_resolved());
-                let con_mir = mir_phase.types.mir_id(&con_instance, &phase.types)
-                    .map_err(HirTranslationError::EdlError)?;
-
-                // get constant value
-                let val = mir_phase.types.get_const_value(con)
-                    .ok_or(HirTranslationError::UnknownMirConst {
-                        pos: self.pos, const_value: con.clone() })?;
-
-                Ok(MirConstant {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: con_mir,
-                    value: val,
-                }.into())
-            }
-            NameSource::Function(_) => todo!()
-        }
+impl MakeGraph for HirName {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }

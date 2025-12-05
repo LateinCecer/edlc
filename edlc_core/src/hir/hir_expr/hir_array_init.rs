@@ -25,13 +25,14 @@ use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::{HirContext, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
-use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
+use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::report_infer_error;
@@ -486,70 +487,11 @@ impl EdlFnArgument for HirArrayInit {
     }
 }
 
-impl IntoMir for HirArrayInit {
-    type MirRepr = MirArrayInit;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        // get type
-        let ty = &self.info.as_ref().unwrap().finalized_type;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ty.clone() });
-        }
-        let EdlMaybeType::Fixed(ty) = ty else {
-            panic!();
-        };
-        let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-
-        let element_ty = match &ty.param.params[0] {
-            EdlGenericParamValue::Type(ty) => EdlMaybeType::Fixed(ty.clone()),
-            EdlGenericParamValue::ElicitType => EdlMaybeType::Unknown,
-            _ => panic!("unreachable"),
-        };
-
-        // get element type
-        if !element_ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: element_ty.clone() });
-        }
-        let EdlMaybeType::Fixed(ty) = element_ty.clone() else {
-            panic!();
-        };
-        let element_ty = mir_phase.types.mir_id(&ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-
-        // get elements
-        let init_variant = match &self.variant {
-            HirArrayInitVariant::List(els) => {
-                let mut elements = Vec::new();
-                for element in els.iter() {
-                    elements.push(element.mir_repr(phase, mir_phase, mir_funcs)?);
-                }
-                MirArrayInitVariant::List(elements)
-            }
-            HirArrayInitVariant::Copy { val, len } => {
-                let len = len.as_const_value(phase)?;
-                let len = phase.resolve_generic_const(&len);
-                MirArrayInitVariant::Copy {
-                    val: Box::new(val.mir_repr(phase, mir_phase, mir_funcs)?),
-                    len,
-                }
-            }
-        };
-
-        Ok(MirArrayInit {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            ty: mir_ty,
-            element_ty,
-            elements: init_variant,
-        })
+impl MakeGraph for HirArrayInit {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }

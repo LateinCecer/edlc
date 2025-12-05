@@ -31,7 +31,7 @@ use crate::hir::hir_expr::hir_let::HirLet;
 use crate::hir::hir_expr::hir_literal::HirLiteral;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::hir_return::HirReturn;
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
@@ -219,48 +219,6 @@ impl HirExpression {
     }
 }
 
-impl IntoMir for HirExpression {
-    type MirRepr = MirExpr;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        edl_types: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        match self {
-            HirExpression::ArrayInit(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::ArrayIndex(val) => val.mir_repr(edl_types, mir_phase, mir_funcs),
-            HirExpression::As(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Block(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Call(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Field(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Literal(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Name(val) => val.mir_repr(edl_types, mir_phase, mir_funcs),
-            HirExpression::Assign(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Let(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::If(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Loop(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Break(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Continue(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Return(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            }
-            HirExpression::TypeInit(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-        }
-    }
-}
 
 impl ResolveFn for HirExpression {
     fn resolve_fn(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
@@ -628,6 +586,6 @@ pub trait MakeGraph {
     /// in many cases this is not actually the case.
     /// The compiler will analyse the usage of the generated variable and temporary variables without
     /// any reads will not see the result of the expression evaluation stored _at all_.
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirValue, HirTranslationError>
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
 }

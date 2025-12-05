@@ -149,18 +149,6 @@ impl From<EdlError> for HirTranslationError {
 
 impl Error for HirTranslationError {}
 
-
-pub trait IntoMir {
-    type MirRepr;
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
-}
-
 impl From<HirError> for HirTranslationError {
     fn from(value: HirError) -> Self {
         HirTranslationError::HirError(value)

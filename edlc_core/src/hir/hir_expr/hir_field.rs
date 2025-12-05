@@ -20,8 +20,8 @@ use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInst
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
@@ -34,7 +34,7 @@ use crate::mir::{MirError, MirPhase};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
-
+use crate::mir::mir_expr::MirValue;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -855,36 +855,11 @@ impl EdlFnArgument for HirField {
     }
 }
 
-impl IntoMir for HirField {
-    type MirRepr = MirOffset;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirField {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let ty = self.get_type(phase)?;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty,
-                pos: self.pos,
-            });
-        }
-        let EdlMaybeType::Fixed(ty) = self.get_type(phase)? else { unreachable!() };
-        let ty = mir_phase.types.mir_id(&ty, &phase.types)
-            .map_err(|_| HirTranslationError::UnknownMirType { pos: self.pos, ty: ty.clone() })?;
-
-        let lhs = self.lhs.mir_repr(phase, mir_phase, mir_funcs)?;
-        let layout = mir_phase.types.get_layout(lhs.get_type(mir_funcs, mir_phase)).unwrap();
-        let field_offset = layout.member_offset(&self.name, &mir_phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-        let mut offset = lhs.into_offset(mir_phase, mir_funcs)
-            .map_err(|err: MirError<B>| HirTranslationError::MirError(self.pos, err.to_string()))?;
-        offset.add_const_offset(field_offset, ty);
-        Ok(offset)
+        todo!()
     }
 }

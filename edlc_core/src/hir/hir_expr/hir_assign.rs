@@ -18,8 +18,8 @@ use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
 use crate::issue::SrcError;
@@ -33,6 +33,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
+use crate::mir::mir_expr::MirValue;
 use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,101 +340,11 @@ impl EdlFnArgument for HirAssign {
     }
 }
 
-impl IntoMir for HirAssign {
-    type MirRepr = MirAssign;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        // if self.is_noop(phase) {
-            // if this is a noop, we effectively just execute the RHS of the assign
-            // return self.rhs.mir_repr(phase, mir_phase, mir_funcs);
-        // }
-
-        // check if lhs can be assigned to at all
-        if !self.lhs.can_be_assigned_to(phase)? {
-            let reason = if self.lhs.is_mutable(phase)? {
-                "The expression on the LHS of the assign statement cannot be assigned to. \
-                The assignee must be representable as an offset into a global or local variable, \
-                `mut` and, if the variable is global, only a subset of it can be assigned, not \
-                the entire value. Valid methods of defining an offset into a variable are via \
-                fields (`.field`) or array indices to *native* arrays (`arr[idx]`)".to_string()
-            } else {
-                format!("The LHS of the assign expression `{:?}` cannot be assigned to, because it \
-                is not mutable. Consider making the base variable mutable by inserting a `mut`\
-                in front of the variable name.", self.lhs)
-            };
-
-            phase.report_error(
-                issue::format_type_args!(
-                    format_args!("tried to assign to non-assignable expression!")
-                ),
-                &[
-                    SrcError::Single {
-                        pos: self.lhs.pos().into(),
-                        src: self.src.clone(),
-                        error: issue::format_type_args!(
-                            format_args!("not assignable")
-                        )
-                    }
-                ],
-                Some(issue::format_type_args!(
-                    reason.clone()
-                )),
-            );
-
-            return Err(HirTranslationError::CannotAssignToExpr {
-                pos: self.pos,
-                msg: reason,
-            });
-        }
-
-        // find destination
-        let lhs = self.lhs.mir_repr(phase, mir_phase, mir_funcs)?
-            .into_offset(mir_phase, mir_funcs)
-            .map_err(|_| HirTranslationError::CannotAssignToExpr {
-                pos: self.pos,
-                msg: "The expression cannot be converted into an offset into variable or heap memory".to_string(),
-            })?;
-        if !lhs.is_assignable() {
-            phase.report_error(
-                issue::format_type_args!(
-                    format_args!("tried to assign to immutable variable!")
-                ),
-                &[SrcError::Single {
-                    pos: self.lhs.pos().into(),
-                    src: self.src.clone(),
-                    error: issue::format_type_args!(
-                        format_args!("variable is not assignable")
-                    )
-                }],
-                Some(issue::format_type_args!(
-                    format_args!("Index expression exists, but cannot be assigned to because the value it \
-                    refers to is a temporary, anonymous stack variable. Consider saving the temporary \
-                    value into a variable before assigning.")
-                )),
-            );
-
-            return Err(HirTranslationError::CannotAssignToExpr {
-                pos: self.pos,
-                msg: "Index expression exists, but cannot be assigned to because the value it \
-                refers to is a temporary, anonymous stack variable. Consider saving the temporary \
-                value into a variable before assigning.".to_string(),
-            });
-        }
-        let rhs = self.rhs.mir_repr(phase, mir_phase, mir_funcs)?;
-
-        Ok(MirAssign {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            lhs,
-            rhs: Box::new(rhs),
-        })
+impl MakeGraph for HirAssign {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }

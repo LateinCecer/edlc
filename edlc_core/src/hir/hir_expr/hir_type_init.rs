@@ -18,8 +18,8 @@ use crate::core::edl_type::{EdlMaybeType, EdlType, EdlTypeInitError, EdlTypeInst
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ReportResult, ResolveFn, ResolveNames, ResolveTypes, TypeSource, WithInferer};
 use crate::issue;
 use crate::lexer::SrcPos;
@@ -32,7 +32,7 @@ use crate::prelude::type_analysis::*;
 use crate::resolver::ScopeId;
 use std::error::Error;
 use std::ops::BitAnd;
-
+use crate::mir::mir_expr::MirValue;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -908,138 +908,11 @@ impl EdlFnArgument for HirTypeInit {
     }
 }
 
-impl IntoMir for HirTypeInit {
-    type MirRepr = MirTypeInit;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirTypeInit {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let mut inits = Vec::new();
-        let ty = &self.info.as_ref().unwrap().finalized_type;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ty.clone() });
-        }
-        let EdlMaybeType::Fixed(ty) = ty else {
-            unreachable!();
-        };
-
-        match &self.variant {
-            Variant::StructList { params, .. } => {
-                let mir_ty = mir_phase.types.mir_id(ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for (index, element) in params.iter().enumerate() {
-                    let value = element.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(
-                        &index.to_string(), &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-            Variant::StructNamed { params, .. } => {
-                // get type layout
-                let mir_ty = mir_phase.types.mir_id(ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for NamedParameter { name, value, .. } in params.iter() {
-                    let value = value.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(name, &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-            Variant::EnumList { ty: _, params: _, variant: _ } => {
-                todo!()
-            }
-            Variant::EnumNamed { ty: _, params: _, variant: _ } => {
-                todo!()
-            }
-            Variant::Tuple { params, } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for (index, element) in params.iter().enumerate() {
-                    let value = element.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(&index.to_string(), &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-            Variant::Dict { params, } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for NamedParameter { name, value, .. } in params.iter() {
-                    let value = value.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(name, &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-            Variant::Union { .. } => {
-                todo!()
-            }
-            Variant::Unit { ty: _ } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-        }
+        todo!()
     }
 }

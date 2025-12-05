@@ -24,8 +24,8 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::SegmentType;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ImplSource, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError, SrcRange, TypeArgument, TypeArguments};
@@ -40,7 +40,9 @@ use std::error::Error;
 use log::warn;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
+use crate::mir::mir_expr::MirValue;
 use crate::prelude::report_infer_error;
+
 
 #[derive(Clone, Debug, PartialEq)]
 struct FinalizedTypeInfo {
@@ -1856,142 +1858,14 @@ impl EdlFnArgument for HirFunctionCall {
     }
 }
 
-impl IntoMir for HirFunctionCall {
-    type MirRepr = MirCall;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        func_reg: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        // create function instance
-        let func_instance = self.get_function_instance().unwrap();
-        if !func_instance.is_fully_resolved() {
-            phase.report_error(
-                format_type_args!(
-                    format_args!("function call not fully resolved at the time of codegen")
-                ),
-                &[
-                    SrcError::Single {
-                        pos: self.pos.into(),
-                        src: self.src.clone(),
-                        error: format_type_args!(
-                            format_args!(""),
-                            &func_instance as &dyn FmtType
-                        )
-                    }
-                ],
-                None,
-            );
-            panic!();
-        }
-
-        // find return type
-        let ret_ty = self.get_type(phase)?;
-        if !ret_ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ret_ty });
-        }
-        let EdlMaybeType::Fixed(ret_ty) = ret_ty else {
-            panic!();
-        };
-
-        // translate comptime parameters
-        let caller_uid = mir_phase.new_id();
-        let sig = phase.types.get_fn_signature(func_instance.func)?.clone();
-
-        // format MIR return type
-        let mir_ret = if sig.return_type().ty != edl_type::EDL_NEVER {
-            mir_phase.types.mir_id(&ret_ty, &phase.types)
-                .map_err(HirTranslationError::EdlError)?
-        } else {
-            // make sure that functions that return `never` are actually invoked with the correct
-            // signature
-            mir_phase.types.never()
-        };
-
-        // check if the function call was from a `comptime` context and if the callee is a
-        // hybrid function.
-        // In that case, generate the function as a `comptime` function, instead of as a
-        // true hybrid function.
-        let comptime_call = sig.comptime_only || (self.call_comptime_if_possible && sig.comptime);
-        let mut comptime_params = if !comptime_call && sig.is_hybrid() {
-            ComptimeParams::new(caller_uid)
-        } else{
-            ComptimeParams::empty()
-        };
-
-        let mut args = Vec::new();
-
-        let mut comptime_args = Vec::new();
-        for (i, (arg, param_def)) in self.params
-            .iter()
-            .zip(sig.params.iter())
-            .enumerate() {
-            
-            let mir_arg = arg.mir_repr(phase, mir_phase, func_reg)?;
-            if param_def.comptime && !comptime_call {
-                let id = func_reg.comptime_mapper.create();
-                let comptime_index = comptime_params.len();
-                comptime_params.push(id, i, comptime_index);
-
-                comptime_args.push(ComptimeParamPair {
-                    value_id: id,
-                    value_expr: mir_arg,
-                });
-            } else {
-                args.push(mir_arg);
-            }
-        }
-        // -- sanity checks
-        assert_eq!(args.len() + comptime_params.len(), self.params.len());
-        assert_eq!(comptime_params.len(), comptime_args.len());
-
-        let mir_call_id = match func_reg.mir_id(
-            &func_instance,
-            phase,
-            mir_phase,
-            comptime_params,
-            comptime_call
-        ) {
-            Ok(val) => val,
-            Err(err) => {
-                phase.report_error(
-                    format_type_args!(
-                        format_args!("failed to generate function instance")
-                    ),
-                    &[
-                        SrcError::Single {
-                            src: self.src.clone(),
-                            pos: self.pos.clone().into(),
-                            error: format_type_args!(
-                                format_args!("was evaluated to function instance `"),
-                                &func_instance as &dyn FmtType,
-                                format_args!("`")
-                            )
-                        }
-                    ],
-                    None,
-                );
-                return Err(err);
-            },
-        };
-
-        Ok(MirCall {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: caller_uid,
-            ret: mir_ret,
-            func: mir_call_id,
-            args,
-            comptime_args,
-            is_recursive: false,
-        })
+impl MakeGraph for HirFunctionCall {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }
-
 
 #[cfg(test)]
 mod test {

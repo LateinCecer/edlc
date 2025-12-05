@@ -22,8 +22,8 @@ use crate::core::type_analysis::*;
 use crate::core::{edl_type, EdlVarId};
 use crate::documentation::{DocCompilerState, DocElement, LetDoc, Modifier, Modifiers};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, TypeArguments};
@@ -34,7 +34,7 @@ use crate::mir::mir_let::MirLet;
 use crate::mir::MirPhase;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
-
+use crate::mir::mir_expr::MirValue;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -423,41 +423,12 @@ impl HirLet {
     }
 }
 
-impl IntoMir for HirLet {
-    type MirRepr = MirLet;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let ty = &self.infer_info.as_ref().unwrap().finalized_var_uid;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ty.clone() })
-        }
-        let EdlMaybeType::Fixed(ty) = &ty else {
-            panic!();
-        };
-        let mir_ty = mir_phase.types.mir_id(ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-
-        // resolve value
-        let val = self.value.mir_repr(phase, mir_phase, mir_funcs)?;
-        let info = self.info()?;
-
-        Ok(MirLet {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            var_id: info.var_id,
-            ty: mir_ty,
-            val: Box::new(val),
-            global: self.global,
-            mutable: self.mutable,
-        })
+impl MakeGraph for HirLet {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
     }
 }
 
