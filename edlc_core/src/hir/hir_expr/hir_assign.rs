@@ -341,10 +341,15 @@ impl EdlFnArgument for HirAssign {
 }
 
 impl MakeGraph for HirAssign {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+
         todo!()
     }
 }

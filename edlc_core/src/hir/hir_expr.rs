@@ -46,6 +46,7 @@ use crate::core::edl_type;
 use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
 use crate::hir::hir_expr::hir_field::HirField;
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
+use crate::mir::mir_type::MirTypeId;
 
 pub mod hir_array_init;
 pub mod hir_array_index;
@@ -588,4 +589,26 @@ pub trait MakeGraph {
     /// any reads will not see the result of the expression evaluation stored _at all_.
     fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
+}
+
+impl MakeGraph for HirExpression {
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        todo!()
+    }
+}
+
+impl HirExpression {
+    pub fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        todo!()
+    }
 }

@@ -380,10 +380,18 @@ impl EdlFnArgument for HirArrayIndex {
 }
 
 impl MakeGraph for HirArrayIndex {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let lhs_type = self.lhs.mir_type(graph)?;
+        let lhs_expr = graph.graph.create_temp_variable(lhs_type);
+        self.lhs.write_to_graph(graph, lhs_expr)?;
+        // in this case, we can simply create an offset into the lhs
+        todo!("we don't have offsets implemented yet...")
     }
 }

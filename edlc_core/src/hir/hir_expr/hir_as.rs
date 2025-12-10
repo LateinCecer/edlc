@@ -32,7 +32,7 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::collections::HashSet;
 use std::error::Error;
-
+use crate::mir::mir_expr::mir_as::MirAs;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -306,10 +306,41 @@ impl HirAs {
 }
 
 impl MakeGraph for HirAs {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let EdlMaybeType::Fixed(instance) = &self.target else {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: self.target.clone(),
+                pos: self.pos,
+            });
+        };
+        if !instance.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: self.target.clone(),
+                pos: self.pos,
+            });
+        }
+        let ty = graph.mir_phase.types.mir_id(instance, &graph.hir_phase.types)?;
+
+        let value_ty = self.val.mir_type(graph)?;
+        let val = graph.graph.create_temp_variable(value_ty);
+        let expr = MirAs {
+            pos: self.pos,
+            scope: self.scope,
+            src: self.src.clone(),
+            id: graph.mir_phase.new_id(),
+            ty,
+            val,
+        };
+
+        let expr_id = graph.graph.expressions.insert_as(expr);
+        graph.graph.insert_def(graph.current_block, val, expr_id, &graph.mir_phase.types);
+        Ok(())
     }
 }

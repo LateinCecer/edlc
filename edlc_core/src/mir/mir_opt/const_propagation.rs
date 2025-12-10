@@ -1,7 +1,7 @@
+use crate::mir::mir_expr::{MirFlowGraph, MirTransferFunction};
+use edlc_analysis::graph::{HashNodeState, LatticeElement, TransferFn};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use edlc_analysis::graph::{HashNodeState, LatticeElement, TransferFn};
-use crate::mir::mir_expr::{MirFlowGraph, MirTransferFunction};
 
 #[derive(PartialEq, Eq, Debug, Default, Clone)]
 pub enum ConstState {
@@ -84,8 +84,34 @@ impl TransferFn<MirFlowGraph, ConstState> for MirTransferFunction {
 
 #[cfg(test)]
 mod tests {
+    use crate::compiler::EdlCompiler;
+    use crate::mir::mir_expr::{Context, MirFlowGraph};
+
     #[test]
     fn test_const_propagation() {
+        let mut compiler = EdlCompiler::new();
+        compiler.prepare_mir().unwrap();
 
+        let mut graph = MirFlowGraph::new(
+            [].into_iter(),
+            compiler.mir_phase.types.empty(),
+            Context::Runtime,
+        );
+        let mut current_block = graph.root();
+
+        /*
+        Here is the following code that we kind of, sort of, hand translate to MIR:
+
+        let mut x = 5;
+        let y = 4;
+        x = x + y;
+
+        let mut z = 0;
+        if x == 9 {
+            z = 10;
+        }
+         */
+
+        
     }
 }

@@ -896,6 +896,15 @@ impl MirFlowGraph {
         self.blocks[block.0].seal = Seal::Return(return_value);
     }
 
+    pub fn insert_panic(
+        &mut self,
+        block: MirBlockRef,
+        panic_value: MirValue,
+    ) {
+        assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
+        self.blocks[block.0].seal = Seal::Panic(panic_value);
+    }
+
     pub fn insert_switch<I: Iterator<Item=SwitchTarget>>(
         &mut self,
         block: MirBlockRef,
