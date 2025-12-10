@@ -38,7 +38,7 @@ use crate::hir::hir_expr::hir_type::HirTypeName;
 use crate::hir::hir_expr::hir_use::HirUse;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::translation::{HirTranslationError};
 use crate::issue::{IssueFormatter, ReportTarget, SrcError, SrcRange, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
@@ -596,28 +596,6 @@ impl HirItem {
     }
 }
 
-impl IntoMir for HirItem {
-    type MirRepr = MirItem;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        match self {
-            HirItem::Let(val) => val.mir_repr(phase, mir_phase, mir_funcs)
-                .map(|item| item.into()),
-            HirItem::Const(val) => val.mir_repr(phase, mir_phase, mir_funcs)
-                .map(|item| item.into()),
-            HirItem::Func(_) => Ok(MirItem::Func),
-            HirItem::Impl(_) => Ok(MirItem::Impl),
-            HirItem::Submod(_, _) => Ok(MirItem::Submod),
-            HirItem::Use(_) => Ok(MirItem::Use),
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirModule {

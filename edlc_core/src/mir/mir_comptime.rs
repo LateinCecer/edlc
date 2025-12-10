@@ -1,5 +1,6 @@
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{Evaluator, MirFlowGraph};
+use crate::mir::mir_expr::{MirFlowGraph};
+use crate::mir::mir_opt::Evaluator;
 use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, PartialEq, Clone)]

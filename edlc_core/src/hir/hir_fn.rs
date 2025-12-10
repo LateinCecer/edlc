@@ -453,16 +453,17 @@ impl HirFnSignature {
         let mut params = Vec::new();
         let mut comptime_params = Vec::new();
         for param in self.params.iter() {
-            let mut mir_param = param.mir_repr(phase, mir_phase, mir_funcs)?;
-            mir_param.comptime &= !self.comptime_only; // make sure that
-
-            if !mir_param.comptime {
-                // do not register comptime parameters in the function signature;
-                // these parameters are statically embedded into the function at compiletime
-                params.push(mir_param);
-            } else {
-                comptime_params.push(mir_param);
-            }
+            // let mut mir_param = param.mir_repr(phase, mir_phase, mir_funcs)?;
+            // mir_param.comptime &= !self.comptime_only; // make sure that
+            //
+            // if !mir_param.comptime {
+            //     // do not register comptime parameters in the function signature;
+            //     // these parameters are statically embedded into the function at compiletime
+            //     params.push(mir_param);
+            // } else {
+            //     comptime_params.push(mir_param);
+            // }
+            todo!()
         }
 
         Ok(MirFnSignature {
@@ -629,9 +630,22 @@ impl HirFn {
         }
         // translate body
         // let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
-        let parameters = ();
-        let return_type = ();
+        let parameters = signature
+            .params
+            .iter()
+            .map(|param| param.ty);
+        let return_type = signature.ret;
         let mut body = MirFlowGraph::new(parameters, return_type, ctx);
+        let ret_value = body.create_temp_variable(return_type);
+
+        let mut graph_writer = MirGraph {
+            current_block: body.root(),
+            graph: &mut body,
+            mir_phase,
+            hir_phase: phase,
+            mir_funcs,
+        };
+        self.body.write_to_graph(&mut graph_writer, ret_value)?;
 
         // in `mir_repr` for the signature, the type layer is pushed.
         // make sure that we pop it here

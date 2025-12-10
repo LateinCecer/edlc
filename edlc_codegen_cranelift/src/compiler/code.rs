@@ -17,7 +17,6 @@
 use crate::compiler::JIT;
 use crate::error::{JITError, JITErrorType};
 use cranelift_module::FuncId;
-use edlc_core::prelude::mir_expr::mir_call::CallFinder;
 use edlc_core::prelude::mir_funcs::{CompileResult, FnCodeGen, MirFuncId};
 use edlc_core::prelude::{EdlVarId, HirPhase, MirError, MirPhase};
 

@@ -18,7 +18,9 @@ mod ssa_value;
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::{MirExprContainer, MirExprId};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use std::collections::HashSet;
+use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, TransferFn};
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(usize);
@@ -1135,3 +1137,192 @@ impl MirFlowGraph {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MirGraphId {
+    Statement(MirGraphLoc),
+    Seal(MirBlockRef),
+}
+
+impl From<MirGraphLoc> for MirGraphId {
+    fn from(value: MirGraphLoc) -> Self {
+        MirGraphId::Statement(value)
+    }
+}
+
+impl From<MirBlockRef> for MirGraphId {
+    fn from(value: MirBlockRef) -> Self {
+        MirGraphId::Seal(value)
+    }
+}
+
+pub struct MirGraphState<V>(HashMap<MirGraphId, V>);
+
+impl<V> Deref for MirGraphState<V> {
+    type Target = HashMap<MirGraphId, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<V: LatticeElement, N: CfgNodeState<V>> CfgGraphState<V, N> for MirGraphState<N> {
+    type NodeId = MirGraphId;
+
+    fn node_state(&self, node: &Self::NodeId) -> Option<&N> {
+        self.0.get(node)
+    }
+}
+
+impl<V: LatticeElement, N: CfgNodeState<V>> CfgGraphStateMut<V, N> for MirGraphState<N> {
+    fn node_state_mut(&mut self, node: &Self::NodeId) -> Option<&mut N> {
+        self.0.get_mut(node)
+    }
+
+    fn insert_node_state(&mut self, node: &Self::NodeId, state: N) {
+        self.0.insert(node.clone(), state);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MirTransferFunction {
+    Statement(Statement),
+    Seal(Seal),
+}
+
+impl<V> CfgLattice<V> for MirFlowGraph
+where
+    MirTransferFunction: TransferFn<Self, V>,
+    V: LatticeElement + Default + Clone {
+    type NodeState = HashNodeState<V>;
+    type GraphState = MirGraphState<Self::NodeState>;
+    type NodeId = MirGraphId;
+
+    fn join_prec(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
+        let mut out = HashNodeState::default();
+        for uplink in self.uplinks(id).unwrap() {
+            if let Some(parent_state) = state.get(&uplink) {
+                out.join_mut(parent_state, V::upper).unwrap();
+            }
+        }
+        out
+    }
+
+    fn join_succ(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
+        let mut out = HashNodeState::default();
+        for downlink in self.downlinks(id).unwrap() {
+            if let Some(parent_state) = state.get(&downlink) {
+                out.join_mut(parent_state, V::lower).unwrap();
+            }
+        }
+        out
+    }
+
+    fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+        match id {
+            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
+                let block = &self.blocks[block_ref.0];
+                let idx = block.find_current_index(uid)
+                    .expect("invalid graph id");
+                MirTransferFunction::Statement(block.statements[idx].clone())
+            },
+            MirGraphId::Seal(block_ref) => {
+                MirTransferFunction::Seal(self.blocks[block_ref.0].seal.clone())
+            },
+        }
+    }
+
+    fn all_nodes(&self) -> Vec<Self::NodeId> {
+        // gather all nodes in the graph
+        let mut all = Vec::new();
+        for (block_id, block) in self.blocks.iter().enumerate() {
+            let block_id = MirBlockRef(block_id);
+            block.statements.iter().for_each(|s| {
+                all.push(MirGraphLoc(block_id, *s.uid()).into());
+            });
+            all.push(block_id.into());
+        }
+        all
+    }
+
+    fn downlinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
+        match id {
+            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
+                let block = &self.blocks[block_ref.0];
+                let idx = block.find_current_index(uid)?;
+                if let Some(next) = block.statements.get(idx + 1) {
+                    Some(vec![MirGraphLoc(*block_ref, *next.uid()).into()])
+                } else {
+                    Some(vec![block_ref.clone().into()])
+                }
+            },
+            MirGraphId::Seal(block_ref) => {
+                let block = &self.blocks[block_ref.0];
+                match &block.seal {
+                    Seal::None => None,
+                    Seal::Jump(target) => Some(vec![target.target.into()]),
+                    Seal::Cond {
+                        cond: _,
+                        then_target,
+                        else_target,
+                    } => {
+                        Some(vec![
+                            then_target.target.into(),
+                            else_target.target.into(),
+                        ])
+                    },
+                    Seal::Switch {
+                        cond: _,
+                        targets,
+                        default,
+                    } => {
+                        let mut targets = targets
+                            .iter()
+                            .map(|item| item.block_call.target.into())
+                            .collect::<Vec<MirGraphId>>();
+                        targets.push(default.target.into());
+                        Some(targets)
+                    },
+                    Seal::Return(_) => None,
+                    Seal::Panic(_) => None,
+                }
+            },
+        }
+    }
+
+    fn uplinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
+        fn get_backlinks(graph: &MirFlowGraph, block_ref: &MirBlockRef) -> Option<Vec<MirGraphId>> {
+            let backlinks = &graph.backlinks[block_ref.0];
+            if backlinks.is_empty() {
+                None
+            } else {
+                Some(backlinks
+                    .iter()
+                    .map(|link| link.clone().into())
+                    .collect())
+            }
+        }
+
+        match id {
+            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
+                let block = &self.blocks[block_ref.0];
+                let idx = block.find_current_index(uid)?;
+                if idx > 0 {
+                    let prev = &block.statements[idx - 1];
+                    Some(vec![MirGraphLoc(*block_ref, *prev.uid()).into()])
+                } else {
+                    // get backlinks and reference sealing statement for this
+                    get_backlinks(self, block_ref)
+                }
+            }
+            MirGraphId::Seal(block_ref) => {
+                let block = &self.blocks[block_ref.0];
+                if let Some(prev) = block.statements.last() {
+                    Some(vec![MirGraphLoc(*block_ref, *prev.uid()).into()])
+                } else {
+                    // get backlink and reference sealing statement for that
+                    get_backlinks(self, block_ref)
+                }
+            }
+        }
+    }
+}

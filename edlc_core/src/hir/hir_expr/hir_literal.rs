@@ -329,30 +329,30 @@ impl MakeGraph for HirLiteral {
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
         let val = match &self.value {
-            LiteralValue::Bool(val) => Ok(MirLiteral {
+            LiteralValue::Bool(val) => MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Bool(*val),
                 ty: graph.mir_phase.types.bool(),
-            }),
-            LiteralValue::Str(val) => Ok(MirLiteral {
+            },
+            LiteralValue::Str(val) => MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Str(val.clone()),
                 ty: graph.mir_phase.types.str(),
-            }),
-            LiteralValue::Char(val) => Ok(MirLiteral {
+            },
+            LiteralValue::Char(val) => MirLiteral {
                 pos: self.pos,
                 scope: self.scope,
                 src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Char(*val),
                 ty: graph.mir_phase.types.char(),
-            }),
+            },
             LiteralValue::Number(num, _) => {
                 let EdlMaybeType::Fixed(ty) = &self.info.as_ref().unwrap().finalized_type else {
                     return Err(HirTranslationError::NumberTypeUnresolved { pos: self.pos });
@@ -381,16 +381,16 @@ impl MakeGraph for HirLiteral {
                     _ => panic!("No such number type"),
                 };
 
-                Ok(MirLiteral {
+                MirLiteral {
                     pos: self.pos,
                     scope: self.scope,
                     src: self.src.clone(),
                     id: graph.mir_phase.new_id(),
                     value: val,
                     ty: mir_id,
-                })
+                }
             }
-        }?;
+        };
         let expr_id = graph.graph.expressions.insert_literal(val);
         graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
         Ok(())

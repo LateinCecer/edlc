@@ -37,6 +37,7 @@ pub mod mir_vars;
 pub mod mir_str;
 mod borrowchecker;
 mod mir_comptime;
+mod mir_opt;
 
 #[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct MirFnId(usize);

@@ -16,10 +16,11 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, Optimizer, Verifier};
+use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::{mir_funcs, MirError, MirUid};
+use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::resolver::ScopeId;
 
 
