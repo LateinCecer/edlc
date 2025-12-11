@@ -381,7 +381,11 @@ impl StructMember {
 }
 
 #[derive(Clone, Debug, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct MemberOffset(pub usize);
+pub struct MemberOffset {
+    pub offset: usize,
+    pub size: usize,
+    pub align: usize,
+}
 
 pub trait MirAggregateTypeLayout {
     type Index<'a>: ?Sized;
@@ -419,11 +423,11 @@ impl MirAggregateTypeLayout for Vec<StructMember> {
                 StructMember::Member { name, ty } if name == search_name => {
                     let align = types.byte_alignment(*ty).unwrap();
                     assert_eq!(offset % align, 0, "miss-aligned member type encountered");
-                    return Ok(MemberOffset(offset));
+                    return Ok(MemberOffset { offset, size: types.byte_size(*ty).unwrap(), align });
                 }
-                StructMember::Layout { name, align, .. } if name == search_name => {
+                StructMember::Layout { name, align, size, .. } if name == search_name => {
                     assert_eq!(offset % *align, 0, "miss-aligned member type encountered");
-                    return Ok(MemberOffset(offset));
+                    return Ok(MemberOffset { offset, size: *size, align: *align });
                 }
                 StructMember::Member { ty, .. } => {
                     let align = types.byte_alignment(*ty).unwrap();
@@ -1084,6 +1088,77 @@ impl MirTypeRegistry {
             never: self.register::<()>(types.never(), types)?,
         });
         Ok(())
+    }
+
+    pub fn is_array(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_ARRAY
+    }
+
+    /// Gets the parameter type information for an array type.
+    /// This parameter information includes the element type id and the length of the array.
+    pub fn get_array_type(&self, id: &MirTypeId) -> Option<(MirTypeId, usize)> {
+        if !self.is_array(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        let TMirParamValue::Const(len) = &self.types[id.0].tmir_version.param.params[1] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        let element = *self.conversion_map.get(param).unwrap();
+        let array_length = len.clone().into_usize().unwrap();
+        Some((element, array_length))
+    }
+
+    pub fn is_ref(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_REF
+    }
+
+    pub fn get_ref_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
+        if !self.is_ref(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        Some(*self.conversion_map.get(param).unwrap())
+    }
+
+    pub fn is_mut_ref(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_MUT_REF
+    }
+
+    pub fn get_mut_ref_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
+        if !self.is_mut_ref(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        Some(*self.conversion_map.get(param).unwrap())
+    }
+
+    pub fn is_slice(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_SLICE
+    }
+
+    pub fn get_slice_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
+        if !self.is_slice(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        Some(*self.conversion_map.get(param).unwrap())
     }
 
     /// Inserts a new constant into the MIR type registry.

@@ -44,6 +44,7 @@ pub mod mir_data;
 pub mod mir_condition;
 pub mod mir_type_init;
 mod mir_graph;
+mod mir_ref;
 
 pub use mir_graph::*;
 
