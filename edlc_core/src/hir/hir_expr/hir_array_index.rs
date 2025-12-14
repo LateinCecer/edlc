@@ -26,7 +26,7 @@ use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{MirRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::hir_expr::HirTreeWalker;
 use crate::resolver::ScopeId;
@@ -392,6 +392,50 @@ impl MakeGraph for HirArrayIndex {
         let lhs_expr = graph.graph.create_temp_variable(lhs_type);
         self.lhs.write_to_graph(graph, lhs_expr)?;
         // in this case, we can simply create an offset into the lhs
-        todo!("we don't have offsets implemented yet...")
+        let index_type = self.index.mir_type(graph)?;
+        let index_expr = graph.graph.create_temp_variable(index_type);
+        self.index.write_to_graph(graph, index_expr)?;
+
+        // get target value and check if it is mutable
+        let target_type = *graph.graph.get_var_type(&target);
+        if graph.mir_phase.types.is_mut_ref(&target_type) {
+            // write as mutable offset
+            let index_expr = graph.graph.expressions.insert_ref(MirRef::mut_array_index(
+                lhs_expr, // assume that lhs is a mutable reference type - there are checks for this later down the pipeline
+                index_expr,
+                &graph.graph,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            ));
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                index_expr,
+                &graph.mir_phase.types,
+            );
+            Ok(())
+        } else if graph.mir_phase.types.is_ref(&target_type) {
+            // write as sheared offset
+            let index_expr = graph.graph.expressions.insert_ref(MirRef::shared_array_index(
+                lhs_expr, // assume that lhs is a shared reference type - there are checks for this later down te pipeline
+                index_expr,
+                &graph.graph,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            ));
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                index_expr,
+                &graph.mir_phase.types,
+            );
+            Ok(())
+        } else {
+            // get as shared offset, then dereference immediately
+            panic!("internal compiler error: array index operations always return references in \
+            MIR – dereferencing must be done explicitly _before_ lowering");
+        }
     }
 }

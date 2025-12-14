@@ -47,7 +47,7 @@ mod mir_graph;
 mod mir_ref;
 
 pub use mir_graph::*;
-
+pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirRef, MirDowncastRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct MirExprUid(usize);
@@ -79,6 +79,9 @@ pub enum MirExprVariant {
     Data,
     Offset,
     Init,
+    Ref,
+    Deref,
+    DowncastRef,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -94,6 +97,9 @@ pub struct MirExprContainer {
     data: Vec<MirData>,
     offsets: Vec<MirOffset>,
     type_inits: Vec<MirTypeInit>,
+    refs: Vec<MirRef>,
+    derefs: Vec<MirDeref>,
+    downcasts: Vec<MirDowncastRef>,
 }
 
 
@@ -118,6 +124,9 @@ impl MirExprContainer {
             MirExprVariant::Data => self.data[expr.id].collect_vars(),
             MirExprVariant::Offset => self.data[expr.id].collect_vars(),
             MirExprVariant::Init => self.type_inits[expr.id].collect_vars(),
+            MirExprVariant::Ref => self.refs[expr.id].collect_vars(),
+            MirExprVariant::Deref => self.derefs[expr.id].collect_vars(),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].collect_vars(),
         }
     }
 
@@ -134,6 +143,9 @@ impl MirExprContainer {
             MirExprVariant::Data => self.data[expr.id].uses_var(val),
             MirExprVariant::Offset => self.data[expr.id].uses_var(val),
             MirExprVariant::Init => self.type_inits[expr.id].uses_var(val),
+            MirExprVariant::Ref => self.refs[expr.id].uses_var(val),
+            MirExprVariant::Deref => self.derefs[expr.id].uses_var(val),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].uses_var(val),
         }
     }
 
@@ -152,6 +164,33 @@ impl MirExprContainer {
             MirExprVariant::Data => self.data[expr.id].replace_var(var, repl),
             MirExprVariant::Offset => self.data[expr.id].replace_var(var, repl),
             MirExprVariant::Init => self.type_inits[expr.id].replace_var(var, repl),
+            MirExprVariant::Ref => self.refs[expr.id].replace_var(var, repl),
+            MirExprVariant::Deref => self.derefs[expr.id].replace_var(var, repl),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].replace_var(var, repl),
+        }
+    }
+
+    pub fn insert_downcast(&mut self, expr: MirDowncastRef) -> MirExprId {
+        self.downcasts.push(expr);
+        MirExprId {
+            id: self.downcasts.len() - 1,
+            ty: MirExprVariant::DowncastRef,
+        }
+    }
+
+    pub fn insert_ref(&mut self, expr: MirRef) -> MirExprId {
+        self.refs.push(expr);
+        MirExprId {
+            id: self.refs.len() - 1,
+            ty: MirExprVariant::Ref,
+        }
+    }
+
+    pub fn insert_deref(&mut self, expr: MirDeref) -> MirExprId {
+        self.derefs.push(expr);
+        MirExprId {
+            id: self.refs.len() - 1,
+            ty: MirExprVariant::Deref,
         }
     }
 
@@ -294,6 +333,15 @@ impl MirExprContainer {
             }
             MirExprVariant::Init => {
                 self.type_inits[expr.id].ty
+            }
+            MirExprVariant::Ref => {
+                self.refs[expr.id].ty
+            }
+            MirExprVariant::Deref => {
+                self.derefs[expr.id].ty
+            }
+            MirExprVariant::DowncastRef => {
+                self.downcasts[expr.id].ty
             }
         }
     }

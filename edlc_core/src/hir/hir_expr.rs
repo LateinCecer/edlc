@@ -44,7 +44,9 @@ use std::collections::HashSet;
 use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
+use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_field::HirField;
+use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
 
@@ -70,6 +72,8 @@ pub mod hir_continue;
 pub mod hir_return;
 mod hir_type_def;
 pub mod hir_type_init;
+mod hir_ref;
+mod hir_deref;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirExpression {
@@ -89,6 +93,8 @@ pub enum HirExpression {
     Continue(HirContinue),
     Return(HirReturn),
     TypeInit(HirTypeInit),
+    Ref(HirRef),
+    Deref(HirDeref),
 }
 
 impl HirExpression {
@@ -110,6 +116,8 @@ impl HirExpression {
             HirExpression::Continue(_) => (),
             HirExpression::Return(_) => (),
             HirExpression::TypeInit(_) => (),
+            HirExpression::Ref(_) => (),
+            HirExpression::Deref(_) => (),
         }
     }
 
@@ -150,6 +158,8 @@ impl HirExpression {
             HirExpression::Continue(val) => val.pos,
             HirExpression::Return(val) => val.pos,
             HirExpression::TypeInit(val) => val.pos,
+            HirExpression::Ref(val) => val.pos,
+            HirExpression::Deref(val) => val.pos,
         }
     }
 
@@ -171,6 +181,8 @@ impl HirExpression {
             HirExpression::Continue(val) => &val.src,
             HirExpression::Return(val) => &val.src,
             HirExpression::TypeInit(val) => &val.src,
+            HirExpression::Ref(val) => &val.src,
+            HirExpression::Deref(val) => &val.src,
         }
     }
 
@@ -198,6 +210,8 @@ impl HirExpression {
             HirExpression::Continue(val) => val.verify(phase, ctx, infer_state),
             HirExpression::Return(val) => val.verify(phase, ctx, infer_state),
             HirExpression::TypeInit(val) => val.verify(phase, ctx, infer_state),
+            HirExpression::Ref(val) => val.verify(phase, ctx, infer_state),
+            HirExpression::Deref(val) => val.verify(phase, ctx, infer_state),
         }
     }
 
@@ -240,6 +254,8 @@ impl ResolveFn for HirExpression {
             HirExpression::Continue(val) => val.resolve_fn(phase),
             HirExpression::Return(val) => val.resolve_fn(phase),
             HirExpression::TypeInit(val) => val.resolve_fn(phase),
+            HirExpression::Ref(val) => val.resolve_fn(phase),
+            HirExpression::Deref(val) => val.resolve_fn(phase),
         }
     }
 }
@@ -263,6 +279,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.resolve_types(phase, infer_state),
             HirExpression::Return(val) => val.resolve_types(phase, infer_state),
             HirExpression::TypeInit(val) => val.resolve_types(phase, infer_state),
+            HirExpression::Ref(val) => val.resolve_types(phase, infer_state),
+            HirExpression::Deref(val) => val.resolve_types(phase, infer_state),
         }
     }
 
@@ -284,6 +302,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.get_type_uid(inferer),
             HirExpression::Return(val) => val.get_type_uid(inferer),
             HirExpression::TypeInit(val) => val.get_type_uid(inferer),
+            HirExpression::Ref(val) => val.get_type_uid(inferer),
+            HirExpression::Deref(val) => val.get_type_uid(inferer),
         }
     }
 
@@ -305,6 +325,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.finalize_types(inferer),
             HirExpression::Return(val) => val.finalize_types(inferer),
             HirExpression::TypeInit(val) => val.finalize_types(inferer),
+            HirExpression::Ref(val) => val.finalize_types(inferer),
+            HirExpression::Deref(val) => val.finalize_types(inferer),
         }
     }
 
@@ -326,6 +348,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.as_const(inferer),
             HirExpression::Return(val) => val.as_const(inferer),
             HirExpression::TypeInit(val) => val.as_const(inferer),
+            HirExpression::Ref(val) => val.as_const(inferer),
+            HirExpression::Deref(val) => val.as_const(inferer),
         }
     }
 }
@@ -349,6 +373,8 @@ impl ResolveNames for HirExpression {
             HirExpression::Continue(val) => val.resolve_names(phase),
             HirExpression::Return(val) => val.resolve_names(phase),
             HirExpression::TypeInit(val) => val.resolve_names(phase),
+            HirExpression::Ref(val) => val.resolve_names(phase),
+            HirExpression::Deref(val) => val.resolve_names(phase),
         }
     }
 }
@@ -405,6 +431,8 @@ impl HirTreeWalker for HirExpression {
             HirExpression::Continue(val) => val.walk(filter, task)?,
             HirExpression::Return(val) => val.walk(filter, task)?,
             HirExpression::TypeInit(val) => val.walk(filter, task)?,
+            HirExpression::Ref(val) => val.walk(filter, task)?,
+            HirExpression::Deref(val) => val.walk(filter, task)?,
         };
         if let Some(res) = res {
             child.push(res);
@@ -441,6 +469,8 @@ impl HirTreeWalker for HirExpression {
             HirExpression::Continue(val) => val.walk_mut(filter, task)?,
             HirExpression::Return(val) => val.walk_mut(filter, task)?,
             HirExpression::TypeInit(val) => val.walk_mut(filter, task)?,
+            HirExpression::Ref(val) => val.walk_mut(filter, task)?,
+            HirExpression::Deref(val) => val.walk_mut(filter, task)?,
         };
         if let Some(res) = res {
             child.push(res);
@@ -468,6 +498,8 @@ impl HirExpr for HirExpression {
             HirExpression::Continue(val) => val.get_type(phase),
             HirExpression::Return(val) => val.get_type(phase),
             HirExpression::TypeInit(val) => val.get_type(phase),
+            HirExpression::Ref(val) => val.get_type(phase),
+            HirExpression::Deref(val) => val.get_type(phase),
         }
     }
 
@@ -489,6 +521,8 @@ impl HirExpr for HirExpression {
             HirExpression::Continue(val) => val.is_comptime(),
             HirExpression::Return(val) => val.is_comptime(),
             HirExpression::TypeInit(val) => val.is_comptime(),
+            HirExpression::Ref(val) => val.is_comptime(),
+            HirExpression::Deref(val) => val.is_comptime(),
         }
     }
 
@@ -526,6 +560,8 @@ impl EdlFnArgument for HirExpression {
             HirExpression::Continue(val) => val.is_mutable(state),
             HirExpression::Return(val) => val.is_mutable(state),
             HirExpression::TypeInit(val) => val.is_mutable(state),
+            HirExpression::Ref(val) => val.is_mutable(state),
+            HirExpression::Deref(val) => val.is_mutable(state),
         }
     }
 
@@ -547,6 +583,8 @@ impl EdlFnArgument for HirExpression {
             HirExpression::Continue(val) => val.const_expr(state),
             HirExpression::Return(val) => val.const_expr(state),
             HirExpression::TypeInit(val) => val.const_expr(state),
+            HirExpression::Ref(val) => val.const_expr(state),
+            HirExpression::Deref(val) => val.const_expr(state),
         }
     }
 }

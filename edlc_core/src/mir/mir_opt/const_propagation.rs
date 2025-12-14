@@ -1,4 +1,4 @@
-use crate::mir::mir_expr::{MirFlowGraph, MirTransferFunction};
+use crate::mir::mir_expr::{MirFlowGraph, MirTransferFunction, MirValue};
 use edlc_analysis::graph::{HashNodeState, LatticeElement, TransferFn};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -75,9 +75,10 @@ impl LatticeElement for ConstState {
 impl TransferFn<MirFlowGraph, ConstState> for MirTransferFunction {
     fn transfer(
         &self,
-        input: HashNodeState<ConstState>,
+        input: HashNodeState<MirValue, ConstState>,
         cfg: &MirFlowGraph,
-    ) -> Result<HashNodeState<ConstState>, ConstPropagationError> {
+    ) -> Result<HashNodeState<MirValue, ConstState>, ConstPropagationError> {
+
         todo!()
     }
 }

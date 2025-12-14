@@ -1,0 +1,263 @@
+/*
+ *    Copyright 2025 Adrian Paskert
+ *
+ *    Licensed under the Apache License, Version 2.0 (the "License");
+ *    you may not use this file except in compliance with the License.
+ *    You may obtain a copy of the License at
+ *
+ *        http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *    Unless required by applicable law or agreed to in writing, software
+ *    distributed under the License is distributed on an "AS IS" BASIS,
+ *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *    See the License for the specific language governing permissions and
+ *    limitations under the License.
+ */
+use std::error::Error;
+use crate::core::edl_fn::EdlCompilerState;
+use crate::core::edl_type::EdlMaybeType;
+use crate::core::edl_value::EdlConstValue;
+use crate::core::type_analysis::*;
+use crate::file::ModuleSrc;
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::translation::HirTranslationError;
+use crate::issue::{format_type_args, SrcError};
+use crate::lexer::SrcPos;
+use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::{MirDowncastRef, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::prelude::edl_fn::EdlFnArgument;
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompilerInfo {
+    node: NodeId,
+    type_uid: TypeUid,
+    finalized_type: EdlMaybeType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirRef {
+    pub pos: SrcPos,
+    pub src: ModuleSrc,
+    pub uid: HirUid,
+    pub mutable: bool,
+    value: Box<HirExpression>,
+    compiler_info: Option<CompilerInfo>,
+}
+
+impl HirRef {
+    pub fn new(value: Box<HirExpression>, uid: HirUid, mutable: bool) -> Self {
+        Self {
+            pos: value.pos(),
+            src: value.src().clone(),
+            uid,
+            mutable,
+            value,
+            compiler_info: None,
+        }
+    }
+
+    pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, state: &mut InferState) -> Result<(), HirError> {
+        self.value.verify(phase, ctx, state)?;
+        if self.mutable && !self.value.is_mutable(phase)? {
+            phase.report_error(
+                format_type_args!(
+                    format_args!("cannot create mutable reference from immutable value")
+                ),
+                &[
+                    SrcError::Single {
+                        pos: self.pos.clone().into(),
+                        src: self.src.clone(),
+                        error: format_type_args!(
+                            format_args!("value is immutable")
+                        )
+                    }
+                ],
+                None,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl ResolveTypes for HirRef {
+    fn resolve_types(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        let mut inferer = phase.infer_from(infer_state);
+        let own_uid = self.get_type_uid(&mut inferer);
+        let node = self.compiler_info.as_ref().unwrap().node;
+
+        let ty = if self.mutable {
+            phase.types.new_mut_ref(EdlMaybeType::Unknown).unwrap()
+        } else {
+            phase.types.new_ref(EdlMaybeType::Unknown).unwrap()
+        };
+        if let Err(err) = inferer.at(node).eq(&own_uid, &ty) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+        // assert that generic parameter of reference must be equal to the base type
+        let generic_ty = inferer
+            .get_generic_type(own_uid, 0)
+            .unwrap();
+        let value_ty = self.value.get_type_uid(&mut inferer);
+        if let Err(err) = inferer.at(node).eq(&value_ty, &generic_ty.uid) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+        self.value.resolve_types(phase, infer_state)
+    }
+
+    fn get_type_uid(&mut self, inferer: &mut Infer<'_, '_>) -> TypeUid {
+        if let Some(info) = self.compiler_info.as_ref() {
+            info.type_uid
+        } else {
+            let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
+            let own_uid = inferer.new_type(node);
+            self.compiler_info = Some(CompilerInfo {
+                node,
+                type_uid: own_uid,
+                finalized_type: EdlMaybeType::Unknown,
+            });
+            own_uid
+        }
+    }
+
+    fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
+        let info = self.compiler_info.as_mut().unwrap();
+        let ty = inferer.find_type(info.type_uid);
+        info.finalized_type = ty;
+        self.value.finalize_types(inferer);
+    }
+
+    fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
+        None
+    }
+}
+
+impl From<HirRef> for HirExpression {
+    fn from(value: HirRef) -> Self {
+        HirExpression::Ref(value)
+    }
+}
+
+impl ResolveNames for HirRef {
+    fn resolve_names(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+        self.value.resolve_names(phase)
+    }
+}
+
+impl ResolveFn for HirRef {
+    fn resolve_fn(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+        self.value.resolve_fn(phase)
+    }
+}
+
+impl HirTreeWalker for HirRef {
+    fn walk<F, T, R, E>(&self, filter: &mut F, task: &mut T) -> Result<Vec<R>, E>
+    where
+        F: FnMut(&HirExpression) -> bool,
+        T: FnMut(&HirExpression) -> Result<R, E>,
+        E: Error
+    {
+        self.value.walk(filter, task)
+    }
+
+    fn walk_mut<F, T, R, E>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, E>
+    where
+        F: FnMut(&HirExpression) -> bool,
+        T: FnMut(&mut HirExpression) -> Result<R, E>,
+        E: Error
+    {
+        self.value.walk_mut(filter, task)
+    }
+}
+
+impl HirExpr for HirRef {
+    fn get_type(&self, _phase: &mut HirPhase) -> Result<EdlMaybeType, HirError> {
+        Ok(self.compiler_info.as_ref().unwrap().finalized_type.clone())
+    }
+
+    fn is_comptime(&self) -> bool {
+        self.value.is_comptime()
+    }
+
+    fn as_const_value(&self, _phase: &mut HirPhase) -> Result<EdlConstValue, HirError> {
+        Err(HirError {
+            pos: self.pos,
+            ty: Box::new(HirErrorType::InvalidConstantExpr)
+        })
+    }
+}
+
+impl EdlFnArgument for HirRef {
+    type CompilerState = HirPhase;
+
+    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
+        Ok(self.value.is_mutable(state)? && self.mutable)
+    }
+
+    fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
+        self.value.const_expr(state)
+    }
+}
+
+impl MakeGraph for HirRef {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        if let HirExpression::Deref(downcast) = &*self.value {
+            // the reference operation follows a deref immediately -> we have a downcast from a
+            // mutable reference to an immutable reference
+            let ori_ref = &downcast.value;
+            let ori_ref_ty = ori_ref.mir_type(graph)?;
+
+            if graph.mir_phase.types.is_ref(&ori_ref_ty) {
+                // there is nothing to do here, just return the value of the original reference
+                assert!(!self.mutable);
+                assert_eq!(&ori_ref_ty, graph.graph.get_var_type(&target));
+                return downcast.write_to_graph(graph, target);
+            }
+            assert!(graph.mir_phase.types.is_mut_ref(&ori_ref_ty));
+            let ori_ref_value = graph.graph.create_temp_variable(ori_ref_ty);
+            let target_ty = *graph.graph.get_var_type(&target);
+            let downcast = graph.graph.expressions.insert_downcast(MirDowncastRef::new(
+                ori_ref_value,
+                target_ty,
+                &graph.graph,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            ));
+            graph.graph.insert_def(graph.current_block, target, downcast, &graph.mir_phase.types);
+            return Ok(());
+        }
+
+        // we don't have a downcast here, proceed as usual
+        let value_type = self.value.mir_type(graph)?;
+        let value = graph.graph.create_temp_variable(value_type);
+        if self.mutable {
+            graph.graph.def_mut_ref(
+                graph.current_block,
+                value,
+                target,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            );
+        } else {
+            graph.graph.def_ref(
+                graph.current_block,
+                value,
+                target,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            );
+        }
+        Ok(())
+    }
+}

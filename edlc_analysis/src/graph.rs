@@ -19,6 +19,7 @@ mod builder;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut, Range};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -853,19 +854,27 @@ impl CfgValueGenerator {
 }
 
 pub trait CfgNodeState<V: LatticeElement>: PartialEq + Eq + Sized {
+    type ValueId;
+
     /// Returns an element from the cfg state.
     /// If the element with the requested ID does not exist within the cfg state, the default
     /// implementation of `V` is returned.
     /// This is also the reason why this function returns by value and not by reference.
-    fn element_value(&self, id: &CfgValueId) -> V;
+    fn element_value(&self, id: &Self::ValueId) -> V;
 }
 
-#[derive(Default, Debug)]
-pub struct HashNodeState<E> {
-    map: HashMap<CfgValueId, E>,
+#[derive(Debug)]
+pub struct HashNodeState<I: Hash + PartialEq + Clone, E> {
+    map: HashMap<I, E>,
 }
 
-impl<E: Clone> Clone for HashNodeState<E> {
+impl<I: Hash + PartialEq + Clone, E> Default for HashNodeState<I, E> {
+    fn default() -> Self {
+        Self { map: HashMap::new() }
+    }
+}
+
+impl<I: Hash + PartialEq + Clone, E: Clone> Clone for HashNodeState<I, E> {
     fn clone(&self) -> Self {
         HashNodeState {
             map: self.map.clone(),
@@ -873,7 +882,7 @@ impl<E: Clone> Clone for HashNodeState<E> {
     }
 }
 
-impl<E: Display> Display for HashNodeState<E> {
+impl<I: Hash + PartialEq + Clone + Display, E: Display> Display for HashNodeState<I, E> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{ ")?;
         let mut first = true;
@@ -889,7 +898,7 @@ impl<E: Display> Display for HashNodeState<E> {
     }
 }
 
-impl<E: LatticeElement + Default + PartialEq + Clone> PartialEq for HashNodeState<E> {
+impl<I: Hash + PartialEq + Eq + Clone, E: LatticeElement + Default + PartialEq + Clone> PartialEq for HashNodeState<I, E> {
     fn eq(&self, other: &Self) -> bool {
         for (id, val) in self.map.iter() {
             if other.element_value(id) != *val {
@@ -905,19 +914,23 @@ impl<E: LatticeElement + Default + PartialEq + Clone> PartialEq for HashNodeStat
     }
 }
 
-impl<E: LatticeElement + Default + Eq + Clone> Eq for HashNodeState<E> {}
+impl<I: Hash + PartialEq + Eq + Clone, E: LatticeElement + Default + Eq + Clone> Eq for HashNodeState<I, E> {}
 
-impl<E: LatticeElement + Default + Clone> CfgNodeState<E> for HashNodeState<E> {
-    fn element_value(&self, id: &CfgValueId) -> E {
+impl<I: Hash + PartialEq + Eq + Clone, E: LatticeElement + Default + Clone> CfgNodeState<E> for HashNodeState<I, E> {
+    type ValueId = I;
+
+    fn element_value(&self, id: &I) -> E {
         self.map.get(id)
             .cloned()
             .unwrap_or_default()
     }
 }
 
-impl<E: LatticeElement + Default + Clone> CfgNodeStateMut<E> for HashNodeState<E> {
-    fn element_value_mut(&mut self, id: &CfgValueId) -> &mut E {
-        self.map.entry(*id)
+impl<I: Hash + PartialEq + Eq + Clone, E: LatticeElement + Default + Clone> CfgNodeStateMut<E> for HashNodeState<I, E> {
+    type ValueId = I;
+
+    fn element_value_mut(&mut self, id: &I) -> &mut E {
+        self.map.entry(id.clone())
             .or_insert_with(|| E::default())
     }
 
@@ -930,7 +943,7 @@ impl<E: LatticeElement + Default + Clone> CfgNodeStateMut<E> for HashNodeState<E
             if let Some(own) = self.map.get_mut(id) {
                 *own = op(own.clone(), val.clone())?;
             } else {
-                self.map.insert(*id, val.clone());
+                self.map.insert(id.clone(), val.clone());
             }
         }
         Ok(())
@@ -939,11 +952,13 @@ impl<E: LatticeElement + Default + Clone> CfgNodeStateMut<E> for HashNodeState<E
 
 
 pub trait CfgNodeStateMut<V: LatticeElement> {
+    type ValueId;
+
     /// Returns a mutable reference to the element value.
     /// If the element value is not contained in the cfg state at the time, a new value is inserted
     /// with the default implementation of `V`.
     /// A reference to this is then returned mutably.
-    fn element_value_mut(&mut self, id: &CfgValueId) -> &mut V;
+    fn element_value_mut(&mut self, id: &Self::ValueId) -> &mut V;
 
     fn join_mut(
         &mut self,
@@ -1011,7 +1026,7 @@ pub struct ConstraintLattice<State, E> {
 
 impl<V: LatticeElement + Clone + Default + Eq, State, E> CfgLattice<V> for ConstraintLattice<State, E>
 where E: TransferFn<Self, V> + Clone {
-    type NodeState = HashNodeState<V>;
+    type NodeState = HashNodeState<CfgValueId, V>;
     type GraphState = HashMap<LatticeId, Self::NodeState>;
     type NodeId = LatticeId;
 
