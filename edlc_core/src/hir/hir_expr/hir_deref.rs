@@ -14,6 +14,7 @@
  *    limitations under the License.
  */
 use std::error::Error;
+use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlTypeInstance};
@@ -59,6 +60,29 @@ impl HirDeref {
     pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, state: &mut InferState) -> Result<(), HirError> {
         self.value.verify(phase, ctx, state)?;
         Ok(())
+    }
+
+    pub fn can_be_assigned_to(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+        let info = &self.compiler_info.as_ref().unwrap().finalized_type;
+        match info {
+            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_MUT_REF => Ok(true),
+            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => Ok(false),
+            EdlMaybeType::Fixed(inst) => {
+                Err(HirError::new_edl(self.pos, EdlError::E003 { exp: edl_type::EDL_REF, got: inst.ty }))
+            }
+            EdlMaybeType::Unknown => {
+                Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::TypeNotResolvable),
+                })
+            }
+        }
+    }
+
+    /// Internally, deref operations yield a reference – this is important for assignment
+    /// operations, array and field indices, and so on.
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+        Ok(true)
     }
 
     fn resolve_ref(&mut self, phase: &mut HirPhase, infer_state: &mut InferState, ty: EdlTypeInstance) -> Result<(), HirError> {

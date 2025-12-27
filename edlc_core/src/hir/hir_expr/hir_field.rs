@@ -362,8 +362,13 @@ impl HirField {
         self.lhs.can_be_assigned_to(phase)
     }
 
-    pub fn is_ref_like(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        self.lhs.is_ref_like(phase)
+    /// Fields are an offset into another blob of data and therefore always an internal reference.
+    /// That holds true even when the base value is not an internal reference itself – in that case
+    /// an internal reference must be created from the temporary base value before the offset is
+    /// applied and the field effectively becomes an internal reference with a constant offset into
+    /// a temporary value.
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+        Ok(true)
     }
 
     /// Resolves the type of the field, adapted it to `target` and returns the type

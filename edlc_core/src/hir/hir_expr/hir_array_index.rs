@@ -161,8 +161,10 @@ impl HirArrayIndex {
         self.lhs.can_be_assigned_to(phase)
     }
 
-    pub fn is_ref_like(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        self.lhs.is_ref_like(phase)
+    /// The array index operation is always an internal reference operation.
+    /// This may be simplified in MIR.
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+        Ok(true)
     }
 
     pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {

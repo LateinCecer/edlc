@@ -1280,6 +1280,25 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         self.state.get_or_insert_var(var_id, node)
     }
 
+    pub fn new_reference_type(&mut self, ref_of: TypeUid, node: NodeId, mutable: bool) -> TypeUid {
+        let uid = self.new_type(node);
+        let ref_ty = if mutable {
+            self.type_reg.new_mut_ref(EdlMaybeType::Unknown).unwrap()
+        } else {
+            self.type_reg.new_ref(EdlMaybeType::Unknown).unwrap()
+        };
+        <InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(
+            &mut self.at(node),
+            &uid,
+            &ref_ty,
+        ).unwrap();
+        let x = self.get_generic_type(uid, 0).unwrap();
+        self.at(node)
+            .eq(&x.uid, &ref_of)
+            .unwrap();
+        uid
+    }
+
     /// Extracts an EDL type from the type inferer, based on the provided type UID.
     /// If no type with that ID exists, or if no information about that type is present in the
     /// inferer, `EdlMaybeType::Unknown` is returned.

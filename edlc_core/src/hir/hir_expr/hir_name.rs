@@ -46,6 +46,7 @@ struct CompilerInfo {
 struct InferInfo {
     node: NodeId,
     own_uid: TypeUid,
+    ref_uid: TypeUid,
     const_uid: ExtConstUid,
     finalized_type: EdlMaybeType,
     finalized_const: Option<EdlConstValue>
@@ -54,7 +55,7 @@ struct InferInfo {
 
 #[derive(Clone, Debug, PartialEq)]
 enum NameSource {
-    Var(EdlVarId),
+    Var(EdlVarId, bool),
     Const(EdlConstValue),
     #[allow(dead_code)]
     Function(EdlTypeId), // for function pointers (do we want that?)
@@ -63,7 +64,7 @@ enum NameSource {
 impl NameSource {
     fn adapt_type(&self, pos: SrcPos, ty: &mut EdlMaybeType, phase: &mut HirPhase) -> Result<(), HirError> {
         match self {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _mutable) => {
                 let HirPhase {
                     vars,
                     types,
@@ -92,7 +93,7 @@ impl NameSource {
 
     fn get_type(&self, pos: SrcPos, phase: &HirPhase) -> Result<EdlMaybeType, HirError> {
         match self {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _) => {
                 let var = phase.vars.get_var(*var_id)
                     .ok_or(HirError::new_edl(pos, EdlError::E010(*var_id)))?;
                 let var_ty = var.var_maybe_type().clone();
@@ -148,11 +149,22 @@ impl ResolveTypes for HirName {
             info.own_uid
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
-            let own_uid = match &self.info.as_ref().unwrap().name_src {
-                NameSource::Var(var_id) => {
-                    inferer.get_or_insert_var(*var_id, node)
+            let (own_uid, ref_uid) = match &self.info.as_ref().unwrap().name_src {
+                NameSource::Var(var_id, mutable) => {
+                    let own_uid = inferer.get_or_insert_var(*var_id, node);
+                    // Note: assume that the reference is mutable if the underlying variable is
+                    //       mutable. In MIR we can figure out if the reference actually needs to be
+                    //       mutable or not, so we can find the tightest fitting borrowing rules
+                    //       possible. For type resolution it is enough to reject cases were the
+                    //       user tries to modify an immutable variable.
+                    let ref_uid = inferer.new_reference_type(own_uid, node, *mutable);
+                    (own_uid, ref_uid)
                 },
-                _ => inferer.new_type(node),
+                _ => {
+                    let own_uid = inferer.new_type(node);
+                    let ref_uid = inferer.new_reference_type(own_uid, node, false);
+                    (own_uid, ref_uid)
+                },
             };
 
             // insert constant
@@ -177,6 +189,7 @@ impl ResolveTypes for HirName {
 
             self.infer_info = Some(InferInfo {
                 own_uid,
+                ref_uid,
                 const_uid,
                 node,
                 finalized_type: EdlMaybeType::Unknown,
@@ -216,8 +229,9 @@ impl ResolveNames for HirName {
 
             let path = &segment.path;
             if let Some(var_id) = phase.res.find_top_level_var(path) {
+                let mutable = phase.vars.is_mutable(var_id).unwrap();
                 self.info = Some(CompilerInfo {
-                    name_src: NameSource::Var(var_id),
+                    name_src: NameSource::Var(var_id, mutable),
                 });
                 return Ok(());
             }
@@ -307,7 +321,7 @@ impl HirName {
     pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
         let info = self.info()?;
         match &info.name_src {
-            NameSource::Var(var) => {
+            NameSource::Var(var,  _) => {
                 Ok(!phase.vars.is_global(*var)
                     .map_err(|err| HirError::new_edl(self.pos, err))?
                     && phase.vars.is_mutable(*var)
@@ -317,10 +331,10 @@ impl HirName {
         }
     }
 
-    pub fn is_ref_like(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
         let info = self.info()?;
         match &info.name_src {
-            NameSource::Var(_) => Ok(true),
+            NameSource::Var(_, _) => Ok(true),
             _ => Ok(false)
         }
     }
@@ -433,8 +447,10 @@ impl EdlFnArgument for HirName {
                 // Since constants are always passed `by value`, their mutability is `true`.
                 Ok(true)
             }
-            NameSource::Var(var) => {
-                state.vars.is_mutable(*var).ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))
+            NameSource::Var(var, mutable) => {
+                let m = state.vars.is_mutable(*var).ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))?;
+                assert_eq!(*mutable, m, "mutability state of variable changed!");
+                Ok(m)
                     // .and_then(|mutable| state.vars.is_global(*var)
                     //     .map(|global| mutable & !global)
                     //     .map_err(|err| HirError::new_edl(self.pos, err)))
@@ -451,7 +467,7 @@ impl EdlFnArgument for HirName {
     ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         let info = self.info()?;
         match &info.name_src {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _) => {
                 state.vars.is_global(*var_id).map_err(|err| HirError::new_edl(self.pos, err))
             }
             NameSource::Const(_) => Ok(true), // constants are, well, constant
@@ -461,10 +477,15 @@ impl EdlFnArgument for HirName {
 }
 
 impl MakeGraph for HirName {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+
         todo!()
     }
 }

@@ -127,15 +127,21 @@ impl HirExpression {
             HirExpression::Field(val) => val.can_be_assigned_to(phase),
             HirExpression::Name(name) => name.can_be_assigned_to(phase),
             HirExpression::ArrayIndex(index) => index.can_be_assigned_to(phase),
+            HirExpression::Deref(deref) => deref.can_be_assigned_to(phase),
             _ => Ok(false),
         }
     }
 
-    pub fn is_ref_like(&self, phase: &HirPhase) -> Result<bool, HirError> {
+    /// Returns true if the expression is internally handled as a reference.
+    /// This means that the representation of this expression in MIR is a reference type and any
+    /// expressions that use this expression and do not expect an internal reference must insert
+    /// a MIR dereferencing operation before using the resulting MIR value.
+    pub fn is_internal_ref(&self, phase: &HirPhase) -> Result<bool, HirError> {
         match self {
-            HirExpression::Field(val) => val.is_ref_like(phase),
-            HirExpression::Name(name) => name.is_ref_like(phase),
-            HirExpression::ArrayIndex(index) => index.is_ref_like(phase),
+            HirExpression::Field(val) => val.is_internal_ref(phase),
+            HirExpression::Name(name) => name.is_internal_ref(phase),
+            HirExpression::ArrayIndex(index) => index.is_internal_ref(phase),
+            HirExpression::Deref(deref) => deref.is_internal_ref(phase),
             _ => Ok(false),
         }
     }
@@ -625,6 +631,12 @@ pub trait MakeGraph {
     /// in many cases this is not actually the case.
     /// The compiler will analyse the usage of the generated variable and temporary variables without
     /// any reads will not see the result of the expression evaluation stored _at all_.
+    ///
+    /// # Internal References
+    ///
+    /// If `self` is internally handled as a reference and if `target` does not match the output
+    /// of `mir_type` but instead that of `mir_deref_type`, then the expression value is
+    /// automatically dereferenced to fit into the target value.
     fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
 }
@@ -644,6 +656,15 @@ impl MakeGraph for HirExpression {
 
 impl HirExpression {
     pub fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        todo!()
+    }
+
+    /// Same as `mir_type` but if this expression is internally represented as a reference then
+    /// the dereferenced version of the internal reference type will be presented.
+    pub fn mir_deref_type<B: Backend>(
         &self,
         graph: &mut MirGraph<B>,
     ) -> Result<MirTypeId, HirTranslationError> {
