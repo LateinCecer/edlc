@@ -30,6 +30,7 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompInfo {
@@ -286,11 +287,35 @@ impl EdlFnArgument for HirBreak {
 }
 
 impl MakeGraph for HirBreak {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let loop_id = self.loop_id.as_ref()
+            .expect("reference to loop in break statement unresolved");
+        let loop_merger = graph.loop_mapper.merger(loop_id)
+            .expect("loop flow mapper is missing a loop");
+
+        // we do not need to write anything to the target; the definition can never be read since
+        // `break` yields execution to a point at which `target` need to be overwritten before
+        // any potential reads anyway
+        let target_ty = graph.graph.get_var_type(&target);
+        assert_eq!(*target_ty, graph.mir_phase.types.empty());
+
+        // seal block with jump to merger
+        graph.graph.insert_jump(graph.current_block, *loop_merger);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 

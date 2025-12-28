@@ -17,7 +17,8 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_variable::MirOffset;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
+use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue};
+use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
@@ -27,8 +28,19 @@ pub struct MirAssign {
     pub scope: ScopeId,
     pub src: ModuleSrc,
     pub id: MirUid,
-    pub lhs: MirOffset,
+    pub lhs: MirValue,
     pub rhs: MirValue,
+}
+
+impl MirAssign {
+    pub fn assert_check(&self, graph: &MirFlowGraph, types: &MirTypeRegistry) {
+        let lhs_ty = graph.get_var_type(&self.lhs);
+        let base = types.get_ref_type(lhs_ty)
+            .or_else(|| types.get_mut_ref_type(lhs_ty))
+            .unwrap();
+        let rhs_ty = graph.get_var_type(&self.rhs);
+        assert_eq!(base, *rhs_ty);
+    }
 }
 
 impl MirGraphElement for MirAssign {

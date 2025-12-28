@@ -33,7 +33,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_call::{ComptimeParamPair, MirCall};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::TMirFnCallInfo;
+use crate::mir::mir_type::{MirTypeId, TMirFnCallInfo};
 use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ScopeId};
 use std::error::Error;
@@ -1859,11 +1859,118 @@ impl EdlFnArgument for HirFunctionCall {
 }
 
 impl MakeGraph for HirFunctionCall {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let info = self.info.as_ref().unwrap();
+        let type_info = info.finalized_type_info.as_ref().unwrap();
+
+        // get function signature for comparison
+        let edl_sig = graph.hir_phase.types.get_fn_signature(type_info.fn_id)?.clone();
+        let ret = graph.mir_phase.types.mir_id(&edl_sig.ret, &graph.hir_phase.types)?;
+        let edl_func_instance = self.get_function_instance().unwrap();
+        let mir_uid = graph.mir_phase.new_id();
+
+        // check if the function call was from a `comptime` context and if the callee is a hybrid
+        // function. In that case, generate the function as a `comptime` function, instead of as a
+        // true hybrid function.
+        let comptime_call = edl_sig.comptime_only || (self.call_comptime_if_possible && edl_sig.comptime);
+        let mut comptime_params = if !comptime_call && edl_sig.is_hybrid() {
+            ComptimeParams::new(mir_uid)
+        } else {
+            ComptimeParams::empty()
+        };
+
+        // write parameters
+        let mut parameter_values = vec![];
+        let mut comptime_parameter_values = vec![];
+
+        for (i, (param, param_def)) in self.params.iter().zip(edl_sig.params.iter()).enumerate() {
+            let param_ty = param.mir_deref_type(graph)?;
+            let param_value = graph.graph.create_temp_variable(param_ty);
+            param.write_to_graph(graph, param_value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // early exit in the eval of the parameter value
+            }
+
+            // register as runtime or as comptime parameter
+            if param_def.comptime && !comptime_call {
+                let value_id = graph.mir_funcs.comptime_mapper.create();
+                let comptime_index = comptime_params.len();
+                comptime_params.push(value_id, i, comptime_index);
+                comptime_parameter_values.push(ComptimeParamPair {
+                    value_id,
+                    value_expr: param_value,
+                });
+            } else {
+                parameter_values.push(param_value);
+            }
+        }
+        // sanity check parameter lengths
+        assert_eq!(parameter_values.len() + comptime_params.len(), self.params.len());
+        assert_eq!(comptime_params.len(), comptime_parameter_values.len());
+
+        // get MIR function id from the registry
+        let func = graph.mir_funcs.mir_id(
+            &edl_func_instance,
+            &mut graph.hir_phase,
+            &mut graph.mir_phase,
+            comptime_params,
+            comptime_call,
+        )?;
+
+        // create call expression
+        let expr = graph.graph.expressions
+            .insert_call(MirCall {
+                pos: self.pos,
+                scope: self.scope,
+                src: self.src.clone(),
+                id: mir_uid,
+                args: parameter_values,
+                comptime_args: comptime_parameter_values,
+                ret,
+                func,
+                is_recursive: false,
+            });
+        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types);
+
+        // seal block if the function is marked as 'never-return'
+        if matches!(&type_info.ret_ty, EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_NEVER) {
+            // function call is expected to never actually return.
+            // to make sure that this is actually represented in the flow graph, insert a panic.
+            // this acts as a guard in case the function call does return after all
+            let panic_value = graph.graph
+                .create_temp_variable(graph.mir_phase.types.empty());
+            let empty = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+            graph.graph.insert_def(graph.current_block, panic_value, empty, &graph.mir_phase.types);
+            graph.graph.insert_panic(graph.current_block, panic_value);
+        }
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        // NOTE: the return value of the function is always just a plane value. Function returns
+        //       may never be internal references. What can be internal references is dereferenced
+        //       references returned by function calls. But that naturally is a language level
+        //       reference, even if the dereferencing may be performed automatically.
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
 

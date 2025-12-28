@@ -34,6 +34,7 @@ use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,7 +350,75 @@ impl MakeGraph for HirAssign {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        if let HirExpression::Name(name) = &*self.lhs {
+            // if we assign to a plane variable we can just overwrite the entire MIR value
+            if let Some(var_id) = name.var_id() {
+                if graph.hir_phase.vars.is_global(*var_id)? {
+                    return Err(HirTranslationError::CannotAssignToExpr {
+                        pos: self.pos,
+                        msg: "cannot assign to a global variable".to_string(),
+                    });
+                }
+                if !graph.hir_phase.vars.is_mutable(*var_id).unwrap() {
+                    return Err(HirTranslationError::CannotAssignToExpr {
+                        pos: self.pos,
+                        msg: "variable is not declared as mutable".to_string(),
+                    });
+                }
 
-        todo!()
+                let lhs_value = *graph.var_mapper.get(var_id).unwrap();
+                self.rhs.write_to_graph(graph, lhs_value)?;
+                if graph.is_current_sealed() {
+                    return Ok(()); // early return in value
+                }
+
+                let empty = graph.graph.expressions
+                    .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+                graph.graph.insert_def(graph.current_block, target, empty, &graph.mir_phase.types);
+                return Ok(());
+            }
+        }
+
+        if !self.lhs.can_be_assigned_to(&mut graph.hir_phase)? {
+            return Err(HirTranslationError::CannotAssignToExpr {
+                pos: self.pos,
+                msg: "expression is not mutable".to_string(),
+            })
+        }
+
+        // use the MIR assign expression to execute a partial assign
+        let lhs_value_ty = self.lhs.mir_type(graph)?;
+        let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
+        let lhs_value = graph.graph.create_temp_variable(lhs_value_ty);
+        let rhs_value = graph.graph.create_temp_variable(rhs_value_ty);
+        self.lhs.write_to_graph(graph, lhs_value)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // early return in lhs
+        }
+
+        self.rhs.write_to_graph(graph, rhs_value)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // early return in rhs
+        }
+
+        let assign = MirAssign {
+            pos: self.pos,
+            scope: self.scope,
+            src: self.src.clone(),
+            lhs: lhs_value,
+            rhs: rhs_value,
+            id: graph.mir_phase.new_id(),
+        };
+        assign.assert_check(&graph.graph, &graph.mir_phase.types);
+        let assign = graph.graph.expressions.insert_assign(assign);
+        graph.graph.insert_def(graph.current_block, target, assign, &graph.mir_phase.types);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }

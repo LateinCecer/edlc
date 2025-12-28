@@ -743,6 +743,10 @@ impl MirFlowGraph {
         out
     }
 
+    pub fn is_block_sealed(&self, block: &MirBlockRef) -> bool {
+        self.blocks[block.0].seal != Seal::None
+    }
+
     /// Creates a temporary variable with the specified type.
     /// At this point, the variable has no point of origin and no uses.
     /// It is just an unused unique name.

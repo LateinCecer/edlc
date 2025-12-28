@@ -31,6 +31,7 @@ use crate::resolver::ScopeId;
 use std::error::Error;
 use crate::core::type_analysis::*;
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -394,5 +395,20 @@ impl MakeGraph for HirLiteral {
         let expr_id = graph.graph.expressions.insert_literal(val);
         graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
         Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

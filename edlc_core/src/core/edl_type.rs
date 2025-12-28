@@ -657,18 +657,32 @@ impl EdlTypeInstance {
         self.param.get_const_mut(1)
     }
 
-    pub fn get_slice_type(&self) -> Result<&EdlConstValue, EdlError> {
+    pub fn get_slice_type(&self) -> Result<&EdlTypeInstance, EdlError> {
         if self.ty != EDL_SLICE {
             return Err(EdlError::E003 { exp: EDL_SLICE, got: self.ty });
         }
-        self.param.get_const(0)
+        self.param.get_type(0)
     }
 
-    pub fn get_slice_type_mut(&mut self) -> Result<&mut EdlConstValue, EdlError> {
+    pub fn get_slice_type_mut(&mut self) -> Result<&mut EdlTypeInstance, EdlError> {
         if self.ty != EDL_SLICE {
             return Err(EdlError::E003 { exp: EDL_SLICE, got: self.ty });
         }
-        self.param.get_const_mut(0)
+        self.param.get_type_mut(0)
+    }
+
+    pub fn get_ref_type(&self) -> Result<&EdlTypeInstance, EdlError> {
+        if self.ty != EDL_REF {
+            return Err(EdlError::E003 { exp: EDL_REF, got: self.ty });
+        }
+        self.param.get_type(0)
+    }
+
+    pub fn get_mut_ref_type(&self) -> Result<&EdlTypeInstance, EdlError> {
+        if self.ty != EDL_MUT_REF {
+            return Err(EdlError::E003 { exp: EDL_MUT_REF, got: self.ty });
+        }
+        self.param.get_type(0)
     }
 }
 

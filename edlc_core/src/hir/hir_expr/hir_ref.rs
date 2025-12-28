@@ -14,7 +14,9 @@
  *    limitations under the License.
  */
 use std::error::Error;
+use std::mem;
 use crate::core::edl_fn::EdlCompilerState;
+use crate::core::edl_type;
 use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
@@ -27,6 +29,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{MirDowncastRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::edl_fn::EdlFnArgument;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +80,34 @@ impl HirRef {
                 None,
             );
         }
+        Ok(())
+    }
+
+    /// Creates an auto-reference at HIR level.
+    /// This function can be called during type resolution.
+    /// If the target expression has a (partially) resolved type that is a mutable or shared
+    /// reference type, then this function does nothing.
+    /// If, however, the target is not a reference type, it is wrapped in a new [HirRef] expression.
+    ///
+    /// NOTE: this sort of handling may lead to problems in situations in which LHS is only later
+    ///       able to resolve that it is a reference type.
+    pub fn auto(expr: &mut Box<HirExpression>, phase: &mut HirPhase, state: &mut InferState) -> Result<(), HirError> {
+        expr.resolve_types(phase, state)?;
+        let mut inferer = phase.infer_from(state);
+        let expr_ty = expr.get_type_uid(&mut inferer);
+
+        match &inferer.find_type(expr_ty) {
+            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF || inst.ty == edl_type::EDL_MUT_REF => {
+                // is already a reference
+                return Ok(());
+            }
+            _ => (),
+        }
+
+        let new_base = Box::new(
+            Self::new(expr.clone(), phase.new_uid(), true).into());
+        *expr = new_base;
+        expr.resolve_types(phase, state)?;
         Ok(())
     }
 }
@@ -259,5 +290,13 @@ impl MakeGraph for HirRef {
             );
         }
         Ok(())
+    }
+
+    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
+        todo!()
+    }
+
+    fn mir_deref_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
+        todo!()
     }
 }

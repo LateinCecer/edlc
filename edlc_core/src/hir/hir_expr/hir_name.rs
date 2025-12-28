@@ -331,6 +331,22 @@ impl HirName {
         }
     }
 
+    /// Returns the EDL variable id if the name refers to a variable.
+    /// If the name does not refer to a variable, [None] is returned.
+    ///
+    /// # Staging
+    ///
+    /// This method is ment for later stages of the compiling process – after name and type
+    /// resolution.
+    /// If this method is called before that information is present, this method may panic.
+    pub fn var_id(&self) -> Option<&EdlVarId> {
+        let info = self.info().unwrap();
+        match &info.name_src {
+            NameSource::Var(var, _) => Some(var),
+            _ => None,
+        }
+    }
+
     pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
         let info = self.info()?;
         match &info.name_src {

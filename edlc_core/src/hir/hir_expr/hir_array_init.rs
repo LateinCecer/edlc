@@ -34,6 +34,7 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
 use crate::prelude::report_infer_error;
 use crate::resolver::ScopeId;
@@ -488,10 +489,87 @@ impl EdlFnArgument for HirArrayInit {
 }
 
 impl MakeGraph for HirArrayInit {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let info = self.info.as_ref().unwrap();
+        let ty = info.finalized_type.clone();
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        let ty = ty.unwrap();
+        let ty_mir = graph.mir_phase.types
+            .mir_id(&ty, &graph.hir_phase.types)?;
+        let element_ty = ty.get_array_element()?;
+        let element_ty_mir = graph.mir_phase.types
+            .mir_id(&element_ty, &graph.hir_phase.types)?;
+
+        let elements = match &self.variant {
+            HirArrayInitVariant::List(els) => {
+                let mut vals = Vec::new();
+                for element in els.iter() {
+                    let value = graph.graph.create_temp_variable(element_ty_mir);
+                    element.write_to_graph(graph, value)?;
+                    if graph.is_current_sealed() {
+                        return Ok(()); // early return in init value
+                    }
+                    vals.push(value);
+                }
+                MirArrayInitVariant::List(vals)
+            }
+            HirArrayInitVariant::Copy { val, len } => {
+                let value = graph.graph.create_temp_variable(element_ty_mir);
+                val.write_to_graph(graph, value)?;
+                if graph.is_current_sealed() {
+                    return Ok(()); // early return in copy value
+                }
+                MirArrayInitVariant::Copy {
+                    val: value,
+                    len: len.as_const_value(&mut graph.hir_phase)?
+                }
+            }
+        };
+        let expr = graph.graph.expressions.insert_array_init(MirArrayInit {
+            element_ty: element_ty_mir,
+            pos: self.pos,
+            scope: self.scope,
+            src: self.src.clone(),
+            ty: ty_mir,
+            id: graph.mir_phase.new_id(),
+            elements,
+        });
+        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        let ty = ty.unwrap();
+        graph.mir_phase.types.mir_id(&ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        self.mir_type(graph)
     }
 }

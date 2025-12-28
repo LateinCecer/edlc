@@ -32,7 +32,7 @@ use crate::hir::hir_expr::hir_literal::HirLiteral;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::hir_return::HirReturn;
 use crate::hir::translation::{HirTranslationError};
-use crate::hir::{HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::{HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
@@ -40,7 +40,7 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::hir_loop::HirLoop;
 use crate::prelude::HirContext;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
@@ -49,6 +49,7 @@ use crate::hir::hir_expr::hir_field::HirField;
 use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
+use crate::prelude::mir_vars::VariableMapper;
 
 pub mod hir_array_init;
 pub mod hir_array_index;
@@ -610,6 +611,48 @@ pub trait HirExpr: ResolveNames + HirTreeWalker {
     fn as_const_value(&self, phase: &mut HirPhase) -> Result<EdlConstValue, HirError>;
 }
 
+struct LoopMapperEntry {
+    loop_name: HirUid,
+    merge_block: MirBlockRef,
+    header_block: MirBlockRef,
+}
+
+pub struct LoopMapper {
+    entries: HashMap<HirUid, LoopMapperEntry>,
+}
+
+impl LoopMapper {
+    pub fn new() -> Self {
+        LoopMapper {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        loop_uid: HirUid,
+        merge_block: MirBlockRef,
+        header_block: MirBlockRef,
+    ) {
+        self.entries.insert(
+            loop_uid,
+            LoopMapperEntry {
+                loop_name: loop_uid,
+                header_block,
+                merge_block,
+            }
+        );
+    }
+
+    fn header(&self, loop_uid: &HirUid) -> Option<&MirBlockRef> {
+        self.entries.get(loop_uid).map(|x| &x.header_block)
+    }
+
+    fn merger(&self, loop_uid: &HirUid) -> Option<&MirBlockRef> {
+        self.entries.get(loop_uid).map(|x| &x.merge_block)
+    }
+}
+
 
 /// Encodes the writing state of HIR->MIR code translation.
 pub struct MirGraph<'a, 'graph, B: Backend> {
@@ -617,7 +660,15 @@ pub struct MirGraph<'a, 'graph, B: Backend> {
     pub mir_phase: &'a mut MirPhase,
     pub mir_funcs: &'a mut MirFuncRegistry<B>,
     pub graph: &'graph mut MirFlowGraph,
+    pub var_mapper: &'graph mut VariableMapper,
+    pub loop_mapper: &'graph mut LoopMapper,
     pub current_block: MirBlockRef,
+}
+
+impl<'a, 'graph, B: Backend> MirGraph<'a, 'graph, B> {
+    pub fn is_current_sealed(&self) -> bool {
+        self.graph.is_block_sealed(&self.current_block)
+    }
 }
 
 pub trait MakeGraph {
@@ -637,8 +688,33 @@ pub trait MakeGraph {
     /// If `self` is internally handled as a reference and if `target` does not match the output
     /// of `mir_type` but instead that of `mir_deref_type`, then the expression value is
     /// automatically dereferenced to fit into the target value.
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
+
+    /// Returns the MIR type of the value that this graph source object can be written to.
+    /// If this object writes to an internal reference, the type returned by this method call is a
+    /// MIR reference (may be mutable).
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError>;
+
+    /// Returns the MIR type of the value that this graph source object can be written to
+    /// (much like [Self::mir_type]).
+    /// If this object writes to an internal reference, the type returned by this method call is
+    /// the *dereferenced* base type in its MIR representation.
+    /// This should be used to create a temporary value if the goal is to obtain a dereferenced base
+    /// value, instead of an internal reference.
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        self.mir_type(graph)
+    }
 }
 
 impl MakeGraph for HirExpression {
@@ -652,22 +728,12 @@ impl MakeGraph for HirExpression {
     {
         todo!()
     }
-}
 
-impl HirExpression {
-    pub fn mir_type<B: Backend>(
-        &self,
-        graph: &mut MirGraph<B>,
-    ) -> Result<MirTypeId, HirTranslationError> {
+    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
         todo!()
     }
 
-    /// Same as `mir_type` but if this expression is internally represented as a reference then
-    /// the dereferenced version of the internal reference type will be presented.
-    pub fn mir_deref_type<B: Backend>(
-        &self,
-        graph: &mut MirGraph<B>,
-    ) -> Result<MirTypeId, HirTranslationError> {
+    fn mir_deref_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
         todo!()
     }
 }

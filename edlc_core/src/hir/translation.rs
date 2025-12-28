@@ -42,7 +42,8 @@ pub enum HirTranslationError {
     EdlError(EdlError),
     UnresolvedParameterName { pos: SrcPos, name: String },
     CannotAssignToExpr { pos: SrcPos, msg: String },
-    RecursionInHybridFunction { pos: SrcPos }
+    RecursionInHybridFunction { pos: SrcPos },
+    ExpectedReference { pos: SrcPos, got: EdlTypeInstance },
 }
 
 impl Display for HirTranslationError {
@@ -88,6 +89,9 @@ impl Display for HirTranslationError {
             HirTranslationError::RecursionInHybridFunction { pos } => {
                 write!(f, "call at {pos} generates a recursive callstack for a hybrid function, \
                 which is illegal")
+            }
+            HirTranslationError::ExpectedReference { pos, got } => {
+                write!(f, "call at {pos} expected a reference but got type {got:?} instead")
             }
         }
     }
@@ -135,6 +139,11 @@ impl HirFmt for HirTranslationError {
             Self::EdlError(err) => {
                 err.pretty_fmt(f, &phase.types, &phase.vars)
             },
+            Self::ExpectedReference { pos, got } => {
+                write!(f, "Expected reference at pos {pos} but got type `")?;
+                got.fmt_type(f, &phase.types)?;
+                write!(f, "` instead")
+            }
 
             err => write!(f, "{err}")
         }

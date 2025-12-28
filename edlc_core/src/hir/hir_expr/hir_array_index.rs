@@ -19,6 +19,7 @@ use crate::core::edl_type::{EdlMaybeType, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph};
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
@@ -28,6 +29,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{MirRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::hir_expr::HirTreeWalker;
 use crate::resolver::ScopeId;
 use std::error::Error;
@@ -37,6 +39,8 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// the internal reference is mutable if the LHS of the operator is mutable.
+    mutable: bool,
 }
 
 /// This implements HIR array index operations.
@@ -256,14 +260,35 @@ impl ResolveTypes for HirArrayIndex {
         let own_uid = self.get_type_uid(&mut infer);
         let node = self.info.as_ref().unwrap().node;
 
-        // insert constraints
-        let lhs_ty = self.lhs.get_type_uid(&mut infer);
-        let ty = infer.type_reg.array(EdlMaybeType::Unknown, None).unwrap();
-        if let Err(err) = infer.at(node).eq(&lhs_ty, &ty) {
-            return Err(report_infer_error(err, infer_state, phase));
-        }
+        // solve lhs first to determine if lhs is a reference already
+        self.lhs.resolve_types(phase, infer_state)?;
 
-        let element_ty = infer.get_generic_type(lhs_ty, 0).unwrap();
+        // insert constraints
+        HirRef::auto(&mut self.lhs, phase, infer_state)?;
+        infer = phase.infer_from(infer_state);
+        let lhs_ty = self.lhs.get_type_uid(&mut infer);
+        // LHS must be a reference type now
+        let ref_element = infer.get_generic_type(lhs_ty, 0).unwrap();
+        let array_ty = infer.type_reg.array(EdlMaybeType::Unknown, None).unwrap();
+        let slice_ty = infer.type_reg.slice(EdlMaybeType::Unknown).unwrap();
+
+        let element_ty = if infer.at(node).try_eq(&ref_element.uid, &array_ty) {
+            // this is an array
+            if let Err(err) = infer.at(node).eq(&ref_element.uid, &array_ty) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
+            infer.get_generic_type(ref_element.uid, 0).unwrap()
+        } else if infer.at(node).try_eq(&ref_element.uid, &slice_ty) {
+            // this is a slice
+            if let Err(err) = infer.at(node).eq(&ref_element.uid, &slice_ty) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
+            infer.get_generic_type(ref_element.uid, 0).unwrap()
+        } else {
+            panic!("HIR array index operator can only be applied to arrays or slices");
+        };
+
+        // element must be return type of this operation
         if let Err(err) = infer.at(node).eq(&own_uid, &element_ty.uid) {
             return Err(report_infer_error(err, infer_state, phase));
         }
@@ -290,6 +315,7 @@ impl ResolveTypes for HirArrayIndex {
                 node: node_id,
                 type_uid: ty_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable: false,
             });
             ty_uid
         }
@@ -300,6 +326,13 @@ impl ResolveTypes for HirArrayIndex {
             .expect("tried to finalize uninitialized node");
         let uid = info.type_uid;
         info.finalized_type = inferer.find_type(uid);
+
+        let lhs_uid = self.lhs.get_type_uid(inferer);
+        info.mutable = match &inferer.find_type(lhs_uid) {
+            EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF => false,
+            EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_MUT_REF => true,
+            _ => unreachable!(),
+        };
         // finalize children
         self.lhs.finalize_types(inferer);
         self.index.finalize_types(inferer);
@@ -393,10 +426,16 @@ impl MakeGraph for HirArrayIndex {
         let lhs_type = self.lhs.mir_type(graph)?;
         let lhs_expr = graph.graph.create_temp_variable(lhs_type);
         self.lhs.write_to_graph(graph, lhs_expr)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // early return in lhs
+        }
         // in this case, we can simply create an offset into the lhs
-        let index_type = self.index.mir_type(graph)?;
+        let index_type = self.index.mir_deref_type(graph)?;
         let index_expr = graph.graph.create_temp_variable(index_type);
         self.index.write_to_graph(graph, index_expr)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // early return in index
+        }
 
         // get target value and check if it is mutable
         let target_type = *graph.graph.get_var_type(&target);
@@ -439,5 +478,42 @@ impl MakeGraph for HirArrayIndex {
             panic!("internal compiler error: array index operations always return references in \
             MIR – dereferencing must be done explicitly _before_ lowering");
         }
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty,
+                pos: self.pos,
+            });
+        }
+        let ref_ty = if self.info.as_ref().unwrap().mutable {
+            graph.hir_phase.types.new_mut_ref(ty)?
+        } else {
+            graph.hir_phase.types.new_ref(ty)?
+        };
+        graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty,
+                pos: self.pos,
+            });
+        }
+        let ty = ty.unwrap();
+        graph.mir_phase.types
+            .mir_id(&ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

@@ -32,6 +32,7 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_const::MirConstDef;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ResolveError, ScopeId};
 
@@ -285,10 +286,21 @@ impl HirConst {
 }
 
 impl MakeGraph for HirConst {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        todo!()
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
         todo!()
     }
 }

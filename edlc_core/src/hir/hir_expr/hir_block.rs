@@ -31,6 +31,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
 
@@ -463,10 +464,55 @@ impl EdlFnArgument for HirBlock {
 }
 
 impl MakeGraph for HirBlock {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        for statement in self.content.iter() {
+            let value_ty = statement.mir_type(graph)?;
+            let value = graph.graph.create_temp_variable(value_ty);
+            statement.write_to_graph(graph, value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // early return in statement
+            }
+        }
+
+        if let Some(ret) = self.ret.as_ref() {
+            ret.write_to_graph(graph, target)?;
+        } else {
+            let empty = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+            graph.graph.insert_def(graph.current_block, target, empty, &graph.mir_phase.types);
+        }
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        if let Some(ret) = self.ret.as_ref() {
+            ret.mir_type(graph)
+        } else {
+            Ok(graph.mir_phase.types.empty())
+        }
+    }
+
+    /// For blocks, internal references are directly transferred from their return values.
+    /// If the block has a return value and if that value is an internal reference than the MIR
+    /// value of the block itself will also be an internal reference.
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        if let Some(ret) = self.ret.as_ref() {
+            ret.mir_deref_type(graph)
+        } else {
+            Ok(graph.mir_phase.types.empty())
+        }
     }
 }

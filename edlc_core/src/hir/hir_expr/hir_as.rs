@@ -33,6 +33,7 @@ use crate::resolver::ScopeId;
 use std::collections::HashSet;
 use std::error::Error;
 use crate::mir::mir_expr::mir_as::MirAs;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -328,8 +329,13 @@ impl MakeGraph for HirAs {
         }
         let ty = graph.mir_phase.types.mir_id(instance, &graph.hir_phase.types)?;
 
-        let value_ty = self.val.mir_type(graph)?;
+        let value_ty = self.val.mir_deref_type(graph)?;
         let val = graph.graph.create_temp_variable(value_ty);
+        self.val.write_to_graph(graph, val)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // early return in value
+        }
+
         let expr = MirAs {
             pos: self.pos,
             scope: self.scope,
@@ -340,7 +346,29 @@ impl MakeGraph for HirAs {
         };
 
         let expr_id = graph.graph.expressions.insert_as(expr);
-        graph.graph.insert_def(graph.current_block, val, expr_id, &graph.mir_phase.types);
+        graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
         Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        self.mir_type(graph)
     }
 }
