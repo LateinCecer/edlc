@@ -615,6 +615,7 @@ struct LoopMapperEntry {
     loop_name: HirUid,
     merge_block: MirBlockRef,
     header_block: MirBlockRef,
+    result_value: MirValue,
 }
 
 pub struct LoopMapper {
@@ -633,6 +634,7 @@ impl LoopMapper {
         loop_uid: HirUid,
         merge_block: MirBlockRef,
         header_block: MirBlockRef,
+        value: MirValue,
     ) {
         self.entries.insert(
             loop_uid,
@@ -640,6 +642,7 @@ impl LoopMapper {
                 loop_name: loop_uid,
                 header_block,
                 merge_block,
+                result_value: value,
             }
         );
     }
@@ -650,6 +653,10 @@ impl LoopMapper {
 
     fn merger(&self, loop_uid: &HirUid) -> Option<&MirBlockRef> {
         self.entries.get(loop_uid).map(|x| &x.merge_block)
+    }
+
+    fn value(&self, loop_uid: &HirUid) -> Option<&MirValue> {
+        self.entries.get(loop_uid).map(|x| &x.result_value)
     }
 }
 

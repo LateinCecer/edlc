@@ -29,6 +29,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -163,7 +164,7 @@ impl HirDeref {
     }
 
     /// Tries to adapt the output of the specified expression to the output type by applying a
-    /// auto-ref or auto-deref.
+    /// auto-deref.
     pub fn try_deref(
         output: TypeUid,
         value: &mut Box<HirExpression>,
@@ -195,6 +196,31 @@ impl HirDeref {
             return Err(report_infer_error(err, infer_state, phase));
         }
         value.resolve_types(phase, infer_state)
+    }
+
+    /// Auto dereferences any language level reference type in the provided expression.
+    /// This is repeated iteratively for references of references until a base type is reached.
+    pub fn auto(
+        value: &mut Box<HirExpression>,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        loop {
+            value.resolve_types(phase, infer_state)?;
+            let mut inferer = phase.infer_from(infer_state);
+            let expr_id = value.get_type_uid(&mut inferer);
+
+            match &inferer.find_type(expr_id) {
+                EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF || inst.ty == edl_type::EDL_MUT_REF => {
+                    let new_base: Box<HirExpression> = Box::new(HirDeref::new(value.clone(), phase.new_uid()).into());
+                    *value = new_base;
+                },
+                _ => {
+                    // value is not a reference, we can exit now
+                    return Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -311,10 +337,54 @@ impl EdlFnArgument for HirDeref {
 }
 
 impl MakeGraph for HirDeref {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let target_ty = *graph.graph.get_var_type(&target);
+        if target_ty == self.mir_type(graph)? {
+            // just write the base value, as a language level reference is turned into an internal
+            // reference
+            assert_eq!(self.value.mir_deref_type(graph)?, target_ty);
+            self.value.write_to_graph(graph, target)
+        } else {
+            assert_eq!(target_ty, self.mir_deref_type(graph)?);
+            let ref_ty = self.value.mir_deref_type(graph)?;
+            let ref_value = graph.graph.create_temp_variable(ref_ty);
+            self.value.write_to_graph(graph, ref_value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // lhs results in early exit
+            }
+
+            graph.graph.def_deref(
+                graph.current_block,
+                ref_value,
+                target,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            );
+            Ok(())
+        }
+    }
+
+    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
+        self.value.mir_deref_type(graph)
+    }
+
+    fn mir_deref_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty,
+                pos: self.pos,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

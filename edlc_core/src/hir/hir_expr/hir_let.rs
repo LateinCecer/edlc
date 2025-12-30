@@ -35,6 +35,7 @@ use crate::mir::MirPhase;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -424,11 +425,40 @@ impl HirLet {
 }
 
 impl MakeGraph for HirLet {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let ty = self.mir_type(graph)?;
+        // only implement local variable definitions here, as global definitions are handled
+        // separately in an isolated environment that snatches the value directly from the [HirLet]
+        // without calling this function.
+        let target_value = graph.var_mapper.get_or_create(
+            self.info.as_ref().unwrap().var_id,
+            ty,
+            &mut graph.graph,
+        );
+        self.value.write_to_graph(graph, target_value)?;
+
+        if graph.is_current_sealed() {
+            return Ok(()); // value encountered early exit
+        }
+
+        let empty_id = graph.graph.expressions
+            .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+        graph.graph.insert_def(graph.current_block, target, empty_id, &graph.mir_phase.types);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 

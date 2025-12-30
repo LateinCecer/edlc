@@ -33,6 +33,7 @@ use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_variable::MirVariable;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
 
@@ -502,6 +503,20 @@ impl MakeGraph for HirName {
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
 
+        todo!()
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        todo!()
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
         todo!()
     }
 }

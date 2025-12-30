@@ -29,6 +29,7 @@ use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -257,11 +258,50 @@ impl EdlFnArgument for HirLoop {
 }
 
 impl MakeGraph for HirLoop {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let header_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .build();
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .build();
+        graph.loop_mapper.insert(self.element_id, merge_block, header_block, target);
+
+        graph.graph.insert_jump(graph.current_block, header_block);
+        graph.current_block = header_block;
+
+        // compile block and write value to temp variable (never read)
+        let block_ty = self.block.mir_type(graph)?;
+        let block_value = graph.graph.create_temp_variable(block_ty);
+        self.block.write_to_graph(graph, block_value)?;
+
+        graph.graph.insert_jump(graph.current_block, merge_block);
+        graph.current_block = merge_block;
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
 

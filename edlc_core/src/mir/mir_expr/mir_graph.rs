@@ -1108,6 +1108,26 @@ impl MirFlowGraph {
         self.insert_expr(block, deref_expr, types)
     }
 
+    /// Inserts a dereferencing expression into the graph.
+    pub fn def_deref(
+        &mut self,
+        block: MirBlockRef,
+        value: MirValue,
+        target: MirValue,
+        types: &MirTypeRegistry,
+        pos: SrcPos,
+        src: ModuleSrc,
+    ) -> BlockLocalStatementUid {
+        let deref_expr = self.expressions.insert_deref(MirDeref::new(
+            value,
+            self,
+            types,
+            pos,
+            src,
+        ));
+        self.insert_def(block, target, deref_expr, types)
+    }
+
     /// Checks if the graph is completely sealed.
     /// If it is, we can safely continue to subsequent analysis steps.
     pub fn seal(&mut self) {

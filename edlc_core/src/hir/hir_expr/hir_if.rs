@@ -32,6 +32,7 @@ use crate::mir::mir_expr::mir_condition::MirCondition;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::{MirError, MirPhase};
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, HirErrorType};
 use crate::resolver::ScopeId;
 
@@ -698,20 +699,112 @@ impl HirExpr for HirIf {
 }
 
 impl MakeGraph for HirCondition {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        assert_eq!(graph.graph.get_var_type(&target), &graph.mir_phase.types.bool());
+        match self {
+            HirCondition::Plane(v, _) => {
+                v.write_to_graph(graph, target)
+            }
+            HirCondition::Match { .. } => {
+                unimplemented!();
+            }
+        }
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.bool())
     }
 }
 
 impl MakeGraph for HirIf {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .build();
+
+        let mut early_exit = false;
+        for (cond, block) in self.if_else_blocks.iter() {
+            let then_block = graph.graph
+                .create_block()
+                .with_parent(graph.current_block)
+                .build();
+            let else_block = graph.graph
+                .create_block()
+                .with_parent(graph.current_block)
+                .build();
+
+            let cond_ty = cond.mir_deref_type(graph)?;
+            let cond_value = graph.graph.create_temp_variable(cond_ty);
+            cond.write_to_graph(graph, cond_value)?;
+            if graph.is_current_sealed() {
+                early_exit = true;
+                break; // early exit in condition - stop traversing if-else chain
+            }
+
+            graph.graph.insert_conditional_jump(
+                graph.current_block, then_block, else_block, cond_value);
+            // write then block
+            graph.current_block = then_block;
+            block.write_to_graph(graph, target)?;
+            if !graph.is_current_sealed() {
+                // only insert jump if the block does not exit early
+                graph.graph.insert_jump(graph.current_block, merge_block);
+            }
+            // continue on else block
+            graph.current_block = else_block;
+        }
+
+        if !early_exit {
+            // compile final `else` block
+            if let Some(fin) = self.else_block.as_ref() {
+                fin.write_to_graph(graph, target)?;
+            } else {
+                let empty_id = graph.graph.expressions
+                    .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+                let empty_value = graph.graph.create_temp_variable(graph.mir_phase.types.empty());
+                graph.graph.insert_def(graph.current_block, empty_value, empty_id, &graph.mir_phase.types);
+            }
+        }
+
+        if !graph.is_current_sealed() {
+            // only insert jump if the block does not exit early
+            graph.graph.insert_jump(graph.current_block, merge_block);
+        }
+        graph.current_block = merge_block;
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
 

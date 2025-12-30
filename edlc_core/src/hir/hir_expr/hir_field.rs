@@ -29,12 +29,15 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_variable::MirOffset;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::MirAggregateTypeLayout;
+use crate::mir::mir_type::{MirAggregateTypeLayout, MirTypeId};
 use crate::mir::{MirError, MirPhase};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
-use crate::mir::mir_expr::MirValue;
+use crate::core::edl_type;
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::mir::mir_expr::{MirRef, MirValue};
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -688,7 +691,8 @@ impl ResolveTypes for HirField {
         let node = self.info.as_ref().unwrap().node;
 
         // resolve base to find where to get the member types from
-        self.lhs.resolve_types(phase, infer_state)?;
+        HirRef::auto(&mut self.lhs, phase, infer_state)?;
+
         let infer = &mut phase.infer_from(infer_state);
         let lhs = self.lhs.get_type_uid(infer);
 
@@ -700,6 +704,10 @@ impl ResolveTypes for HirField {
             let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
                 return Ok(());
             };
+            // find reference base type to extract field offset
+            let lhs_ty = lhs_ty.get_ref_type()
+                .or_else(|_| lhs_ty.get_mut_ref_type())
+                .expect("lhs of field expression must be auto-referenced to a local reference");
 
             let EdlType::Type { state, .. } = phase.types.get_type(lhs_ty.ty)
                 .ok_or(HirError::new_edl(self.pos, EdlError::E011(lhs_ty.ty)))? else {
@@ -861,10 +869,123 @@ impl EdlFnArgument for HirField {
 }
 
 impl MakeGraph for HirField {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let base_ty = self.lhs.mir_type(graph)?;
+        let base_value = graph.graph.create_temp_variable(base_ty);
+        self.lhs.write_to_graph(graph, base_value)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // lhs exits early
+        }
+
+        let target_ty = self.mir_type(graph)?;
+        let expr_id = if graph.mir_phase.types.is_ref(&target_ty) {
+            // insert as a shared reference
+            graph.graph.expressions
+                .insert_ref(MirRef::shared_field(
+                    base_value,
+                    &self.name,
+                    target_ty,
+                    &graph.graph,
+                    &graph.mir_phase.types,
+                    self.pos,
+                    self.src.clone(),
+                ))
+        } else {
+            assert!(graph.mir_phase.types.is_mut_ref(&target_ty));
+            graph.graph.expressions
+                .insert_ref(MirRef::mut_field(
+                    base_value,
+                    &self.name,
+                    target_ty,
+                    &graph.graph,
+                    &graph.mir_phase.types,
+                    self.pos,
+                    self.src.clone(),
+                ))
+        };
+
+        // insert reference expression...
+        if *graph.graph.get_var_type(&target) == target_ty {
+            // ... as an internal reference
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                expr_id,
+                &graph.mir_phase.types,
+            );
+        } else {
+            let self_ty = self.mir_deref_type(graph)?;
+            assert_eq!(*graph.graph.get_var_type(&target), self_ty);
+            // ... as a dereferenced base value
+            let tmp = graph.graph.create_temp_variable(target_ty);
+            graph.graph.insert_def(
+                graph.current_block,
+                tmp,
+                expr_id,
+                &graph.mir_phase.types,
+            );
+            graph.graph.def_deref(
+                graph.current_block,
+                tmp,
+                target,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let field_ty = self.get_type(&mut graph.hir_phase)?;
+        if !field_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: field_ty,
+            });
+        }
+
+        let lhs_ty = self.lhs.get_type(&mut graph.hir_phase)?;
+        if !lhs_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: lhs_ty,
+            })
+        }
+        let lhs_ty = lhs_ty.unwrap();
+        let ty = if lhs_ty.ty == edl_type::EDL_REF {
+            graph.hir_phase.types.new_ref(field_ty)?
+        } else if lhs_ty.ty == edl_type::EDL_MUT_REF {
+            graph.hir_phase.types.new_mut_ref(field_ty)?
+        } else {
+            unreachable!()
+        };
+        graph.mir_phase.types.mir_id(&ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let field_ty = self.get_type(&mut graph.hir_phase)?;
+        if !field_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: field_ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&field_ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

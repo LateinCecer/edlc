@@ -297,7 +297,7 @@ impl MakeGraph for HirBreak {
     {
         let loop_id = self.loop_id.as_ref()
             .expect("reference to loop in break statement unresolved");
-        let loop_merger = graph.loop_mapper.merger(loop_id)
+        let loop_merger = *graph.loop_mapper.merger(loop_id)
             .expect("loop flow mapper is missing a loop");
 
         // we do not need to write anything to the target; the definition can never be read since
@@ -306,8 +306,27 @@ impl MakeGraph for HirBreak {
         let target_ty = graph.graph.get_var_type(&target);
         assert_eq!(*target_ty, graph.mir_phase.types.empty());
 
+        // write value if break statement
+        let loop_value = *graph.loop_mapper.value(loop_id)
+            .expect("loop flow manager is missing a loop");
+        if let Some(value) = self.val.as_ref() {
+            value.write_to_graph(graph, loop_value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // value results in early return
+            }
+        } else {
+            let empty_id = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+            graph.graph.insert_def(
+                graph.current_block,
+                loop_value,
+                empty_id,
+                &graph.mir_phase.types,
+            );
+        }
+
         // seal block with jump to merger
-        graph.graph.insert_jump(graph.current_block, *loop_merger);
+        graph.graph.insert_jump(graph.current_block, loop_merger);
         Ok(())
     }
 

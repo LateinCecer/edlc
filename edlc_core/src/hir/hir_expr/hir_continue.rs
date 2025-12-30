@@ -30,6 +30,7 @@ use crate::prelude::type_analysis::NodeId;
 use crate::prelude::HirErrorType;
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompInfo {
@@ -184,11 +185,36 @@ impl EdlFnArgument for HirContinue {
 }
 
 impl MakeGraph for HirContinue {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let loop_id = &self.info.as_ref()
+            .expect("reference to loop in continue statement is unresolved")
+            .loop_id;
+        let header = graph.loop_mapper
+            .header(loop_id)
+            .expect("failed to find header to loop in function builder");
+
+        // we do not need to write anything to the target; the definition can never be read since
+        // `break` yields execution to a point at which `target` need to be overwritten before
+        // any potential reads anyway
+        let target_ty = graph.graph.get_var_type(&target);
+        assert_eq!(*target_ty, graph.mir_phase.types.empty());
+
+        graph.graph.insert_jump(graph.current_block, *header);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 

@@ -496,20 +496,6 @@ impl MakeGraph for HirBlock {
         graph: &mut MirGraph<B>,
     ) -> Result<MirTypeId, HirTranslationError> {
         if let Some(ret) = self.ret.as_ref() {
-            ret.mir_type(graph)
-        } else {
-            Ok(graph.mir_phase.types.empty())
-        }
-    }
-
-    /// For blocks, internal references are directly transferred from their return values.
-    /// If the block has a return value and if that value is an internal reference than the MIR
-    /// value of the block itself will also be an internal reference.
-    fn mir_deref_type<B: Backend>(
-        &self,
-        graph: &mut MirGraph<B>,
-    ) -> Result<MirTypeId, HirTranslationError> {
-        if let Some(ret) = self.ret.as_ref() {
             ret.mir_deref_type(graph)
         } else {
             Ok(graph.mir_phase.types.empty())
