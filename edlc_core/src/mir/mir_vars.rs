@@ -29,6 +29,12 @@ pub struct VariableMapper {
 /// define the value of the SSA value (as it technically does not change at all).
 /// Instead, the source SSA value should change its value.
 impl VariableMapper {
+    pub fn new() -> Self {
+        VariableMapper {
+            mapping: HashMap::new(),
+        }
+    }
+
     pub fn get_or_create(
         &mut self,
         var: EdlVarId,

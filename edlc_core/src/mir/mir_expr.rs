@@ -25,7 +25,7 @@ use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{MirOffset, MirVariable};
+use crate::mir::mir_expr::mir_variable::{MirOffset, MirGlobalVar};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
@@ -90,7 +90,7 @@ pub struct MirExprContainer {
     ases: Vec<MirAs>,
     call: Vec<MirCall>,
     literals: Vec<MirLiteral>,
-    variables: Vec<MirVariable>,
+    variables: Vec<MirGlobalVar>,
     constants: Vec<MirConstant>,
     assigns: Vec<MirAssign>,
     lets: Vec<MirLet>,
@@ -226,7 +226,7 @@ impl MirExprContainer {
         }
     }
 
-    pub fn insert_variable(&mut self, expr: MirVariable) -> MirExprId {
+    pub fn insert_variable(&mut self, expr: MirGlobalVar) -> MirExprId {
         self.variables.push(expr);
         MirExprId {
             id: self.variables.len() - 1,

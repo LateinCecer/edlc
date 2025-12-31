@@ -26,7 +26,7 @@ use crate::documentation::{DocCompilerState, DocElement, FuncDoc, FuncParamDoc, 
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
-use crate::hir::hir_expr::{HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
@@ -35,8 +35,10 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{Context, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
 use crate::mir::mir_type::TMirFnCallInfo;
+use crate::mir::mir_vars::VariableMapper;
 use crate::mir::MirPhase;
 use crate::prelude::{report_infer_error, ExecType, HirContext};
+use crate::prelude::mir_type::MirTypeRegistry;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 
 
@@ -294,6 +296,25 @@ impl IntoEdl for HirFnParam {
     }
 }
 
+impl HirFnParam {
+    fn as_mir(
+        &self,
+        hir_phase: &HirPhase,
+        mir_phase: &mut MirPhase,
+    ) -> Result<MirFnParam, HirTranslationError> {
+        let ty = mir_phase.types.mir_id(&self.ty, &hir_phase.types)?;
+        Ok(MirFnParam {
+            ty,
+            pos: self.pos,
+            id: mir_phase.new_id(),
+            var_id: self.info.clone().unwrap(),
+            comptime: self.comptime,
+            mutable: self.mutable,
+            name: self.name.clone(),
+        })
+    }
+}
+
 impl IntoEdl for HirFnSignature {
     type EdlRepr = EdlFnSignature;
 
@@ -420,14 +441,6 @@ impl DocElement for HirFnParam {
     }
 }
 
-impl MakeGraph for HirFnParam {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
-    where
-        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
-    {
-        todo!()
-    }
-}
 
 impl HirFnSignature {
     /// This creates a MIR representation of the function signature, with the specified parameter
@@ -453,17 +466,16 @@ impl HirFnSignature {
         let mut params = Vec::new();
         let mut comptime_params = Vec::new();
         for param in self.params.iter() {
-            // let mut mir_param = param.mir_repr(phase, mir_phase, mir_funcs)?;
-            // mir_param.comptime &= !self.comptime_only; // make sure that
-            //
-            // if !mir_param.comptime {
-            //     // do not register comptime parameters in the function signature;
-            //     // these parameters are statically embedded into the function at compiletime
-            //     params.push(mir_param);
-            // } else {
-            //     comptime_params.push(mir_param);
-            // }
-            todo!()
+            let mut mir_param = param.as_mir(phase, mir_phase)?;
+            mir_param.comptime &= !self.comptime_only; // make sure that
+
+            if !mir_param.comptime {
+                // do not register comptime parameters in the function signature;
+                // these parameters are statically embedded into the function at compiletime
+                params.push(mir_param);
+            } else {
+                comptime_params.push(mir_param);
+            }
         }
 
         Ok(MirFnSignature {
@@ -638,12 +650,16 @@ impl HirFn {
         let mut body = MirFlowGraph::new(parameters, return_type, ctx);
         let ret_value = body.create_temp_variable(return_type);
 
+        let mut var_mapper = VariableMapper::new();
+        let mut loop_mapper = LoopMapper::new();
         let mut graph_writer = MirGraph {
             current_block: body.root(),
             graph: &mut body,
             mir_phase,
             hir_phase: phase,
             mir_funcs,
+            var_mapper: &mut var_mapper,
+            loop_mapper: &mut loop_mapper,
         };
         self.body.write_to_graph(&mut graph_writer, ret_value)?;
 

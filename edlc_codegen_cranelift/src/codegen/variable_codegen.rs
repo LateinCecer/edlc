@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use edlc_core::prelude::mir_expr::mir_variable::{BoundsCheck, BoundsValue, MirOffset, MirOffsetSrc, MirVariable};
+use edlc_core::prelude::mir_expr::mir_variable::{BoundsCheck, BoundsValue, MirOffset, MirOffsetSrc, MirGlobalVar};
 use edlc_core::prelude::{MirError, MirPhase};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::InstBuilder;
@@ -26,7 +26,7 @@ use crate::compiler::JIT;
 
 
 
-impl<Runtime> Compilable<Runtime> for MirVariable {
+impl<Runtime> Compilable<Runtime> for MirGlobalVar {
     fn compile(
         self,
         backend: &mut FunctionTranslator<Runtime>,

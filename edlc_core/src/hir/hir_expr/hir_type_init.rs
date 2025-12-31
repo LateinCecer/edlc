@@ -26,7 +26,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_type_init::{MirInitAssign, MirTypeInit};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::MirAggregateTypeLayout;
+use crate::mir::mir_type::{MirAggregateTypeLayout, MirTypeId};
 use crate::mir::MirPhase;
 use crate::prelude::type_analysis::*;
 use crate::resolver::ScopeId;
@@ -913,6 +913,10 @@ impl MakeGraph for HirTypeInit {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        todo!()
+    }
+
+    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
         todo!()
     }
 }

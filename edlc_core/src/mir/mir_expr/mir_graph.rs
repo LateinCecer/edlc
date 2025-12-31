@@ -791,13 +791,11 @@ impl MirFlowGraph {
         var
     }
 
-    pub fn insert_move(&mut self, block: MirBlockRef, value: MirValue) -> MirValue {
+    pub fn insert_move(&mut self, block: MirBlockRef, value: MirValue, target: MirValue) {
         let ty = *self.get_var_type(&value);
-        let var = self.create_temp_variable(ty);
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed");
         let uid = self.blocks[block.0].new_uid();
-        self.blocks[block.0].statements.push(Statement::VarMove { var, value, uid });
-        var
+        self.blocks[block.0].statements.push(Statement::VarMove { var: target, value, uid });
     }
 
     pub fn get_expr_value(&mut self, block: MirBlockRef, uid: BlockLocalStatementUid) -> Option<&MirValue> {
@@ -1046,7 +1044,8 @@ impl MirFlowGraph {
         // original and we cannot ensure that the original value is truly SSA.
         // - the new base variable must then outlive the mutable reference before it is accessed
         // or written to in any way.
-        let moved = self.insert_move(block, value);
+        let moved = self.create_temp_variable(*ty);
+        self.insert_move(block, value, moved);
         let reference_expr = self.expressions.insert_ref(MirRef::mutable(
             moved,
             target_ty,
@@ -1076,7 +1075,8 @@ impl MirFlowGraph {
         // original and we cannot ensure that the original value is truly SSA.
         // - the new base variable must then outlive the mutable reference before it is accessed
         // or written to in any way.
-        let moved = self.insert_move(block, value);
+        let moved = self.create_temp_variable(*ty);
+        self.insert_move(block, value, moved);
         let reference_expr = self.expressions.insert_ref(MirRef::mutable(
             moved,
             target_ty,

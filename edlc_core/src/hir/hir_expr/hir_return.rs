@@ -31,6 +31,7 @@ use crate::prelude::{report_infer_error, ResolveTypes};
 use crate::resolver::ScopeId;
 use std::error::Error;
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -277,11 +278,44 @@ impl EdlFnArgument for HirReturn {
 }
 
 impl MakeGraph for HirReturn {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let value = if let Some(val) = self.value.as_ref() {
+            let value_ty = val.mir_deref_type(graph)?;
+            let value = graph.graph.create_temp_variable(value_ty);
+            val.write_to_graph(graph, value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // value exists early
+            }
+            value
+        } else {
+            let value_ty = graph.mir_phase.types.empty();
+            let value = graph.graph.create_temp_variable(value_ty);
+            let empty_id = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+            graph.graph.insert_def(graph.current_block, value, empty_id, &graph.mir_phase.types);
+            value
+        };
+
+        let target_ty = graph.graph.get_var_type(&target);
+        assert_eq!(target_ty, &graph.mir_phase.types.empty());
+
+        // NOTE: we do not need to write to target, as the return seals the block
+        graph.graph.insert_return(graph.current_block, value);
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 

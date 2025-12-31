@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::any::Any;
 use std::error::Error;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
@@ -30,8 +31,9 @@ use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
-use crate::mir::mir_expr::mir_variable::MirVariable;
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{MirRef, MirValue};
+use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
@@ -502,21 +504,229 @@ impl MakeGraph for HirName {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        match &self.info.as_ref().unwrap().name_src {
+            NameSource::Var(v, _mutable) => {
+                // is a variable
+                let var = graph.hir_phase.vars.get_var(*v)
+                    .expect("variable does not exist");
+                let ty = var.ty.clone();
+                if !ty.is_fully_resolved() {
+                    return Err(HirTranslationError::TypeNotFullyResolved {
+                        pos: self.pos,
+                        ty: ty.clone(),
+                    });
+                }
 
-        todo!()
+                let mir_ty = graph.mir_phase.types.mir_id(
+                    &ty.clone().unwrap(), &graph.hir_phase.types)?;
+                let target_ty = *graph.graph.get_var_type(&target);
+                if mir_ty == target_ty {
+                    if var.global {
+                        // is a global variable
+                        let ref_ty = graph.hir_phase.types
+                            .new_ref(ty)?;
+                        // NOTE: since we deref immediately, we just need a shared reference
+                        let mir_ref_ty = graph.mir_phase.types
+                            .mir_id(&ref_ty, &graph.hir_phase.types)?;
+
+                        let ref_value = graph.graph.create_temp_variable(mir_ref_ty);
+                        let var = MirGlobalVar {
+                            pos: self.pos,
+                            scope: self.scope,
+                            src: self.src.clone(),
+                            ty: mir_ref_ty,
+                            var: *v,
+                            id: graph.mir_phase.new_id(),
+                        };
+                        var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
+                        let expr_id = graph.graph.expressions.insert_variable(var);
+                        graph.graph.insert_def(
+                            graph.current_block, ref_value, expr_id, &graph.mir_phase.types);
+
+                        graph.graph.def_deref(
+                            graph.current_block,
+                            ref_value,
+                            target,
+                            &graph.mir_phase.types,
+                            self.pos,
+                            self.src.clone(),
+                        );
+                        Ok(())
+                    } else {
+                        // is local variable
+                        let var_value = *graph.var_mapper.get(v)
+                            .expect("variable does not have MIR value mapping");
+                        graph.graph.insert_move(graph.current_block, var_value, target);
+                        Ok(())
+                    }
+                } else {
+                    // in this case we may need to create an internal reference
+                    let target_base_ty = graph.mir_phase.types
+                        .get_ref_type(&target_ty)
+                        .or_else(|| graph.mir_phase.types.get_mut_ref_type(&target_ty))
+                        .expect("target type is not a reference");
+                    assert_eq!(target_base_ty, mir_ty,
+                               "target reference base type does not match type of reference");
+                    let is_mutable = graph.mir_phase.types.is_mut_ref(&target_ty);
+
+                    if var.global {
+                        // create a reference to a global variable
+                        let var = MirGlobalVar {
+                            pos: self.pos,
+                            scope: self.scope,
+                            src: self.src.clone(),
+                            ty: mir_ty,
+                            var: *v,
+                            id: graph.mir_phase.new_id(),
+                        };
+                        var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
+                        let expr_id = graph.graph.expressions.insert_variable(var);
+                        graph.graph.insert_def(
+                            graph.current_block, target, expr_id, &graph.mir_phase.types);
+                        Ok(())
+                    } else {
+                        // create a reference to a local variable
+                        let var_value = *graph.var_mapper.get(v)
+                            .expect("variable does not have MIR value mapping");
+                        let ref_expr = if is_mutable {
+                            graph.graph.expressions.insert_ref(MirRef::mutable(
+                                var_value,
+                                target_ty,
+                                &graph.graph,
+                                &graph.mir_phase.types,
+                                self.pos,
+                                self.src.clone(),
+                            ))
+                        } else {
+                            graph.graph.expressions.insert_ref(MirRef::shared(
+                                var_value,
+                                target_ty,
+                                &graph.graph,
+                                &graph.mir_phase.types,
+                                self.pos,
+                                self.src.clone(),
+                            ))
+                        };
+                        graph.graph.insert_def(graph.current_block, target, ref_expr, &graph.mir_phase.types);
+                        Ok(())
+                    }
+                }
+            }
+            NameSource::Const(a) => {
+                // is a constant value
+                let val = graph.mir_phase.types.get_const_value(a)
+                    .expect("failed to get literal value from const");
+                let val_ty = graph.hir_phase.types
+                    .new_type_instance(a.get_type(&graph.hir_phase.types)?)
+                    .expect("failed to create new type instance");
+                let mir_val_ty = graph.mir_phase.types
+                    .mir_id(&val_ty, &graph.hir_phase.types)?;
+
+                let expr_id = graph.graph.expressions
+                    .insert_constants(MirConstant {
+                        pos: self.pos,
+                        src: self.src.clone(),
+                        scope: self.scope,
+                        ty: mir_val_ty,
+                        value: val,
+                        id: graph.mir_phase.new_id(),
+                    });
+
+                let target_ty = *graph.graph.get_var_type(&target);
+                if let Some(ref_base) = graph.mir_phase.types.get_ref_type(&target_ty) {
+                    // we need a shared reference
+                    assert_eq!(ref_base, mir_val_ty);
+                    let tmp_value = graph.graph.create_temp_variable(mir_val_ty);
+                    graph.graph.insert_def(
+                        graph.current_block,
+                        tmp_value,
+                        expr_id,
+                        &graph.mir_phase.types,
+                    );
+
+                    // create shared reference
+                    graph.graph.def_ref(
+                        graph.current_block,
+                        tmp_value,
+                        target,
+                        &graph.mir_phase.types,
+                        self.pos,
+                        self.src.clone(),
+                    );
+                    Ok(())
+                } else if let Some(ref_base) = graph.mir_phase.types.get_mut_ref_type(&target_ty) {
+                    // we need a mutable reference
+                    assert_eq!(ref_base, mir_val_ty);
+                    let tmp_value = graph.graph.create_temp_variable(mir_val_ty);
+                    graph.graph.insert_def(
+                        graph.current_block,
+                        tmp_value,
+                        expr_id,
+                        &graph.mir_phase.types,
+                    );
+
+                    // create mutable reference
+                    graph.graph.def_mut_ref(
+                        graph.current_block,
+                        tmp_value,
+                        target,
+                        &graph.mir_phase.types,
+                        self.pos,
+                        self.src.clone(),
+                    );
+                    Ok(())
+                } else {
+                    // we need the base value
+                    assert_eq!(mir_val_ty, target_ty);
+                    graph.graph.insert_def(
+                        graph.current_block,
+                        target,
+                        expr_id,
+                        &graph.mir_phase.types,
+                    );
+                    Ok(())
+                }
+            }
+            NameSource::Function(_f) => {
+                // is a function
+                todo!()
+            }
+        }
     }
 
     fn mir_type<B: Backend>(
         &self,
         graph: &mut MirGraph<B>,
     ) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+
+        let ref_ty = if self.can_be_assigned_to(&graph.hir_phase)? {
+            graph.hir_phase.types.new_mut_ref(ty)?
+        } else {
+            graph.hir_phase.types.new_ref(ty)?
+        };
+        graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 
     fn mir_deref_type<B: Backend>(
         &self,
         graph: &mut MirGraph<B>,
     ) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

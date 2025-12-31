@@ -28,6 +28,8 @@
 //! itself.
 //! This can make things a little more complicated.
 
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
@@ -35,21 +37,56 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 
+/// This MIR expression can be used to access global variables.
+/// Local variables and function parameters are encoded as [MirValue]s directly so it is not
+/// necessary to use an expression to access those (and indeed not possible).
+/// The type of this expression must be a shared or mutable reference as access to global variables
+/// is always evaluated as a reference to the global data point at which the global var is stored.
+/// Most of the time this reference is immediately dereferenced by the compiler through a
+/// [super::MirDeref] so this quirk is not exposed on a language level and only present in MIR.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirVariable {
+pub struct MirGlobalVar {
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub src: ModuleSrc,
     pub id: MirUid,
     pub var: EdlVarId,
+    /// The MIR type of the variable access.
+    ///
+    /// # Internal References
+    ///
+    /// The [MirGlobalVar] expression is used only to access global variables.
+    /// As such, the variable does not actually exist as a plane MIR value in the code flow graph.
+    /// Accessing a global variable is always a read operation to a global data point.
+    /// We thus always evaluate a read or write operation to a global var as a reference.
+    /// With this, this type *must* be a shared or mutable reference type.
     pub ty: MirTypeId,
 }
 
-impl MirGraphElement for MirVariable {
+impl MirGlobalVar {
+    /// Performs some basic assertion checks on the types of this MIR expression.
+    /// The type of the expression itself must be a reference type and the base type inside of that
+    /// reference must match the type of the global variable.
+    pub fn assert_check(
+        &self,
+        mir_types: &mut MirTypeRegistry,
+        vars: &EdlVarRegistry,
+        types: &EdlTypeRegistry,
+    ) {
+        let var_ty = vars.get_var_type(self.var).unwrap();
+        let var_ty = mir_types.mir_id(var_ty, types).unwrap();
+        let base = mir_types.get_ref_type(&self.ty)
+            .or_else(|| mir_types.get_mut_ref_type(&self.ty))
+            .expect("return type of global var access mut be a reference in MIR!");
+        assert_eq!(base, var_ty, "variable type does not match return type of var access");
+    }
+}
+
+impl MirGraphElement for MirGlobalVar {
     fn collect_vars(&self) -> Vec<MirValue> {
         vec![]
     }
@@ -61,7 +98,7 @@ impl MirGraphElement for MirVariable {
     fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
 }
 
-impl MirVariable {
+impl MirGlobalVar {
     pub fn verify<B: Backend>(
         &mut self,
         _phase: &mut MirPhase,
@@ -74,7 +111,7 @@ impl MirVariable {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum OffsetParent {
-    Var(MirVariable),
+    Var(MirGlobalVar),
     Off(MirOffset),
 }
 
