@@ -50,6 +50,12 @@ use crate::prelude::mir_type::layout::MirLayout;
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
 pub struct MirTypeId(usize);
 
+impl Display for MirTypeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<type {:x}>", self.0)
+    }
+}
+
 pub struct MirLiteralTypes {
     u8: MirTypeId,
     u16: MirTypeId,

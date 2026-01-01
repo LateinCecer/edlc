@@ -733,14 +733,77 @@ impl MakeGraph for HirExpression {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        match self {
+            HirExpression::ArrayInit(expr) => expr.write_to_graph(graph, target),
+            HirExpression::ArrayIndex(expr) => expr.write_to_graph(graph, target),
+            HirExpression::As(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Block(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Call(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Field(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Literal(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Name(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Assign(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Let(expr) => expr.write_to_graph(graph, target),
+            HirExpression::If(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Loop(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Break(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Continue(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Return(expr) => expr.write_to_graph(graph, target),
+            HirExpression::TypeInit(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Ref(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Deref(expr) => expr.write_to_graph(graph, target),
+        }
     }
 
-    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        match self {
+            HirExpression::ArrayInit(expr) => expr.mir_type(graph),
+            HirExpression::ArrayIndex(expr) => expr.mir_type(graph),
+            HirExpression::As(expr) => expr.mir_type(graph),
+            HirExpression::Block(expr) => expr.mir_type(graph),
+            HirExpression::Call(expr) => expr.mir_type(graph),
+            HirExpression::Field(expr) => expr.mir_type(graph),
+            HirExpression::Literal(expr) => expr.mir_type(graph),
+            HirExpression::Name(expr) => expr.mir_type(graph),
+            HirExpression::Assign(expr) => expr.mir_type(graph),
+            HirExpression::Let(expr) => expr.mir_type(graph),
+            HirExpression::If(expr) => expr.mir_type(graph),
+            HirExpression::Loop(expr) => expr.mir_type(graph),
+            HirExpression::Break(expr) => expr.mir_type(graph),
+            HirExpression::Continue(expr) => expr.mir_type(graph),
+            HirExpression::Return(expr) => expr.mir_type(graph),
+            HirExpression::TypeInit(expr) => expr.mir_type(graph),
+            HirExpression::Ref(expr) => expr.mir_type(graph),
+            HirExpression::Deref(expr) => expr.mir_type(graph),
+        }
     }
 
-    fn mir_deref_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        match self {
+            HirExpression::ArrayInit(expr) => expr.mir_deref_type(graph),
+            HirExpression::ArrayIndex(expr) => expr.mir_deref_type(graph),
+            HirExpression::As(expr) => expr.mir_deref_type(graph),
+            HirExpression::Block(expr) => expr.mir_deref_type(graph),
+            HirExpression::Call(expr) => expr.mir_deref_type(graph),
+            HirExpression::Field(expr) => expr.mir_deref_type(graph),
+            HirExpression::Literal(expr) => expr.mir_deref_type(graph),
+            HirExpression::Name(expr) => expr.mir_deref_type(graph),
+            HirExpression::Assign(expr) => expr.mir_deref_type(graph),
+            HirExpression::Let(expr) => expr.mir_deref_type(graph),
+            HirExpression::If(expr) => expr.mir_deref_type(graph),
+            HirExpression::Loop(expr) => expr.mir_deref_type(graph),
+            HirExpression::Break(expr) => expr.mir_deref_type(graph),
+            HirExpression::Continue(expr) => expr.mir_deref_type(graph),
+            HirExpression::Return(expr) => expr.mir_deref_type(graph),
+            HirExpression::TypeInit(expr) => expr.mir_deref_type(graph),
+            HirExpression::Ref(expr) => expr.mir_deref_type(graph),
+            HirExpression::Deref(expr) => expr.mir_deref_type(graph),
+        }
     }
 }

@@ -14,7 +14,6 @@
  *    limitations under the License.
  */
 use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
@@ -25,11 +24,10 @@ use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{MirOffset, MirGlobalVar};
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::mir_variable::{MirGlobalVar, MirOffset};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{MirPhase, MirUid};
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 use std::ops::{Deref, Index};
 
@@ -41,13 +39,12 @@ pub mod mir_variable;
 pub mod mir_constant;
 pub mod mir_assign;
 pub mod mir_data;
-pub mod mir_condition;
 pub mod mir_type_init;
 mod mir_graph;
 mod mir_ref;
 
+pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
 pub use mir_graph::*;
-pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirRef, MirDowncastRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct MirExprUid(usize);
@@ -56,6 +53,15 @@ pub struct MirExprUid(usize);
 pub struct MirExprId {
     id: usize,
     pub ty: MirExprVariant,
+}
+
+/// Defines a printer trait that can be used to print out MIR code.
+pub trait MirPrinter {
+    type Error;
+
+    /// Prints the MIR flow graph using the printer implementation.
+    /// How the printer actually operates is left to the specific implementation.
+    fn print(&mut self, graph: &MirFlowGraph) -> Result<(), Self::Error>;
 }
 
 /// Variants of expressions.

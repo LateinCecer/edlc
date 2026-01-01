@@ -22,6 +22,13 @@ use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
+
+/// Assign operation.
+/// For full overwrites of an entire SSA value, a move statement should be used instead of this
+/// expression.
+/// This expression should be reserved for *partial* assignments and/or assignments into references.
+/// As such, the LHS value of this assignment *must* be a MIR reference whereas the RHS must be the
+/// plane value type behind the reference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirAssign {
     pub pos: SrcPos,

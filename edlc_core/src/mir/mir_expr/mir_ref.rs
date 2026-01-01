@@ -21,11 +21,11 @@ use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirT
 /// If `mutable = true` then the generated reference is mutable.
 /// This means two things; for one,
 pub struct MirRef {
-    mutable: bool,
-    value: MirValue,
+    pub mutable: bool,
+    pub value: MirValue,
     pub src: ModuleSrc,
     pub pos: SrcPos,
-    offset: RefOffset,
+    pub(super) offset: RefOffset,
     pub ty: MirTypeId,
     src_ty: MirTypeId,
 }
@@ -436,7 +436,7 @@ impl MirRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum RefOffset {
+pub(super) enum RefOffset {
     /// The entire object is referenced.
     Entire,
     /// A member of the object is referenced.
@@ -476,7 +476,7 @@ pub struct MirDeref {
     pub pos: SrcPos,
     pub src: ModuleSrc,
     pub ty: MirTypeId,
-    value: MirValue,
+    pub value: MirValue,
 }
 
 impl MirGraphElement for MirDeref {
@@ -515,7 +515,7 @@ pub struct MirDowncastRef {
     pub pos: SrcPos,
     pub src: ModuleSrc,
     pub ty: MirTypeId,
-    value: MirValue,
+    pub value: MirValue,
 }
 
 impl MirGraphElement for MirDowncastRef {

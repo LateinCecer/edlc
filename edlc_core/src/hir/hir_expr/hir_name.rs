@@ -560,6 +560,7 @@ impl MakeGraph for HirName {
                         Ok(())
                     }
                 } else {
+                    dbg!(mir_ty, target_ty);
                     // in this case we may need to create an internal reference
                     let target_base_ty = graph.mir_phase.types
                         .get_ref_type(&target_ty)

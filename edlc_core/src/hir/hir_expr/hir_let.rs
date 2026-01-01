@@ -437,9 +437,18 @@ impl MakeGraph for HirLet {
         // only implement local variable definitions here, as global definitions are handled
         // separately in an isolated environment that snatches the value directly from the [HirLet]
         // without calling this function.
+        let var_ty = self.infer_info.as_ref().unwrap().finalized_var_uid.clone();
+        if !var_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: var_ty,
+            });
+        }
+        let var_ty = graph.mir_phase.types
+            .mir_id(&var_ty.unwrap(), &graph.hir_phase.types)?;
         let target_value = graph.var_mapper.get_or_create(
             self.info.as_ref().unwrap().var_id,
-            ty,
+            var_ty,
             &mut graph.graph,
         );
         self.value.write_to_graph(graph, target_value)?;

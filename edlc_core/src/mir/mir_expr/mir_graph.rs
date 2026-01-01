@@ -14,6 +14,7 @@
  *    limitations under the License.
  */
 mod ssa_value;
+mod acsii_printer;
 
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirRef};
@@ -25,8 +26,10 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
 use crate::prelude::ModuleSrc;
 
+pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirBlockRef(usize);
+pub struct MirBlockRef(pub(super) usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Scope(usize);
@@ -257,8 +260,9 @@ impl Statement {
             Statement::VarMove {value, .. } |
             Statement::VarCopy { value, .. } |
             Statement::VarDef { value: _, var: value, .. } => {
-                assert_eq!(value, ori);
-                *value = replacement;
+                if value == ori {
+                    *value = replacement;
+                }
             },
         }
     }
@@ -427,7 +431,7 @@ impl Block {
     /// If the variable is not defined at a point in the code flow _before_ the specified use point,
     /// then the code flow graph is in an illegal state.
     /// In this case, this method panics.
-    fn find_definition_point(&self, var_use: &VarUse) -> DefPoint {
+    fn find_definition_point(&self, var_use: &VarUse) -> Option<DefPoint> {
         let (block_id, idx, var) = match var_use {
             VarUse::Statement(block_id, var, uid) => {
                 let idx = self
@@ -442,16 +446,24 @@ impl Block {
 
         for item in self.statements[..idx].iter().rev() {
             if item.defines_var(&var) {
-                return DefPoint::Definition(MirGraphLoc::new(block_id, *item.uid()));
+                return Some(DefPoint::Definition(MirGraphLoc::new(block_id, *item.uid())));
             }
         }
         // look in block parameters
-        let (idx, _) = self.parameters
+        self.parameters
             .iter()
             .enumerate()
             .find(|(_, &param_var)| param_var == var)
-            .expect("variable not routed correctly");
-        DefPoint::BlockParameter(block_id, BlockParameterIndex(idx))
+            .map(|(idx, _)| DefPoint::BlockParameter(block_id, BlockParameterIndex(idx)))
+    }
+
+    /// Infers block parameters from variables that are used in the block but don't have
+    /// definitions.
+    fn infer_block_parameters(
+        &mut self,
+        expr_container: &MirExprContainer,
+    ) {
+        todo!()
     }
 
     /// Replaces all MirTempVar usages in the block that resolve to the specified definition point
@@ -483,7 +495,8 @@ impl Block {
 
         let mut affected_uses = self.collect_uses(block_ref, expr_container, var);
         affected_uses.retain(|var_use| {
-            let found_def_point = self.find_definition_point(var_use);
+            let found_def_point = self.find_definition_point(var_use)
+                .expect("variable is not routed correctly");
             &found_def_point == def_point
         });
         self.iter_value_uses_mut(block_ref, expr_container, move |var_use| {
@@ -1138,7 +1151,7 @@ impl MirFlowGraph {
             });
         self.build_reverse_jump_list();
         self.route_variables();
-        self.bake_ssa_variables();
+        // self.bake_ssa_variables();
     }
 
     /// Generates the reverse jump list that is used as a quick lookup table by other algorithms
@@ -1205,6 +1218,11 @@ impl MirFlowGraph {
     ///
     /// This implementation uses a simple worklist approach that should converge monotonously.
     fn route_variables(&mut self) {
+        // add missing block parameters
+        for block in self.blocks.iter_mut() {
+            block.infer_block_parameters(&self.expressions);
+        }
+
         assert!(!self.backlinks.is_empty());
         let mut work_list = (0..self.blocks.len()).collect::<Vec<_>>();
         // For each block, check the input parameters for the receiving block and make sure that

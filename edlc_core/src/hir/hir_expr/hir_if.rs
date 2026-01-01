@@ -13,28 +13,26 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::error::Error;
-use std::mem;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
-use crate::core::edl_type::{EdlMaybeType};
+use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_condition::MirCondition;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::{MirError, MirPhase};
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, HirErrorType};
 use crate::resolver::ScopeId;
+use std::error::Error;
+use std::mem;
 
 
 #[derive(Clone, Debug, PartialEq)]
