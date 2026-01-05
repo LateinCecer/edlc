@@ -17,7 +17,7 @@ use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId};
+use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::{mir_funcs, MirError, MirUid};
 use crate::mir::mir_opt::{Optimizer, Verifier};
@@ -28,6 +28,13 @@ use crate::resolver::ScopeId;
 pub struct ComptimeParamPair {
     pub value_id: ComptimeValueId,
     pub value_expr: MirValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallContext {
+    Runtime,
+    Comptime,
+    MaybeComptime,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +48,7 @@ pub struct MirCall {
     pub func: MirFuncId,
     pub comptime_args: Vec<ComptimeParamPair>,
     pub is_recursive: bool,
+    pub context: CallContext
 }
 
 impl MirGraphElement for MirCall {
@@ -86,6 +94,18 @@ impl MirCall {
         }
     }
 
+    fn call_context<B: Backend>(funcs: &MirFuncRegistry<B>, func_id: MirFuncId) -> CallContext {
+        if funcs.is_comptime(func_id).unwrap() {
+            if funcs.is_comptime_only(func_id).unwrap() {
+                CallContext::Comptime
+            } else {
+                CallContext::MaybeComptime
+            }
+        } else {
+            CallContext::Runtime
+        }
+    }
+
     pub fn add_usize<B: Backend>(
         pos: SrcPos,
         scope: ScopeId,
@@ -101,6 +121,7 @@ impl MirCall {
         // get function
         let func_id = *opt.funcs.get_intrinsic(mir_funcs::INTR_ADD_USIZE)
             .expect("Failed to find implementation for `add` function on `usize` types");
+        let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
             pos,
@@ -112,6 +133,7 @@ impl MirCall {
             func: func_id,
             comptime_args: vec![],
             is_recursive: true,
+            context: ctx,
         })
     }
 
@@ -130,6 +152,7 @@ impl MirCall {
         // get function
         let func_id = *opt.funcs.get_intrinsic(mir_funcs::INTR_SUB_USIZE)
             .expect("Failed to find implementation for `sub` function on `usize` types");
+        let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
             pos,
@@ -141,6 +164,7 @@ impl MirCall {
             func: func_id,
             comptime_args: vec![],
             is_recursive: true,
+            context: ctx,
         })
     }
 
@@ -159,6 +183,7 @@ impl MirCall {
         // get function
         let func_id = *opt.funcs.get_intrinsic(mir_funcs::INTR_MUL_USIZE)
             .expect("Failed to find implementation for `mul` function on `usize` types");
+        let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
             pos,
@@ -170,6 +195,7 @@ impl MirCall {
             func: func_id,
             comptime_args: vec![],
             is_recursive: true,
+            context: ctx,
         })
     }
 
@@ -188,6 +214,7 @@ impl MirCall {
         // get function
         let func_id = *opt.funcs.get_intrinsic(mir_funcs::INTR_DIV_USIZE)
             .expect("Failed to find implementation for `div` function on `usize` types");
+        let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
             pos,
@@ -199,6 +226,7 @@ impl MirCall {
             func: func_id,
             comptime_args: vec![],
             is_recursive: true,
+            context: ctx,
         })
     }
 }

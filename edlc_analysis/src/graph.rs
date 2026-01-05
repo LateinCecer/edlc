@@ -18,7 +18,7 @@ mod builder;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut, Range};
@@ -938,15 +938,23 @@ impl<I: Hash + PartialEq + Eq + Clone, E: LatticeElement + Default + Clone> CfgN
         &mut self,
         other: &Self,
         op: fn(E, E) -> Result<E, E::Conflict>
-    ) -> Result<(), E::Conflict> {
+    ) -> Result<bool, E::Conflict> {
+        let mut changed = false;
         for (id, val) in other.map.iter() {
             if let Some(own) = self.map.get_mut(id) {
-                *own = op(own.clone(), val.clone())?;
-            } else {
+                if val == own {
+                    continue;
+                } else {
+                    let new_val = op(own.clone(), val.clone())?;
+                    changed |= &new_val != own;
+                    *own = new_val;
+                }
+            } else if val != &E::default() {
+                changed = true;
                 self.map.insert(id.clone(), val.clone());
             }
         }
-        Ok(())
+        Ok(changed)
     }
 }
 
@@ -960,11 +968,13 @@ pub trait CfgNodeStateMut<V: LatticeElement> {
     /// A reference to this is then returned mutably.
     fn element_value_mut(&mut self, id: &Self::ValueId) -> &mut V;
 
+    /// Joins the node state with the other node state and reports if the caller was changed during
+    /// the join operation.
     fn join_mut(
         &mut self,
         other: &Self,
         op: fn(V, V) -> Result<V, V::Conflict>
-    ) -> Result<(), V::Conflict>;
+    ) -> Result<bool, V::Conflict>;
 }
 
 pub trait CfgGraphState<V: LatticeElement, N: CfgNodeState<V>> {
@@ -1004,11 +1014,17 @@ pub trait CfgLattice<V: LatticeElement>: Sized {
 
     /// Computes the `join` operation for preceding elements in a CFG lattice.
     /// This is usually done in forward analysis.
-    fn join_prec(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState;
+    /// The result of the join operation is saved in place of the original state for the node with
+    /// the id `ìd`.
+    /// This function returns of the state of the target node changed due to this operation.
+    fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool;
 
     /// Computes the `join` operation for succeeding elements in a CFG lattice.
     /// This is usually done in backward analysis.
-    fn join_succ(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState;
+    /// The result of the join operation is saved in place of the original state for the node with
+    /// the id `id`.
+    /// This function returns if the state of the target node changed due to this operation.
+    fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool;
 
     fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V>;
 
@@ -1030,24 +1046,36 @@ where E: TransferFn<Self, V> + Clone {
     type GraphState = HashMap<LatticeId, Self::NodeState>;
     type NodeId = LatticeId;
 
-    fn join_prec(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
-        let mut out = HashNodeState::default();
+    fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        // make sure a base state exists for `id`
+        state.entry(*id).or_insert(HashNodeState::default());
+
+        let mut changed = false;
         for link in self.lattice.uplinks(*id).unwrap() {
-            if let Some(parent_state) = state.get(&link) {
-                out.join_mut(parent_state, V::upper).unwrap();
+            let [parent_state, node_state] = state
+                .get_disjoint_mut([&link, id]);
+            if let Some(parent_state) = parent_state {
+                // if even a single join operation changes the state, there was a state change
+                changed |= node_state.unwrap().join_mut(parent_state, V::upper).unwrap();
             }
         }
-        out
+        changed
     }
 
-    fn join_succ(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
-        let mut out = HashNodeState::default();
+    fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        // make sure a base state exists for `id`
+        state.entry(*id).or_insert(HashNodeState::default());
+
+        let mut changed = false;
         for link in self.lattice.downlinks(*id).unwrap() {
-            if let Some(parent_state) = state.get(&link) {
-                out.join_mut(parent_state, V::lower).unwrap();
+            let [child_state, node_state] = state
+                .get_disjoint_mut([&link, id]);
+            if let Some(child_state) = child_state {
+                // if even a single join operation changes the state, there was a state change
+                changed |= node_state.unwrap().join_mut(child_state, V::lower).unwrap();
             }
         }
-        out
+        changed
     }
 
     fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
@@ -1072,11 +1100,12 @@ where E: TransferFn<Self, V> + Clone {
 /// Implements a transfer function that works on the lattice of a CFG.
 pub trait TransferFn<L: CfgLattice<V>, V: LatticeElement> {
     /// Transfers the output of the `join` operation of a CFG lattice into a new lattice form.
+    /// This operation returns if the node state changed due to this operation.
     fn transfer(
         &self,
-        input: L::NodeState,
+        input: &mut L::NodeState,
         cfg: &L,
-    ) -> Result<L::NodeState, V::Conflict>;
+    ) -> Result<bool, V::Conflict>;
 }
 
 pub trait LogicSolver<Cfg: CfgLattice<V>, V: LatticeElement> {
@@ -1087,26 +1116,23 @@ pub struct WorkListFixpointForward;
 
 impl<Cfg: CfgLattice<V>, V: LatticeElement> LogicSolver<Cfg, V> for WorkListFixpointForward
 where Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
-    Cfg::NodeId: PartialEq {
+    Cfg::NodeId: PartialEq + Debug,
+    Cfg::NodeState: Debug,
+{
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
         while let Some(v) = work_list.pop() {
-            let j = cfg.join_prec(&v, state);
-            let y = cfg.transfer_fn(&v).transfer(j, cfg)?;
-            if let Some(x) = state.node_state_mut(&v) {
-                if x != &y {
-                    *x = y;
-                } else {
-                    // continue without updating the worklist
-                    continue;
-                }
-            } else {
-                state.insert_node_state(&v, y);
-            }
-            // add inverse of dependencies to worklist
-            for dep in cfg.downlinks(&v).unwrap() {
-                if !work_list.contains(&dep) {
-                    work_list.push(dep);
+            let mut changed = cfg.join_prec(&v, state);
+            changed |= cfg.transfer_fn(&v)
+                .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
+            println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
+
+            if changed {
+                // add inverse of dependencies to worklist
+                for dep in cfg.downlinks(&v).unwrap() {
+                    if !work_list.contains(&dep) {
+                        work_list.push(dep);
+                    }
                 }
             }
         }
@@ -1124,22 +1150,16 @@ where
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
         while let Some(v) = work_list.pop() {
-            let j = cfg.join_succ(&v, state);
-            let y = cfg.transfer_fn(&v).transfer(j, cfg)?;
-            if let Some(x) = state.node_state_mut(&v) {
-                if x != &y {
-                    *x = y;
-                } else {
-                    // continue without updating the worklist
-                    continue;
-                }
-            } else {
-                state.insert_node_state(&v, y);
-            }
-            // add inverse of dependencies to worklist
-            for dep in cfg.uplinks(&v).unwrap() {
-                if !work_list.contains(&dep) {
-                    work_list.push(dep);
+            let mut changed = cfg.join_succ(&v, state);
+            changed |= cfg.transfer_fn(&v)
+                .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
+
+            if changed {
+                // add inverse of dependencies to worklist
+                for dep in cfg.uplinks(&v).unwrap() {
+                    if !work_list.contains(&dep) {
+                        work_list.push(dep);
+                    }
                 }
             }
         }
@@ -1152,39 +1172,46 @@ pub struct PropagationWorkListForward;
 impl<Cfg: CfgLattice<V>, V: LatticeElement> LogicSolver<Cfg, V> for PropagationWorkListForward
 where
     Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
-    Cfg::NodeState: CfgNodeStateMut<V> + Default + Clone,
-    Cfg::NodeId: PartialEq, {
+    Cfg::NodeState: CfgNodeStateMut<V> + Default + Clone + Debug,
+    Cfg::NodeId: PartialEq + Debug, {
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
         let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
             num_iters += 1;
-            let x = if let Some(x) = state.node_state(&v) {
+            let node_state = if let Some(x) = state.node_state(&v) {
                 x
             } else {
                 state.insert_node_state(&v, Cfg::NodeState::default());
                 state.node_state(&v).unwrap()
             };
-            let y = cfg.transfer_fn(&v).transfer(x.clone(), &cfg)?;
+            let mut transfer_state = node_state.clone();
+            cfg.transfer_fn(&v).transfer(&mut transfer_state, cfg)?;
+
+            println!("{v:?}   {:?}", transfer_state);
 
             // add inverse of dependencies to worklist
             for dep in cfg.downlinks(&v).unwrap() {
-                let x = if let Some(x) = state.node_state_mut(&dep) {
+                let dep_state = if let Some(x) = state.node_state_mut(&dep) {
                     x
                 } else {
                     state.insert_node_state(&dep, Cfg::NodeState::default());
                     state.node_state_mut(&dep).unwrap()
                 };
 
-                let mut z = x.clone();
-                z.join_mut(&y, V::upper)?;
-
-                if x != &z {
-                    *x = z;
-                    if !work_list.contains(&dep) {
-                        work_list.push(dep);
-                    }
+                let mut dep_state_clone = dep_state.clone();
+                let changed = dep_state_clone.join_mut(&transfer_state, V::upper)?;
+                if changed && !work_list.contains(&dep) {
+                    *dep_state = dep_state_clone;
+                    work_list.push(dep);
                 }
+
+                // if dep_state != &dep_state_clone {
+                //     *dep_state = dep_state_clone;
+                //     if !work_list.contains(&dep) {
+                //         work_list.push(dep);
+                //     }
+                // }
             }
         }
 
@@ -1211,7 +1238,8 @@ where
                 state.insert_node_state(&v, Cfg::NodeState::default());
                 state.node_state(&v).unwrap()
             };
-            let y = cfg.transfer_fn(&v).transfer(x.clone(), &cfg)?;
+            let mut y = x.clone();
+            cfg.transfer_fn(&v).transfer(&mut y, cfg)?;
 
             // add inverse of dependencies to worklist
             for dep in cfg.uplinks(&v).unwrap() {
@@ -1222,14 +1250,9 @@ where
                     state.node_state_mut(&dep).unwrap()
                 };
 
-                let mut z = x.clone();
-                z.join_mut(&y, V::lower)?;
-
-                if x != &z {
-                    *x = z;
-                    if !work_list.contains(&dep) {
-                        work_list.push(dep);
-                    }
+                let changed = x.join_mut(&y, V::lower)?;
+                if changed && !work_list.contains(&dep) {
+                    work_list.push(dep);
                 }
             }
         }

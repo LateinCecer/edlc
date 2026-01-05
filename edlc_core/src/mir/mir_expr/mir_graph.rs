@@ -16,6 +16,8 @@
 mod ssa_value;
 mod acsii_printer;
 mod deconstruction;
+mod const_propagation;
+pub mod lifetime_analysis;
 
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirRef};
@@ -24,13 +26,12 @@ use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeS
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use crate::lexer::SrcPos;
-use crate::lexer::Token::Key;
+use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
 use crate::prelude::ModuleSrc;
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::deconstruction::PartialSsaDeconstruction;
-use crate::mir::mir_opt::LifetimeAnalysis;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -1548,31 +1549,35 @@ impl From<MirBlockRef> for MirGraphId {
     }
 }
 
-pub struct MirGraphState<V>(HashMap<MirGraphId, V>);
+/// Since the MIR data flow graph is a complete SSA representation, each variable can only have one
+/// stable state in the analysis.
+/// This naturally implies that we do not need to track the state of each variable at each node.
+/// We only need one node state to represent the entire graph state.
+pub struct MirGraphState<V>(HashNodeState<MirValue, V>);
 
 impl<V> Deref for MirGraphState<V> {
-    type Target = HashMap<MirGraphId, V>;
+    type Target = HashNodeState<MirValue, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<V: LatticeElement, N: CfgNodeState<V>> CfgGraphState<V, N> for MirGraphState<N> {
+impl<V: LatticeElement + Clone + Default> CfgGraphState<V, HashNodeState<MirValue, V>> for MirGraphState<V> {
     type NodeId = MirGraphId;
 
-    fn node_state(&self, node: &Self::NodeId) -> Option<&N> {
-        self.0.get(node)
+    fn node_state(&self, _node: &Self::NodeId) -> Option<&HashNodeState<MirValue, V>> {
+        Some(&self.0)
     }
 }
 
-impl<V: LatticeElement, N: CfgNodeState<V>> CfgGraphStateMut<V, N> for MirGraphState<N> {
-    fn node_state_mut(&mut self, node: &Self::NodeId) -> Option<&mut N> {
+impl<V: LatticeElement + Clone + Default> CfgGraphStateMut<V, HashNodeState<MirValue, V>> for MirGraphState<V> {
+    fn node_state_mut(&mut self, node: &Self::NodeId) -> Option<&mut HashNodeState<MirValue, V>> {
         self.0.get_mut(node)
     }
 
-    fn insert_node_state(&mut self, node: &Self::NodeId, state: N) {
-        self.0.insert(node.clone(), state);
+    fn insert_node_state(&mut self, _node: &Self::NodeId, _state: HashNodeState<MirValue, V>) {
+        // do nothing
     }
 }
 
@@ -1582,14 +1587,21 @@ pub enum MirTransferFunction {
     Seal(Seal),
 }
 
+
 impl<V> CfgLattice<V> for MirFlowGraph
 where
     MirTransferFunction: TransferFn<Self, V>,
     V: LatticeElement + Default + Clone {
     type NodeState = HashNodeState<MirValue, V>;
-    type GraphState = MirGraphState<Self::NodeState>;
+    type GraphState = MirGraphState<V>;
     type NodeId = MirGraphId;
 
+
+    /// If the preceding element is just a normal statement, then there is nothing to join, since
+    /// all elements are already at their most reduced form.
+    /// However, if the preceding element is in another block, then we need to join the block
+    /// parameters of all blocks that precede this block and save the results into the block
+    /// parameters values of this block.
     fn join_prec(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
         let mut out = HashNodeState::default();
         for uplink in self.uplinks(id).unwrap() {
@@ -1600,6 +1612,10 @@ where
         out
     }
 
+    /// If the succeeding element is just a normal statement, then there is nothing to join, since
+    /// all elements are already at their most reduced form.
+    /// However, if the succeeding element is a seal, then we need to join the block parameter
+    /// values from all succeeding blocks into the call parameters of the seal.
     fn join_succ(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
         let mut out = HashNodeState::default();
         for downlink in self.downlinks(id).unwrap() {

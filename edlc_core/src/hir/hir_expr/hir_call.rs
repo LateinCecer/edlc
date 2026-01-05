@@ -31,7 +31,7 @@ use crate::issue;
 use crate::issue::{format_type_args, SrcError, SrcRange, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_call::{ComptimeParamPair, MirCall};
+use crate::mir::mir_expr::mir_call::{CallContext, ComptimeParamPair, MirCall};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, TMirFnCallInfo};
 use crate::mir::MirPhase;
@@ -1918,11 +1918,23 @@ impl MakeGraph for HirFunctionCall {
         // get MIR function id from the registry
         let func = graph.mir_funcs.mir_id(
             &edl_func_instance,
-            &mut graph.hir_phase,
-            &mut graph.mir_phase,
+            graph.hir_phase,
+            graph.mir_phase,
             comptime_params,
             comptime_call,
         )?;
+
+        // get call context from function signature
+        // how the function is actually called is ultimately up to the MIR compiler
+        let call_context = if edl_sig.comptime || edl_sig.comptime_only {
+            if edl_sig.comptime_only {
+                CallContext::Comptime
+            } else {
+                CallContext::MaybeComptime
+            }
+        } else {
+            CallContext::Runtime
+        };
 
         // create call expression
         let expr = graph.graph.expressions
@@ -1936,6 +1948,7 @@ impl MakeGraph for HirFunctionCall {
                 ret,
                 func,
                 is_recursive: false,
+                context: call_context,
             });
         graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types);
 

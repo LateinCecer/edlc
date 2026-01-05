@@ -1,13 +1,8 @@
-mod const_propagation;
-mod lifetime_analysis;
-
 use crate::hir::HirPhase;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::MirFlowGraph;
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::MirPhase;
-
-pub use lifetime_analysis::LifetimeAnalysis;
 
 pub trait OptPass {
     /// Runs the optimization routine on the specified code flow graph.

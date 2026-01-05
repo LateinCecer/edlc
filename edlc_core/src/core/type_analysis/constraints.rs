@@ -378,9 +378,9 @@ impl Display for RegionTransferFn {
 impl TransferFn<ConstraintLattice<(), Self>, RegionValue> for RegionTransferFn {
     fn transfer(
         &self,
-        mut input: HashNodeState<CfgValueId, RegionValue>,
+        input: &mut HashNodeState<CfgValueId, RegionValue>,
         _cfg: &ConstraintLattice<(), Self>,
-    ) -> Result<HashNodeState<CfgValueId, RegionValue>, RegionConflict> {
+    ) -> Result<(), RegionConflict> {
         match self {
             RegionTransferFn::Sub(lhs, rhs) => {
                 let eval = input.element_value(lhs).upper(input.element_value(rhs))?;
@@ -391,6 +391,6 @@ impl TransferFn<ConstraintLattice<(), Self>, RegionValue> for RegionTransferFn {
                 *input.element_value_mut(x) = RegionValue::new(*reg);
             }
         }
-        Ok(input)
+        Ok(())
     }
 }

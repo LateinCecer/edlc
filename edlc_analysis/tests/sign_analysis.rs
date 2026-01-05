@@ -1,4 +1,4 @@
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashNodeState, Lattice, LatticeElement, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn};
+use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashNodeState, Lattice, LatticeElement, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -109,6 +109,7 @@ enum Operator {
     Div,
 }
 
+#[derive(Debug)]
 enum Expr {
     Literal(i32),
     Var(CfgValueId),
@@ -133,6 +134,7 @@ impl Expr {
             Expr::Operator { op: Operator::Add, lhs, rhs } => {
                 let lhs = pool[*lhs].eval(state, pool);
                 let rhs = pool[*rhs].eval(state, pool);
+                println!("{:?}    with  lhs = {lhs:?}  and  rhs = {rhs:?}", self);
 
                 match lhs {
                     Sign::Invalid => Sign::Invalid,
@@ -283,17 +285,23 @@ impl Display for SignTransferFn {
 }
 
 impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign> for SignTransferFn {
-    fn transfer(&self, mut input: HashNodeState<CfgValueId, Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<HashNodeState<CfgValueId, Sign>, SignConflict> {
+    fn transfer(&self, input: &mut HashNodeState<CfgValueId, Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<bool, SignConflict> {
         match self {
             SignTransferFn::Assign(id, expr_id) => {
-                *input.element_value_mut(id) = cfg.state[*expr_id].eval(&input, &cfg.state);
+                let y = input.element_value(id);
+                let x = cfg.state[*expr_id].eval(input, &cfg.state);
+                *input.element_value_mut(id) = x;
+                println!("eval output: {x:?}");
+                println!("and in state: {:?}", input.element_value(id));
+                Ok(x != y)
             }
             SignTransferFn::Declare(id) => {
+                let prev = input.element_value(id);
                 *input.element_value_mut(id) = Sign::Invalid;
+                Ok(prev != Sign::Invalid)
             }
-            SignTransferFn::Other => (), // nothing to do here
+            SignTransferFn::Other => Ok(false), // nothing to do here
         }
-        Ok(input)
     }
 }
 
