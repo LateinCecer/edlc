@@ -15,6 +15,7 @@
  */
 mod ssa_value;
 mod acsii_printer;
+mod deconstruction;
 
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirRef};
@@ -28,6 +29,8 @@ use crate::mir::mir_expr::mir_ref::MirDowncastRef;
 use crate::prelude::ModuleSrc;
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
+use crate::mir::mir_expr::mir_graph::deconstruction::PartialSsaDeconstruction;
+use crate::mir::mir_opt::LifetimeAnalysis;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -1496,6 +1499,34 @@ impl MirFlowGraph {
                 Seal::Panic(_) => (),
             }
         }
+    }
+
+    /// Performs a non-lexical lifetime analysis on the call graph.
+    /// The results of the lifetime analysis are stored in a separate data object and returned by
+    /// this method.
+    ///
+    /// # Prerequisites
+    ///
+    /// For the lifetime analysis to succeed, the code flow graph must the in full SSA
+    /// representation with no open-ended variables.
+    /// To ensure this, you can run [Self::seal] on the flow graph.
+    pub fn lifetimes(&self) -> LifetimeAnalysis {
+        todo!()
+    }
+
+    /// Deconstructs the SSA variable tree in the call graph.
+    /// Since most of the deconstruction is left for the codegen backend, this function only
+    /// performs a partial deconstruction.
+    /// Most importantly, it infers which values need to be stored on the stack and cannot be stored
+    /// in registers directly.
+    /// This applies to
+    ///
+    /// - values with types larger than a base threshold
+    /// - values that have life references pointing to them
+    ///
+    /// To determine this, we need the output of the life-time analysis.
+    pub fn deconstruct(&self, lifetimes: &LifetimeAnalysis) -> PartialSsaDeconstruction {
+        todo!()
     }
 }
 

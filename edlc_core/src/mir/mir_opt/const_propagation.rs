@@ -78,7 +78,6 @@ impl TransferFn<MirFlowGraph, ConstState> for MirTransferFunction {
         input: HashNodeState<MirValue, ConstState>,
         cfg: &MirFlowGraph,
     ) -> Result<HashNodeState<MirValue, ConstState>, ConstPropagationError> {
-
         todo!()
     }
 }
