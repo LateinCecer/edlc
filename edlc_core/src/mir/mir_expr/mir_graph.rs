@@ -23,6 +23,7 @@ use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeS
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use crate::lexer::SrcPos;
+use crate::lexer::Token::Key;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
 use crate::prelude::ModuleSrc;
 
@@ -98,6 +99,16 @@ struct TempVarData {
 pub enum DefPoint {
     BlockParameter(MirBlockRef, BlockParameterIndex),
     Definition(MirGraphLoc),
+}
+
+impl DefPoint {
+    // get reference
+    fn get_block_ref(&self) -> &MirBlockRef {
+        match self {
+            Self::BlockParameter(block_ref, _) => block_ref,
+            Self::Definition(MirGraphLoc(block_ref, _)) => block_ref,
+        }
+    }
 }
 
 /// A MIR flow graph essentially encodes executable code on the MIR level in a control flow graph.
@@ -257,11 +268,11 @@ impl Statement {
 
     fn replace_definition(&mut self, ori: &MirValue, replacement: MirValue) {
         match self {
-            Statement::VarMove {value, .. } |
-            Statement::VarCopy { value, .. } |
-            Statement::VarDef { value: _, var: value, .. } => {
-                if value == ori {
-                    *value = replacement;
+            Statement::VarMove { var, .. } |
+            Statement::VarCopy { var, .. } |
+            Statement::VarDef { var, .. } => {
+                if var == ori {
+                    *var = replacement;
                 }
             },
         }
@@ -463,49 +474,163 @@ impl Block {
         &mut self,
         expr_container: &MirExprContainer,
     ) {
-        todo!()
+        assert!(self.parameters.is_empty(), "block parameters can only be inferred if there are \
+        no block parameters to begin with.");
+        // define function for checking parameters
+        fn check_param<I: Iterator + Sized>(
+            block_params: &mut Vec<MirValue>,
+            defined_vars: &mut HashSet<MirValue>,
+            iter: I,
+        ) where I::Item: Deref<Target=MirValue> {
+            for item in iter {
+                if defined_vars.contains(&*item) {
+                    continue;
+                }
+                // variable is used, but currently not defined
+                block_params.push(*item);
+                defined_vars.insert(*item);
+            }
+        }
+        // iterate over statements
+        let mut defined_vars = HashSet::new();
+        for statement in self.statements.iter() {
+            match statement {
+                Statement::VarDef { var, value, .. } => {
+                    check_param(
+                        &mut self.parameters,
+                        &mut defined_vars,
+                        expr_container.collect_vars(*value).iter()
+                    );
+                    defined_vars.insert(*var);
+                }
+                Statement::VarMove { var, value, .. } => {
+                    if !defined_vars.contains(value) {
+                        self.parameters.push(*value);
+                        defined_vars.insert(*value);
+                    }
+                    defined_vars.insert(*var);
+                }
+                Statement::VarCopy { var, value, .. } => {
+                    if !defined_vars.contains(value) {
+                        self.parameters.push(*value);
+                        defined_vars.insert(*value);
+                    }
+                    defined_vars.insert(*var);
+                }
+            }
+        }
+        // examine uses in sealing statement
+        match &self.seal {
+            Seal::Jump(target) => {
+                check_param(
+                    &mut self.parameters,
+                    &mut defined_vars,
+                    target.params.iter(),
+                );
+            }
+            Seal::Return(value) => {
+                if !defined_vars.contains(value) {
+                    self.parameters.push(*value);
+                }
+            }
+            Seal::Cond { cond, then_target, else_target } => {
+                if !defined_vars.contains(cond) {
+                    self.parameters.push(*cond);
+                    defined_vars.insert(*cond);
+                }
+                // then block
+                check_param(
+                    &mut self.parameters,
+                    &mut defined_vars,
+                    then_target.params.iter(),
+                );
+                // else block
+                check_param(
+                    &mut self.parameters,
+                    &mut defined_vars,
+                    else_target.params.iter(),
+                );
+            }
+            Seal::Switch { cond, targets, default } => {
+                if !defined_vars.contains(cond) {
+                    self.parameters.push(*cond);
+                    defined_vars.insert(*cond);
+                }
+                // target blocks
+                for target in targets.iter() {
+                    if !defined_vars.contains(&target.match_value) {
+                        self.parameters.push(*cond);
+                        defined_vars.insert(*cond);
+                    }
+                    check_param(
+                        &mut self.parameters,
+                        &mut defined_vars,
+                        target.block_call.params.iter()
+                    );
+                }
+                check_param(
+                    &mut self.parameters,
+                    &mut defined_vars,
+                    default.params.iter(),
+                );
+            }
+            Seal::Panic(value) => {
+                if !defined_vars.contains(value) {
+                    self.parameters.push(*value);
+                    defined_vars.insert(*value);
+                }
+            }
+            Seal::None => (),
+        }
     }
 
     /// Replaces all MirTempVar usages in the block that resolve to the specified definition point
     /// with the specified replacement variable.
     /// This should be used to replace temporary variables with SSA variables.
+    ///
+    /// # Note
+    ///
+    /// This function assumes that the definition point `def_point` is _within the block_.
+    /// If this condition is not met, this method will cause a panic!
     fn replace_ssa_var(
         &mut self,
+        block_ref: &MirBlockRef,
         expr_container: &mut MirExprContainer,
         var: &MirValue,
         def_point: &DefPoint,
         replacement: MirValue,
     ) {
-        // replace the variable at the definition point
-        let block_ref = match def_point {
-            DefPoint::BlockParameter(block, index) => {
-                self.parameters[index.0] = replacement;
-                *block
-            }
-            DefPoint::Definition(MirGraphLoc(block, uid)) => {
-                let statement = self.statements
-                    .iter_mut()
-                    .find(|statement| statement.uid() == uid);
-                if let Some(statement) = statement {
-                    statement.replace_definition(var, replacement);
-                }
-                *block
-            }
-        };
-
-        let mut affected_uses = self.collect_uses(block_ref, expr_container, var);
+        let mut affected_uses = self.collect_uses(*block_ref, expr_container, var);
         affected_uses.retain(|var_use| {
             let found_def_point = self.find_definition_point(var_use)
                 .expect("variable is not routed correctly");
             &found_def_point == def_point
         });
-        self.iter_value_uses_mut(block_ref, expr_container, move |var_use| {
+        self.iter_value_uses_mut(*block_ref, expr_container, move |var_use| {
             if affected_uses.contains(&var_use) {
                 replacement
             } else {
                 *var_use.temp_var()
             }
         });
+        // replace the variable at the definition point
+        match def_point {
+            DefPoint::BlockParameter(block, index) => {
+                assert_eq!(block_ref, block);
+                self.parameters[index.0] = replacement;
+            }
+            DefPoint::Definition(MirGraphLoc(block, uid)) => {
+                assert_eq!(block_ref, block);
+                let statement = self.statements
+                    .iter_mut()
+                    .find(|statement| statement.uid() == uid);
+                if let Some(statement) = statement {
+                    statement.replace_definition(var, replacement);
+                } else {
+                    panic!("failed to find definition statement with id {uid:?}");
+                }
+            }
+        };
     }
 
     fn iter_value_defines<F: FnMut(DefPoint, MirValue)>(&self, block_ref: MirBlockRef, mut func: F) {
@@ -1191,7 +1316,7 @@ impl MirFlowGraph {
     /// The temp variables we use in the flow graph can be baked into SSA variables by basically
     /// splitting variables into two separate instances if a variable is assigned to that already
     /// has a value.
-    fn bake_ssa_variables(&mut self) -> SsaCache {
+    pub fn bake_ssa_variables(&mut self) -> SsaCache {
         let mut ssa_values = SsaCache::new();
 
         // create list of SSA values from the definition points of MIR values
@@ -1204,9 +1329,9 @@ impl MirFlowGraph {
         // split non-SSA variables into SSA values and replace variables where necessary
         ssa_values.split_vars(|point, var| {
             let replacement = self.create_temp_variable(self.temp_vars[var.0].ty);
-            for block in self.blocks.iter_mut() {
-                block.replace_ssa_var(&mut self.expressions, &var, &point, replacement);
-            }
+            let block_ref = point.get_block_ref();
+            let block = &mut self.blocks[block_ref.0];
+            block.replace_ssa_var(block_ref, &mut self.expressions, &var, &point, replacement);
             replacement
         });
         ssa_values
@@ -1281,7 +1406,9 @@ impl MirFlowGraph {
 
             // now we can add the requirements to the input parameters of the block
             required_parameters.into_iter()
-                .for_each(|param| self.blocks[block_index].parameters.push(param));
+                .for_each(|param| if !self.blocks[block_index].parameters.contains(&param) {
+                    self.blocks[block_index].parameters.push(param)
+                });
             // update worklist with all the source blocks that can jump to the updated block
             self.backlinks[block_index]
                 .iter()

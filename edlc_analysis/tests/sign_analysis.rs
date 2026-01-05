@@ -122,7 +122,7 @@ enum Expr {
 
 impl Expr {
     /// Evaluates the sign of an expression.
-    fn eval(&self, state: &HashNodeState<Sign>, pool: &ExprPool) -> Sign {
+    fn eval(&self, state: &HashNodeState<CfgValueId, Sign>, pool: &ExprPool) -> Sign {
         match self {
             Expr::Literal(v) if *v > 0 => Sign::Positive,
             Expr::Literal(v) if *v < 0 => Sign::Negative,
@@ -283,7 +283,7 @@ impl Display for SignTransferFn {
 }
 
 impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign> for SignTransferFn {
-    fn transfer(&self, mut input: HashNodeState<Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<HashNodeState<Sign>, SignConflict> {
+    fn transfer(&self, mut input: HashNodeState<CfgValueId, Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<HashNodeState<CfgValueId, Sign>, SignConflict> {
         match self {
             SignTransferFn::Assign(id, expr_id) => {
                 *input.element_value_mut(id) = cfg.state[*expr_id].eval(&input, &cfg.state);
