@@ -24,7 +24,7 @@ use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirRef};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, TransferFn};
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
+use std::ops::{BitAnd, BitOr, Deref};
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
@@ -1572,8 +1572,8 @@ impl<V: LatticeElement + Clone + Default> CfgGraphState<V, HashNodeState<MirValu
 }
 
 impl<V: LatticeElement + Clone + Default> CfgGraphStateMut<V, HashNodeState<MirValue, V>> for MirGraphState<V> {
-    fn node_state_mut(&mut self, node: &Self::NodeId) -> Option<&mut HashNodeState<MirValue, V>> {
-        self.0.get_mut(node)
+    fn node_state_mut(&mut self, _node: &Self::NodeId) -> Option<&mut HashNodeState<MirValue, V>> {
+        Some(&mut self.0)
     }
 
     fn insert_node_state(&mut self, _node: &Self::NodeId, _state: HashNodeState<MirValue, V>) {
@@ -1587,6 +1587,73 @@ pub enum MirTransferFunction {
     Seal(Seal),
 }
 
+/// Joins two parameters.
+/// The result of the join operation is written into `target` and the function returns if the
+/// original value in `target` changed at all.
+/// If the states for both values were the same to begin with, the join operation is never
+/// actually evaluated.
+#[inline(always)]
+fn join_param<E: LatticeElement + Default + Clone>(
+    target: &MirValue,
+    rhs: &MirValue,
+    state: &mut MirGraphState<E>,
+    op: fn(E, E) -> Result<E, E::Conflict>,
+) -> Result<bool, E::Conflict> {
+    let rhs_value = state.0.element_value(rhs);
+    let target_value = state.0.element_value_mut(target);
+    if &rhs_value != target_value {
+        let new_state = op(target_value.clone(), rhs_value)?;
+        let changed = target_value != &new_state;
+        *target_value = new_state;
+        Ok(changed)
+    } else {
+        Ok(false)
+    }
+}
+
+fn join_parameters<'lhs, 'rhs, E, IL, IR>(
+    target: IL,
+    rhs: IR,
+    state: &mut MirGraphState<E>,
+    op: fn(E, E) -> Result<E, E::Conflict>,
+) -> Result<bool, E::Conflict>
+where
+    E: LatticeElement + Default + Clone,
+    IL: Iterator<Item = &'lhs MirValue>,
+    IR: Iterator<Item = &'rhs MirValue>,
+{
+    target.zip(rhs)
+        .map(|(target, rhs)| join_param(target, rhs, state, op))
+        .reduce(|a, b| a
+            .and_then(|a| b.map(|b| a | b)))
+        .unwrap_or(Ok(false))
+}
+
+/// Joins the block parameters from a block call and the target block into one set of
+/// variables and reports if the original state of the target state changed during the
+/// operation.
+#[inline(always)]
+fn join_prec_block_parameters<E: LatticeElement + Default + Clone>(
+    call: &BlockCall,
+    block: &Block,
+    state: &mut MirGraphState<E>,
+) -> bool {
+    assert_eq!(call.params.len(), block.parameters.len());
+    join_parameters(block.parameters.iter(), call.params.iter(), state, E::upper).unwrap()
+}
+
+/// Joins the block parameters from succeeding target blocks of a block call into the parameters
+/// of the call and reports of the original state of the call parameters changed during the
+/// operation.
+#[inline(always)]
+fn join_succ_block_parameters<E: LatticeElement + Default + Clone>(
+    call: &BlockCall,
+    block: &Block,
+    state: &mut MirGraphState<E>,
+) -> bool {
+    assert_eq!(call.params.len(), block.parameters.len());
+    join_parameters(call.params.iter(), block.parameters.iter(), state, E::lower).unwrap()
+}
 
 impl<V> CfgLattice<V> for MirFlowGraph
 where
@@ -1602,28 +1669,120 @@ where
     /// However, if the preceding element is in another block, then we need to join the block
     /// parameters of all blocks that precede this block and save the results into the block
     /// parameters values of this block.
-    fn join_prec(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
-        let mut out = HashNodeState::default();
-        for uplink in self.uplinks(id).unwrap() {
-            if let Some(parent_state) = state.get(&uplink) {
-                out.join_mut(parent_state, V::upper).unwrap();
+    fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        /// Joins all backlinks to a block by iteration through the catalogue of backlinks in the
+        /// system and looping through the sealing statements of the preceding blocks.
+        /// The result of the merger is written directly into the state of the target block.
+        fn process_backlinks<E: LatticeElement + Default + Clone>(
+            blocks: &[Block],
+            block_ref: &MirBlockRef,
+            backlinks: &[Vec<MirBlockRef>],
+            state: &mut MirGraphState<E>,
+        ) -> bool {
+            let mut changed = false;
+            let block = &blocks[block_ref.0];
+            let backlinks = &backlinks[block_ref.0];
+            for predecessor_ref in backlinks.iter() {
+                let predecessor = &blocks[predecessor_ref.0];
+                match &predecessor.seal {
+                    Seal::None => panic!("illegal state"),
+                    Seal::Jump(call) => {
+                        assert_eq!(&call.target, block_ref);
+                        changed |= join_prec_block_parameters(call, block, state);
+                    },
+                    Seal::Return(_) => {
+                        panic!("invalid route found!");
+                    },
+                    Seal::Panic(_) => {
+                        panic!("invalid route found!");
+                    },
+                    Seal::Cond { cond: _, then_target, else_target } => {
+                        let mut i = 0usize;
+                        if &then_target.target == block_ref {
+                            changed |= join_prec_block_parameters(then_target, block, state);
+                            i += 1;
+                        }
+                        if &else_target.target == block_ref {
+                            changed |= join_prec_block_parameters(else_target, block, state);
+                            i += 1;
+                        }
+                        assert!(i > 0);
+                    },
+                    Seal::Switch { cond: _, targets, default } => {
+                        let mut i = 0usize;
+                        for target in targets.iter() {
+                            if &target.block_call.target == block_ref {
+                                changed |= join_prec_block_parameters(&target.block_call, block, state);
+                                i += 1;
+                            }
+                        }
+                        if &default.target == block_ref {
+                            changed |= join_prec_block_parameters(&default, block, state);
+                            i += 1;
+                        }
+                        assert!(i > 0);
+                    },
+                }
             }
+            changed
         }
-        out
+
+        match id {
+            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
+                let block = &self.blocks[block_ref.0];
+                let idx = block.find_current_index(uid).unwrap();
+                if idx > 0 {
+                    // there is nothing to join here
+                    return false;
+                }
+                process_backlinks(&self.blocks, block_ref, &self.backlinks, state)
+            },
+            MirGraphId::Seal(block_ref) => {
+                let block = &self.blocks[block_ref.0];
+                if !block.statements.is_empty() {
+                    // there is nothing to join, the preceding element is a statement in this block
+                    return false;
+                }
+                process_backlinks(&self.blocks, block_ref, &self.backlinks, state)
+            },
+        }
     }
 
     /// If the succeeding element is just a normal statement, then there is nothing to join, since
     /// all elements are already at their most reduced form.
     /// However, if the succeeding element is a seal, then we need to join the block parameter
     /// values from all succeeding blocks into the call parameters of the seal.
-    fn join_succ(&self, id: &Self::NodeId, state: &Self::GraphState) -> Self::NodeState {
-        let mut out = HashNodeState::default();
-        for downlink in self.downlinks(id).unwrap() {
-            if let Some(parent_state) = state.get(&downlink) {
-                out.join_mut(parent_state, V::lower).unwrap();
-            }
+    fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        match id {
+            MirGraphId::Statement(_) => {
+                // if this is a statement, then the succeeding node is always either another
+                // statement within the same block OR the sealing expression in the block.
+                // either way, there is nothing to join.
+                false
+            },
+            MirGraphId::Seal(block_ref) => {
+                let block = &self.blocks[block_ref.0];
+                match &block.seal {
+                    Seal::None => panic!("illegal state"),
+                    Seal::Jump(call) => {
+                        join_succ_block_parameters(call, block, state)
+                    },
+                    Seal::Return(_) => false,
+                    Seal::Panic(_) => false,
+                    Seal::Cond { cond: _, then_target, else_target } => {
+                        join_succ_block_parameters(then_target, block, state)
+                            | join_succ_block_parameters(else_target, block, state)
+                    },
+                    Seal::Switch { cond: _, targets, default } => {
+                        targets.iter()
+                            .map(|target| join_succ_block_parameters(&target.block_call, block, state))
+                            .reduce(bool::bitor)
+                            .unwrap_or(false)
+                            | join_succ_block_parameters(default, block, state)
+                    },
+                }
+            },
         }
-        out
     }
 
     fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {

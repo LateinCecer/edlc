@@ -380,17 +380,22 @@ impl TransferFn<ConstraintLattice<(), Self>, RegionValue> for RegionTransferFn {
         &self,
         input: &mut HashNodeState<CfgValueId, RegionValue>,
         _cfg: &ConstraintLattice<(), Self>,
-    ) -> Result<(), RegionConflict> {
+    ) -> Result<bool, RegionConflict> {
         match self {
             RegionTransferFn::Sub(lhs, rhs) => {
+                let prev = input.element_value(rhs);
                 let eval = input.element_value(lhs).upper(input.element_value(rhs))?;
+                let changed = &prev != &eval;
                 *input.element_value_mut(rhs) = eval;
+                Ok(changed)
             }
-            RegionTransferFn::Other => (),
+            RegionTransferFn::Other => Ok(false),
             RegionTransferFn::Declare(x, reg) => {
-                *input.element_value_mut(x) = RegionValue::new(*reg);
+                let val = RegionValue::new(*reg);
+                let changed = &input.element_value(x) != &val;
+                *input.element_value_mut(x) = val;
+                Ok(changed)
             }
         }
-        Ok(())
     }
 }

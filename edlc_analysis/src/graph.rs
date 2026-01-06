@@ -1116,16 +1116,17 @@ pub struct WorkListFixpointForward;
 
 impl<Cfg: CfgLattice<V>, V: LatticeElement> LogicSolver<Cfg, V> for WorkListFixpointForward
 where Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
-    Cfg::NodeId: PartialEq + Debug,
-    Cfg::NodeState: Debug,
+    Cfg::NodeId: PartialEq,
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
+        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
+            num_iters += 1;
             let mut changed = cfg.join_prec(&v, state);
             changed |= cfg.transfer_fn(&v)
                 .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
-            println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
+            // println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
 
             if changed {
                 // add inverse of dependencies to worklist
@@ -1136,6 +1137,7 @@ where Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
                 }
             }
         }
+        println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1149,7 +1151,9 @@ where
     Cfg::NodeId: PartialEq {
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
+        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
+            num_iters += 1;
             let mut changed = cfg.join_succ(&v, state);
             changed |= cfg.transfer_fn(&v)
                 .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
@@ -1163,6 +1167,7 @@ where
                 }
             }
         }
+        println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1172,8 +1177,8 @@ pub struct PropagationWorkListForward;
 impl<Cfg: CfgLattice<V>, V: LatticeElement> LogicSolver<Cfg, V> for PropagationWorkListForward
 where
     Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
-    Cfg::NodeState: CfgNodeStateMut<V> + Default + Clone + Debug,
-    Cfg::NodeId: PartialEq + Debug, {
+    Cfg::NodeState: CfgNodeStateMut<V> + Default + Clone,
+    Cfg::NodeId: PartialEq, {
     fn solve(&mut self, cfg: &Cfg, state: &mut Cfg::GraphState) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
         let mut num_iters = 0usize;
@@ -1188,7 +1193,7 @@ where
             let mut transfer_state = node_state.clone();
             cfg.transfer_fn(&v).transfer(&mut transfer_state, cfg)?;
 
-            println!("{v:?}   {:?}", transfer_state);
+            // println!("{v:?}   {:?}", transfer_state);
 
             // add inverse of dependencies to worklist
             for dep in cfg.downlinks(&v).unwrap() {

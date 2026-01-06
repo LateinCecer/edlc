@@ -396,7 +396,7 @@ fn solve_sign() {
 
     println!("done building CFG test program.");
     // worklist solver
-    PropagationWorkListForward.solve(&cfg, &mut graph_state).unwrap();
+    WorkListFixpointForward.solve(&cfg, &mut graph_state).unwrap();
     println!("done analysing program.");
 
     // print info
@@ -460,7 +460,7 @@ fn solve_sign_builder() {
 
     // worklist solver
     let mut graph_state = HashMap::default();
-    PropagationWorkListForward.solve(&cfg, &mut graph_state).unwrap();
+    WorkListFixpointForward.solve(&cfg, &mut graph_state).unwrap();
     println!("done analysing program.");
 
     // print info

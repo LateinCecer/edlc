@@ -105,7 +105,7 @@ impl TransferFn<MirFlowGraph, ConstState> for MirTransferFunction {
         &self,
         input: &mut HashNodeState<MirValue, ConstState>,
         cfg: &MirFlowGraph,
-    ) -> Result<(), ConstPropagationError> {
+    ) -> Result<bool, ConstPropagationError> {
         match self {
             MirTransferFunction::Statement(s) => {
                 // s.transfer_const(input, )
