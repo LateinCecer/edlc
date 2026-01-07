@@ -139,6 +139,8 @@ impl TestCompiler {
         let mut out = std::io::stdout();
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&graph_writer.graph)?;
+
+        graph_writer.graph.constant_analysis()?;
         Ok(())
     }
 }

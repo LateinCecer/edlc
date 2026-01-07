@@ -14,20 +14,20 @@
  *    limitations under the License.
  */
 
-use crate::mir::mir_expr::{MirDeref, MirDowncastRef, MirFlowGraph, MirRef, MirTransferFunction, MirValue};
-use edlc_analysis::graph::{CfgNodeState, HashNodeState, LatticeElement, TransferFn};
-use std::error::Error;
-use std::fmt::{Display, Formatter};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
+use crate::mir::mir_expr::mir_graph::ExprEval;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{MirDeref, MirDowncastRef, MirRef, MirValue};
+use edlc_analysis::graph::{CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, TransferFn};
+use std::error::Error;
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(PartialEq, Eq, Debug, Default, Clone)]
 pub enum ConstState {
@@ -87,71 +87,11 @@ impl LatticeElement for ConstState {
     }
 }
 
-/// Implements the transfer function for this operation.
-///
-/// # What does the transfer function do?
-///
-/// The transfer function effectively implements how different nodes in the graph affect individual
-/// values in the graph state.
-/// Since each node in the graph is a statement or a block seal, it is fair to say that the transfer
-/// function implements how each expression in the source code influences the state of the graph
-/// analyser.
-/// In the case of a constant propagation analysis, we can say that the transfer function evaluates
-/// if a expression in the code flow tree is constant or not.
-/// As such, the transfer function is an essential part of code analysis, transformation and
-/// optimization.
-impl TransferFn<MirFlowGraph, ConstState> for MirTransferFunction {
-    fn transfer(
-        &self,
-        input: &mut HashNodeState<MirValue, ConstState>,
-        cfg: &MirFlowGraph,
-    ) -> Result<bool, ConstPropagationError> {
-        match self {
-            MirTransferFunction::Statement(s) => {
-                // s.transfer_const(input, )
-                todo!()
-            }
-            MirTransferFunction::Seal(s) => {
-                todo!()
-            }
-        }
-    }
-}
 
-impl Statement {
-    fn transfer_const(
-        &self,
-        input: &mut HashNodeState<MirValue, ConstState>,
-        cfg: &MirFlowGraph,
-    ) -> Result<(), ConstPropagationError> {
-        todo!()
-    }
-}
-
-impl Seal {
-    fn transfer_const(
-        &self,
-        input: &mut HashNodeState<MirValue, ConstState>,
-        cfg: &MirFlowGraph,
-    ) -> Result<(), ConstPropagationError> {
-        todo!()
-    }
-}
-
-/*
-Implement transfer function for different kinds of expressions
- */
-trait ExprTransferConst {
-    fn expr_transfer(
+impl ExprEval<ConstState> for MirArrayInit {
+    fn eval(
         &self,
         input: &HashNodeState<MirValue, ConstState>,
-    ) -> Result<ConstState, ConstPropagationError>;
-}
-
-impl ExprTransferConst for MirArrayInit {
-    fn expr_transfer(
-        &self,
-        input: &HashNodeState<MirValue, ConstState>
     ) -> Result<ConstState, ConstPropagationError> {
         match &self.elements {
             MirArrayInitVariant::List(elements) => {
@@ -168,8 +108,8 @@ impl ExprTransferConst for MirArrayInit {
     }
 }
 
-impl ExprTransferConst for MirAs {
-    fn expr_transfer(
+impl ExprEval<ConstState> for MirAs {
+    fn eval(
         &self,
         input: &HashNodeState<MirValue, ConstState>
     ) -> Result<ConstState, ConstPropagationError> {
@@ -177,8 +117,8 @@ impl ExprTransferConst for MirAs {
     }
 }
 
-impl ExprTransferConst for MirAssign {
-    fn expr_transfer(
+impl ExprEval<ConstState> for MirAssign {
+    fn eval(
         &self,
         input: &HashNodeState<MirValue, ConstState>
     ) -> Result<ConstState, ConstPropagationError> {
@@ -186,8 +126,8 @@ impl ExprTransferConst for MirAssign {
     }
 }
 
-impl ExprTransferConst for MirCall {
-    fn expr_transfer(
+impl ExprEval<ConstState> for MirCall {
+    fn eval(
         &self,
         input: &HashNodeState<MirValue, ConstState>,
     ) -> Result<ConstState, ConstPropagationError> {
@@ -199,61 +139,101 @@ impl ExprTransferConst for MirCall {
                 // We don't actually need to check if the comptime arguments are constant at this
                 // point, since those *must* be constant for the function to successfully pass
                 // verification.
-                let mut state = ConstState::Const;
+                // let mut state = ConstState::Const;
+                // for param in self.args.iter() {
+                //     state = state.lower(input.element_value(param))?;
+                // }
+                // Ok(state)
                 for param in self.args.iter() {
-                    state = state.lower(input.element_value(param))?;
+                    if input.element_value(param) != ConstState::Const {
+                        println!("call parameter ${:x} is not constant!", param.0);
+                        return Ok(ConstState::Unknown);
+                    }
                 }
-                Ok(state)
+                Ok(ConstState::Const)
             }
         }
     }
 }
 
-impl ExprTransferConst for MirConstant {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirConstant {
+    fn eval(
+        &self,
+        _input: &HashNodeState<MirValue, ConstState>
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(ConstState::Const)
     }
 }
 
-impl ExprTransferConst for MirData {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirData {
+    fn eval(
+        &self,
+        _input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(ConstState::Const)
     }
 }
 
-impl ExprTransferConst for MirLiteral {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirLiteral {
+    fn eval(
+        &self,
+        _input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(ConstState::Const)
     }
 }
 
-impl ExprTransferConst for MirRef {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirRef {
+    fn eval(
+        &self,
+        input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        if self.mutable {
+            Ok(ConstState::Unknown)
+        } else {
+            Ok(input.element_value(&self.value))
+        }
     }
 }
 
-impl ExprTransferConst for MirDeref {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirDeref {
+    fn eval(
+        &self,
+        input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(input.element_value(&self.value))
     }
 }
 
-impl ExprTransferConst for MirDowncastRef {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirDowncastRef {
+    fn eval(
+        &self,
+        input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(input.element_value(&self.value))
     }
 }
 
-impl ExprTransferConst for MirTypeInit {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirTypeInit {
+    fn eval(
+        &self,
+        input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        for init in self.inits.iter() {
+            if !matches!(input.element_value(&init.val), ConstState::Const) {
+                return Ok(ConstState::Unknown);
+            }
+        }
+        Ok(ConstState::Const)
     }
 }
 
-impl ExprTransferConst for MirGlobalVar {
-    fn expr_transfer(&self, input: &HashNodeState<MirValue, ConstState>) -> Result<ConstState, ConstPropagationError> {
-        todo!()
+impl ExprEval<ConstState> for MirGlobalVar {
+    fn eval(
+        &self,
+        _input: &HashNodeState<MirValue, ConstState>,
+    ) -> Result<ConstState, ConstPropagationError> {
+        Ok(ConstState::Const)
     }
 }
 

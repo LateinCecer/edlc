@@ -868,6 +868,12 @@ pub struct HashNodeState<I: Hash + PartialEq + Clone, E> {
     map: HashMap<I, E>,
 }
 
+impl<I: Hash + PartialEq + Clone, E> HashNodeState<I, E> {
+    pub fn iter<'a>(&'a self) -> std::collections::hash_map::Iter<'a, I, E> {
+        self.map.iter()
+    }
+}
+
 impl<I: Hash + PartialEq + Clone, E> Default for HashNodeState<I, E> {
     fn default() -> Self {
         Self { map: HashMap::new() }

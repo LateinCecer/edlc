@@ -20,18 +20,28 @@ mod const_propagation;
 pub mod lifetime_analysis;
 
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
-use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirRef};
+use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant, MirRef};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, TransferFn};
+use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
 use std::ops::{BitAnd, BitOr, Deref};
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
+use crate::mir::mir_expr::mir_array_init::MirArrayInit;
+use crate::mir::mir_expr::mir_as::MirAs;
+use crate::mir::mir_expr::mir_assign::MirAssign;
+use crate::mir::mir_expr::mir_call::MirCall;
+use crate::mir::mir_expr::mir_constant::MirConstant;
+use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
 use crate::prelude::ModuleSrc;
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
+use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::PartialSsaDeconstruction;
+use crate::mir::mir_expr::mir_literal::MirLiteral;
+use crate::mir::mir_expr::mir_type_init::MirTypeInit;
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -1502,6 +1512,19 @@ impl MirFlowGraph {
         }
     }
 
+    /// Performs constant analysis on the MIR data flow graph to figure out which MIR values can
+    /// be treated as constants.
+    pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
+        let mut state = MirGraphState::default();
+        PropagationWorkListForward.solve(self, &mut state)?;
+
+        println!("result of const analysis:");
+        for (node, const_state) in state.0.iter() {
+            println!("${:x}: {:?}", node.0, const_state);
+        }
+        Ok(())
+    }
+
     /// Performs a non-lexical lifetime analysis on the call graph.
     /// The results of the lifetime analysis are stored in a separate data object and returned by
     /// this method.
@@ -1554,6 +1577,12 @@ impl From<MirBlockRef> for MirGraphId {
 /// This naturally implies that we do not need to track the state of each variable at each node.
 /// We only need one node state to represent the entire graph state.
 pub struct MirGraphState<V>(HashNodeState<MirValue, V>);
+
+impl<V> Default for MirGraphState<V> {
+    fn default() -> Self {
+        Self(HashNodeState::default())
+    }
+}
 
 impl<V> Deref for MirGraphState<V> {
     type Target = HashNodeState<MirValue, V>;
@@ -1850,8 +1879,8 @@ where
                         targets.push(default.target.into());
                         Some(targets)
                     },
-                    Seal::Return(_) => None,
-                    Seal::Panic(_) => None,
+                    Seal::Return(_) => Some(vec![]),
+                    Seal::Panic(_) => Some(vec![]),
                 }
             },
         }
@@ -1861,7 +1890,7 @@ where
         fn get_backlinks(graph: &MirFlowGraph, block_ref: &MirBlockRef) -> Option<Vec<MirGraphId>> {
             let backlinks = &graph.backlinks[block_ref.0];
             if backlinks.is_empty() {
-                None
+                Some(vec![])
             } else {
                 Some(backlinks
                     .iter()
@@ -1890,6 +1919,171 @@ where
                     // get backlink and reference sealing statement for that
                     get_backlinks(self, block_ref)
                 }
+            }
+        }
+    }
+}
+
+/// Implements the transfer function for this operation.
+///
+/// # What does the transfer function do?
+///
+/// The transfer function effectively implements how different nodes in the graph affect individual
+/// values in the graph state.
+/// Since each node in the graph is a statement or a block seal, it is fair to say that the transfer
+/// function implements how each expression in the source code influences the state of the graph
+/// analyser.
+/// In the case of a constant propagation analysis, we can say that the transfer function evaluates
+/// if a expression in the code flow tree is constant or not.
+/// As such, the transfer function is an essential part of code analysis, transformation and
+/// optimization.
+impl<S: LatticeElement + Clone + Default> TransferFn<MirFlowGraph, S> for MirTransferFunction
+where
+    MirExprId: ExprTransfer<S>,
+{
+    fn transfer(
+        &self,
+        input: &mut HashNodeState<MirValue, S>,
+        cfg: &MirFlowGraph,
+    ) -> Result<bool, S::Conflict> {
+        match self {
+            MirTransferFunction::Statement(s) => {
+                s.transfer(input, &cfg)
+            }
+            MirTransferFunction::Seal(s) => {
+                s.transfer(input, cfg)
+            }
+        }
+    }
+}
+
+impl Statement {
+    /// Transfers the state of a DFG based on a statement.
+    /// For this function to work, the transformation for the lattice element must be implemented
+    /// for expression evaluation.
+    fn transfer<S: LatticeElement + Clone + Default>(
+        &self,
+        input: &mut HashNodeState<MirValue, S>,
+        cfg: &MirFlowGraph,
+    ) -> Result<bool, S::Conflict>
+    where
+        MirExprId: ExprTransfer<S>,
+        MirFlowGraph: CfgLattice<S>, {
+
+        match self {
+            Statement::VarDef { value, var, uid: _ } => {
+                let new_value = value.expr_transfer(input, &cfg.expressions)?;
+                let changed = &new_value != &input.element_value(var);
+                if changed && &new_value != &S::default() {
+                    *input.element_value_mut(var) = new_value;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Statement::VarMove { value, var, uid }
+            | Statement::VarCopy { value, var, uid } => {
+                let new_value = input.element_value(value);
+                let changed = &new_value != &input.element_value(var);
+                if changed && &new_value != &S::default() {
+                    *input.element_value_mut(var) = new_value;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+        }
+    }
+}
+
+impl Seal {
+    fn transfer<S: LatticeElement + Clone + Default>(
+        &self,
+        _input: &mut HashNodeState<MirValue, S>,
+        _cfg: &MirFlowGraph,
+    ) -> Result<bool, S::Conflict>
+    where
+        MirExprId: ExprTransfer<S>,
+        MirFlowGraph: CfgLattice<S>, {
+        Ok(true)
+    }
+}
+
+trait ExprTransfer<S: LatticeElement> {
+
+    fn expr_transfer(
+        &self,
+        input: &HashNodeState<MirValue, S>,
+        expressions: &MirExprContainer,
+    ) -> Result<S, S::Conflict>;
+}
+
+trait ExprEval<S: LatticeElement> {
+    fn eval(&self, input: &HashNodeState<MirValue, S>) -> Result<S, S::Conflict>;
+}
+
+impl<S: LatticeElement> ExprTransfer<S> for MirExprId
+where
+    MirArrayInit: ExprEval<S>,
+    MirAs: ExprEval<S>,
+    MirCall: ExprEval<S>,
+    MirLiteral: ExprEval<S>,
+    MirGlobalVar: ExprEval<S>,
+    MirConstant: ExprEval<S>,
+    MirAssign: ExprEval<S>,
+    MirData: ExprEval<S>,
+    MirTypeInit: ExprEval<S>,
+    MirRef: ExprEval<S>,
+    MirDeref: ExprEval<S>,
+    MirDowncastRef: ExprEval<S>,
+{
+    fn expr_transfer(
+        &self,
+        input: &HashNodeState<MirValue, S>,
+        expressions: &MirExprContainer,
+    ) -> Result<S, S::Conflict> {
+        match self.ty {
+            MirExprVariant::ArrayInit => {
+                expressions.array_inits[self.id].eval(input)
+            }
+            MirExprVariant::As => {
+                expressions.ases[self.id].eval(input)
+            }
+            MirExprVariant::Call => {
+                expressions.call[self.id].eval(input)
+            }
+            MirExprVariant::Literal => {
+                expressions.literals[self.id].eval(input)
+            }
+            MirExprVariant::Variable => {
+                expressions.variables[self.id].eval(input)
+            }
+            MirExprVariant::Constant => {
+                expressions.constants[self.id].eval(input)
+            }
+            MirExprVariant::Assign => {
+                expressions.assigns[self.id].eval(input)
+            }
+            MirExprVariant::Let => {
+                panic!("deprecated")
+            }
+            MirExprVariant::Data => {
+                expressions.data[self.id].eval(input)
+            }
+            MirExprVariant::Offset => {
+                panic!("deprecated")
+            }
+            MirExprVariant::Init => {
+                expressions.type_inits[self.id].eval(input)
+            }
+            MirExprVariant::Ref => {
+                expressions.refs[self.id].eval(input)
+            }
+            MirExprVariant::Deref => {
+                expressions.derefs[self.id].eval(input)
+            }
+            MirExprVariant::DowncastRef => {
+                expressions.downcasts[self.id].eval(input)
             }
         }
     }
