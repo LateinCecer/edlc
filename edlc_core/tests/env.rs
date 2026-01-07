@@ -374,13 +374,31 @@ fn test_env() -> Result<(), anyhow::Error> {
     let mut comp = TestCompiler::new();
     comp.init()?;
 
+    comp.compiler.prepare_module(&vec!["std"].into())?;
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
         let i: i32 = 3 + 2;
         let x = if i == 3 {
             i
         } else {
-            0
+            std::input()
         };
         let y = x + i;
     }

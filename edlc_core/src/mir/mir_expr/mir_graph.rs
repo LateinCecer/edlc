@@ -24,6 +24,7 @@ use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::ops::{BitAnd, BitOr, Deref};
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
@@ -1516,7 +1517,7 @@ impl MirFlowGraph {
     /// be treated as constants.
     pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
         let mut state = MirGraphState::default();
-        PropagationWorkListForward.solve(self, &mut state)?;
+        WorkListFixpointForward.solve(self, &mut state)?;
 
         println!("result of const analysis:");
         for (node, const_state) in state.0.iter() {
@@ -1555,20 +1556,11 @@ impl MirFlowGraph {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum MirGraphId {
-    Statement(MirGraphLoc),
-    Seal(MirBlockRef),
-}
-
-impl From<MirGraphLoc> for MirGraphId {
-    fn from(value: MirGraphLoc) -> Self {
-        MirGraphId::Statement(value)
-    }
-}
+pub struct MirGraphId(MirBlockRef);
 
 impl From<MirBlockRef> for MirGraphId {
     fn from(value: MirBlockRef) -> Self {
-        MirGraphId::Seal(value)
+        MirGraphId(value)
     }
 }
 
@@ -1611,9 +1603,13 @@ impl<V: LatticeElement + Clone + Default> CfgGraphStateMut<V, HashNodeState<MirV
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MirTransferFunction {
-    Statement(Statement),
-    Seal(Seal),
+pub struct BlockForwardTransform {
+    pub block: MirBlockRef,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockBackwardTransform {
+    pub block: MirBlockRef,
 }
 
 /// Joins two parameters.
@@ -1622,7 +1618,7 @@ pub enum MirTransferFunction {
 /// If the states for both values were the same to begin with, the join operation is never
 /// actually evaluated.
 #[inline(always)]
-fn join_param<E: LatticeElement + Default + Clone>(
+fn join_param<E: LatticeElement + Default + Clone + Display>(
     target: &MirValue,
     rhs: &MirValue,
     state: &mut MirGraphState<E>,
@@ -1630,10 +1626,13 @@ fn join_param<E: LatticeElement + Default + Clone>(
 ) -> Result<bool, E::Conflict> {
     let rhs_value = state.0.element_value(rhs);
     let target_value = state.0.element_value_mut(target);
+    // println!("joining parameters: {:x} = {:x} upper/lower {:x}      with values {:x} = {}, {:x} = {}", target.0, rhs.0, target.0, target.0, target_value, rhs.0, &rhs_value);
+
     if &rhs_value != target_value {
         let new_state = op(target_value.clone(), rhs_value)?;
         let changed = target_value != &new_state;
         *target_value = new_state;
+        // println!("  ->  parameter changed to {}", target_value);
         Ok(changed)
     } else {
         Ok(false)
@@ -1647,7 +1646,7 @@ fn join_parameters<'lhs, 'rhs, E, IL, IR>(
     op: fn(E, E) -> Result<E, E::Conflict>,
 ) -> Result<bool, E::Conflict>
 where
-    E: LatticeElement + Default + Clone,
+    E: LatticeElement + Default + Clone + Display,
     IL: Iterator<Item = &'lhs MirValue>,
     IR: Iterator<Item = &'rhs MirValue>,
 {
@@ -1662,7 +1661,7 @@ where
 /// variables and reports if the original state of the target state changed during the
 /// operation.
 #[inline(always)]
-fn join_prec_block_parameters<E: LatticeElement + Default + Clone>(
+fn join_prec_block_parameters<E: LatticeElement + Default + Clone + Display>(
     call: &BlockCall,
     block: &Block,
     state: &mut MirGraphState<E>,
@@ -1675,7 +1674,7 @@ fn join_prec_block_parameters<E: LatticeElement + Default + Clone>(
 /// of the call and reports of the original state of the call parameters changed during the
 /// operation.
 #[inline(always)]
-fn join_succ_block_parameters<E: LatticeElement + Default + Clone>(
+fn join_succ_block_parameters<E: LatticeElement + Default + Clone + Display>(
     call: &BlockCall,
     block: &Block,
     state: &mut MirGraphState<E>,
@@ -1684,10 +1683,66 @@ fn join_succ_block_parameters<E: LatticeElement + Default + Clone>(
     join_parameters(call.params.iter(), block.parameters.iter(), state, E::lower).unwrap()
 }
 
+impl MirFlowGraph {
+    #[inline(always)]
+    fn join_block_forward<V: LatticeElement + Default + Clone + Display>(
+        &self,
+        id: &MirBlockRef,
+        block: &Block,
+        predecessor: &Block,
+        state: &mut MirGraphState<V>,
+    ) -> bool {
+        match &predecessor.seal {
+            Seal::None => panic!("illegal state"),
+            Seal::Jump(call) => {
+                assert_eq!(&call.target, id);
+                join_prec_block_parameters(call, block, state)
+            },
+            Seal::Return(_) => {
+                panic!("invalid route found!");
+            },
+            Seal::Panic(_) => {
+                panic!("invalid route found!");
+            },
+            Seal::Cond { cond: _, then_target, else_target } => {
+                let mut changed = false;
+                let mut i = 0usize;
+                if &then_target.target == id {
+                    changed |= join_prec_block_parameters(then_target, block, state);
+                    i += 1;
+                }
+                if &else_target.target == id {
+                    changed |= join_prec_block_parameters(else_target, block, state);
+                    i += 1;
+                }
+                assert!(i > 0);
+                changed
+            },
+            Seal::Switch { cond: _, targets, default } => {
+                let mut changed = false;
+                let mut i = 0usize;
+                for target in targets.iter() {
+                    if &target.block_call.target == id {
+                        changed |= join_prec_block_parameters(&target.block_call, block, state);
+                        i += 1;
+                    }
+                }
+                if &default.target == id {
+                    changed |= join_prec_block_parameters(&default, block, state);
+                    i += 1;
+                }
+                assert!(i > 0);
+                changed
+            },
+        }
+    }
+}
+
 impl<V> CfgLattice<V> for MirFlowGraph
 where
-    MirTransferFunction: TransferFn<Self, V>,
-    V: LatticeElement + Default + Clone {
+    BlockForwardTransform: TransferFn<Self, V>,
+    BlockBackwardTransform: TransferFn<Self, V>,
+    V: LatticeElement + Default + Clone + Display {
     type NodeState = HashNodeState<MirValue, V>;
     type GraphState = MirGraphState<V>;
     type NodeId = MirGraphId;
@@ -1699,82 +1754,20 @@ where
     /// parameters of all blocks that precede this block and save the results into the block
     /// parameters values of this block.
     fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
-        /// Joins all backlinks to a block by iteration through the catalogue of backlinks in the
-        /// system and looping through the sealing statements of the preceding blocks.
-        /// The result of the merger is written directly into the state of the target block.
-        fn process_backlinks<E: LatticeElement + Default + Clone>(
-            blocks: &[Block],
-            block_ref: &MirBlockRef,
-            backlinks: &[Vec<MirBlockRef>],
-            state: &mut MirGraphState<E>,
-        ) -> bool {
-            let mut changed = false;
-            let block = &blocks[block_ref.0];
-            let backlinks = &backlinks[block_ref.0];
-            for predecessor_ref in backlinks.iter() {
-                let predecessor = &blocks[predecessor_ref.0];
-                match &predecessor.seal {
-                    Seal::None => panic!("illegal state"),
-                    Seal::Jump(call) => {
-                        assert_eq!(&call.target, block_ref);
-                        changed |= join_prec_block_parameters(call, block, state);
-                    },
-                    Seal::Return(_) => {
-                        panic!("invalid route found!");
-                    },
-                    Seal::Panic(_) => {
-                        panic!("invalid route found!");
-                    },
-                    Seal::Cond { cond: _, then_target, else_target } => {
-                        let mut i = 0usize;
-                        if &then_target.target == block_ref {
-                            changed |= join_prec_block_parameters(then_target, block, state);
-                            i += 1;
-                        }
-                        if &else_target.target == block_ref {
-                            changed |= join_prec_block_parameters(else_target, block, state);
-                            i += 1;
-                        }
-                        assert!(i > 0);
-                    },
-                    Seal::Switch { cond: _, targets, default } => {
-                        let mut i = 0usize;
-                        for target in targets.iter() {
-                            if &target.block_call.target == block_ref {
-                                changed |= join_prec_block_parameters(&target.block_call, block, state);
-                                i += 1;
-                            }
-                        }
-                        if &default.target == block_ref {
-                            changed |= join_prec_block_parameters(&default, block, state);
-                            i += 1;
-                        }
-                        assert!(i > 0);
-                    },
-                }
-            }
-            changed
+        let mut changed = false;
+        let block = &self.blocks[id.0.0];
+        for predecessor_ref in self.backlinks[id.0.0].iter() {
+            let predecessor = &self.blocks[predecessor_ref.0];
+            changed |= self.join_block_forward(&id.0, block, predecessor, state);
         }
+        changed
+    }
 
-        match id {
-            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
-                let block = &self.blocks[block_ref.0];
-                let idx = block.find_current_index(uid).unwrap();
-                if idx > 0 {
-                    // there is nothing to join here
-                    return false;
-                }
-                process_backlinks(&self.blocks, block_ref, &self.backlinks, state)
-            },
-            MirGraphId::Seal(block_ref) => {
-                let block = &self.blocks[block_ref.0];
-                if !block.statements.is_empty() {
-                    // there is nothing to join, the preceding element is a statement in this block
-                    return false;
-                }
-                process_backlinks(&self.blocks, block_ref, &self.backlinks, state)
-            },
-        }
+    fn join_single_prec(&self, id: &Self::NodeId, predecessor: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        assert!(self.backlinks[id.0.0].contains(&predecessor.0));
+        let block = &self.blocks[id.0.0];
+        let predecessor = &self.blocks[predecessor.0.0];
+        self.join_block_forward(&id.0, block, predecessor, state)
     }
 
     /// If the succeeding element is just a normal statement, then there is nothing to join, since
@@ -1782,145 +1775,129 @@ where
     /// However, if the succeeding element is a seal, then we need to join the block parameter
     /// values from all succeeding blocks into the call parameters of the seal.
     fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
-        match id {
-            MirGraphId::Statement(_) => {
-                // if this is a statement, then the succeeding node is always either another
-                // statement within the same block OR the sealing expression in the block.
-                // either way, there is nothing to join.
-                false
+        let block = &self.blocks[id.0.0];
+        match &block.seal {
+            Seal::None => panic!("illegal state"),
+            Seal::Jump(call) => {
+                join_succ_block_parameters(call, block, state)
             },
-            MirGraphId::Seal(block_ref) => {
-                let block = &self.blocks[block_ref.0];
-                match &block.seal {
-                    Seal::None => panic!("illegal state"),
-                    Seal::Jump(call) => {
-                        join_succ_block_parameters(call, block, state)
-                    },
-                    Seal::Return(_) => false,
-                    Seal::Panic(_) => false,
-                    Seal::Cond { cond: _, then_target, else_target } => {
-                        join_succ_block_parameters(then_target, block, state)
-                            | join_succ_block_parameters(else_target, block, state)
-                    },
-                    Seal::Switch { cond: _, targets, default } => {
-                        targets.iter()
-                            .map(|target| join_succ_block_parameters(&target.block_call, block, state))
-                            .reduce(bool::bitor)
-                            .unwrap_or(false)
-                            | join_succ_block_parameters(default, block, state)
-                    },
-                }
+            Seal::Return(_) => false,
+            Seal::Panic(_) => false,
+            Seal::Cond { cond: _, then_target, else_target } => {
+                join_succ_block_parameters(then_target, block, state)
+                    | join_succ_block_parameters(else_target, block, state)
+            },
+            Seal::Switch { cond: _, targets, default } => {
+                targets.iter()
+                    .map(|target| join_succ_block_parameters(&target.block_call, block, state))
+                    .reduce(bool::bitor)
+                    .unwrap_or(false)
+                    | join_succ_block_parameters(default, block, state)
             },
         }
     }
 
-    fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
-        match id {
-            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
-                let block = &self.blocks[block_ref.0];
-                let idx = block.find_current_index(uid)
-                    .expect("invalid graph id");
-                MirTransferFunction::Statement(block.statements[idx].clone())
+    fn join_single_succ(
+        &self,
+        id: &Self::NodeId,
+        successor: &Self::NodeId,
+        state: &mut Self::GraphState,
+    ) -> bool {
+        let block = &self.blocks[id.0.0];
+        match &block.seal {
+            Seal::None => panic!("illegal state"),
+            Seal::Jump(call) => {
+                assert_eq!(&call.target, &successor.0);
+                join_succ_block_parameters(call, block, state)
             },
-            MirGraphId::Seal(block_ref) => {
-                MirTransferFunction::Seal(self.blocks[block_ref.0].seal.clone())
+            Seal::Return(_) => false,
+            Seal::Panic(_) => false,
+            Seal::Cond { cond: _, then_target, else_target } => {
+                let mut changed = false;
+                let mut counter = 0usize;
+                if &then_target.target == &successor.0 {
+                    counter += 1;
+                    changed |= join_succ_block_parameters(then_target, block, state);
+                }
+                if &else_target.target == &successor.0 {
+                    counter += 1;
+                    changed |= join_succ_block_parameters(else_target, block, state);
+                }
+                assert!(counter > 0);
+                changed
+            },
+            Seal::Switch { cond: _, targets, default } => {
+                let mut changed = false;
+                let mut counter = 0usize;
+                for target in targets.iter() {
+                    if &default.target != &successor.0 {
+                        continue;
+                    }
+                    counter += 1;
+                    changed |= join_succ_block_parameters(&target.block_call, block, state);
+                }
+                if &default.target == &successor.0 {
+                    counter += 1;
+                    changed |= join_succ_block_parameters(default, block, state);
+                }
+                assert!(counter > 0);
+                changed
             },
         }
+    }
+
+    fn transfer_fn_forward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+        BlockForwardTransform { block: id.0, }
+    }
+
+    fn transfer_fn_backward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+        BlockBackwardTransform { block: id.0, }
     }
 
     fn all_nodes(&self) -> Vec<Self::NodeId> {
         // gather all nodes in the graph
-        let mut all = Vec::new();
-        for (block_id, block) in self.blocks.iter().enumerate() {
-            let block_id = MirBlockRef(block_id);
-            block.statements.iter().for_each(|s| {
-                all.push(MirGraphLoc(block_id, *s.uid()).into());
-            });
-            all.push(block_id.into());
-        }
-        all
+        self.blocks.iter().enumerate()
+            .map(|(i, _)| MirBlockRef(i).into())
+            .collect()
     }
 
     fn downlinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
-        match id {
-            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
-                let block = &self.blocks[block_ref.0];
-                let idx = block.find_current_index(uid)?;
-                if let Some(next) = block.statements.get(idx + 1) {
-                    Some(vec![MirGraphLoc(*block_ref, *next.uid()).into()])
-                } else {
-                    Some(vec![block_ref.clone().into()])
-                }
+        let block = &self.blocks[id.0.0];
+        match &block.seal {
+            Seal::None => None,
+            Seal::Jump(target) => Some(vec![target.target.into()]),
+            Seal::Cond {
+                cond: _,
+                then_target,
+                else_target,
+            } => {
+                Some(vec![
+                    then_target.target.into(),
+                    else_target.target.into(),
+                ])
             },
-            MirGraphId::Seal(block_ref) => {
-                let block = &self.blocks[block_ref.0];
-                match &block.seal {
-                    Seal::None => None,
-                    Seal::Jump(target) => Some(vec![target.target.into()]),
-                    Seal::Cond {
-                        cond: _,
-                        then_target,
-                        else_target,
-                    } => {
-                        Some(vec![
-                            then_target.target.into(),
-                            else_target.target.into(),
-                        ])
-                    },
-                    Seal::Switch {
-                        cond: _,
-                        targets,
-                        default,
-                    } => {
-                        let mut targets = targets
-                            .iter()
-                            .map(|item| item.block_call.target.into())
-                            .collect::<Vec<MirGraphId>>();
-                        targets.push(default.target.into());
-                        Some(targets)
-                    },
-                    Seal::Return(_) => Some(vec![]),
-                    Seal::Panic(_) => Some(vec![]),
-                }
+            Seal::Switch {
+                cond: _,
+                targets,
+                default,
+            } => {
+                let mut targets = targets
+                    .iter()
+                    .map(|item| item.block_call.target.into())
+                    .collect::<Vec<MirGraphId>>();
+                targets.push(default.target.into());
+                Some(targets)
             },
+            Seal::Return(_) => Some(vec![]),
+            Seal::Panic(_) => Some(vec![]),
         }
     }
 
     fn uplinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
-        fn get_backlinks(graph: &MirFlowGraph, block_ref: &MirBlockRef) -> Option<Vec<MirGraphId>> {
-            let backlinks = &graph.backlinks[block_ref.0];
-            if backlinks.is_empty() {
-                Some(vec![])
-            } else {
-                Some(backlinks
-                    .iter()
-                    .map(|link| link.clone().into())
-                    .collect())
-            }
-        }
-
-        match id {
-            MirGraphId::Statement(MirGraphLoc(block_ref, uid)) => {
-                let block = &self.blocks[block_ref.0];
-                let idx = block.find_current_index(uid)?;
-                if idx > 0 {
-                    let prev = &block.statements[idx - 1];
-                    Some(vec![MirGraphLoc(*block_ref, *prev.uid()).into()])
-                } else {
-                    // get backlinks and reference sealing statement for this
-                    get_backlinks(self, block_ref)
-                }
-            }
-            MirGraphId::Seal(block_ref) => {
-                let block = &self.blocks[block_ref.0];
-                if let Some(prev) = block.statements.last() {
-                    Some(vec![MirGraphLoc(*block_ref, *prev.uid()).into()])
-                } else {
-                    // get backlink and reference sealing statement for that
-                    get_backlinks(self, block_ref)
-                }
-            }
-        }
+        Some(self.backlinks[id.0.0]
+            .iter()
+            .map(|target| MirGraphId(*target))
+            .collect::<Vec<_>>())
     }
 }
 
@@ -1937,7 +1914,7 @@ where
 /// if a expression in the code flow tree is constant or not.
 /// As such, the transfer function is an essential part of code analysis, transformation and
 /// optimization.
-impl<S: LatticeElement + Clone + Default> TransferFn<MirFlowGraph, S> for MirTransferFunction
+impl<S: LatticeElement + Clone + Default + Display> TransferFn<MirFlowGraph, S> for BlockForwardTransform
 where
     MirExprId: ExprTransfer<S>,
 {
@@ -1946,14 +1923,30 @@ where
         input: &mut HashNodeState<MirValue, S>,
         cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict> {
-        match self {
-            MirTransferFunction::Statement(s) => {
-                s.transfer(input, &cfg)
-            }
-            MirTransferFunction::Seal(s) => {
-                s.transfer(input, cfg)
-            }
+        let mut changed = false;
+        let block = &cfg.blocks[self.block.0];
+        for statement in block.statements.iter() {
+            changed |= statement.transfer(input, cfg)?;
         }
+        changed |= block.seal.transfer(input, cfg)?;
+        Ok(changed)
+    }
+}
+
+impl<S: LatticeElement + Clone + Default + Display> TransferFn<MirFlowGraph, S> for BlockBackwardTransform
+where
+    MirExprId: ExprTransfer<S> {
+    fn transfer(
+        &self,
+        input: &mut HashNodeState<MirValue, S>,
+        cfg: &MirFlowGraph
+    ) -> Result<bool, S::Conflict> {
+        let block = &cfg.blocks[self.block.0];
+        let mut changed = block.seal.transfer(input, cfg)?;
+        for statement in block.statements.iter().rev() {
+            changed |= statement.transfer(input, cfg)?;
+        }
+        Ok(changed)
     }
 }
 
@@ -1974,7 +1967,7 @@ impl Statement {
             Statement::VarDef { value, var, uid: _ } => {
                 let new_value = value.expr_transfer(input, &cfg.expressions)?;
                 let changed = &new_value != &input.element_value(var);
-                if changed && &new_value != &S::default() {
+                if changed {
                     *input.element_value_mut(var) = new_value;
                     Ok(true)
                 } else {
@@ -1985,7 +1978,7 @@ impl Statement {
             | Statement::VarCopy { value, var, uid } => {
                 let new_value = input.element_value(value);
                 let changed = &new_value != &input.element_value(var);
-                if changed && &new_value != &S::default() {
+                if changed {
                     *input.element_value_mut(var) = new_value;
                     Ok(true)
                 } else {
@@ -2005,7 +1998,7 @@ impl Seal {
     where
         MirExprId: ExprTransfer<S>,
         MirFlowGraph: CfgLattice<S>, {
-        Ok(true)
+        Ok(false)
     }
 }
 

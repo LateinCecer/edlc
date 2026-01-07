@@ -139,18 +139,11 @@ impl ExprEval<ConstState> for MirCall {
                 // We don't actually need to check if the comptime arguments are constant at this
                 // point, since those *must* be constant for the function to successfully pass
                 // verification.
-                // let mut state = ConstState::Const;
-                // for param in self.args.iter() {
-                //     state = state.lower(input.element_value(param))?;
-                // }
-                // Ok(state)
+                let mut state = ConstState::Const;
                 for param in self.args.iter() {
-                    if input.element_value(param) != ConstState::Const {
-                        println!("call parameter ${:x} is not constant!", param.0);
-                        return Ok(ConstState::Unknown);
-                    }
+                    state = state.lower(input.element_value(param))?;
                 }
-                Ok(ConstState::Const)
+                Ok(state)
             }
         }
     }

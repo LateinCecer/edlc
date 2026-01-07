@@ -1025,6 +1025,8 @@ pub trait CfgLattice<V: LatticeElement>: Sized {
     /// This function returns of the state of the target node changed due to this operation.
     fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool;
 
+    fn join_single_prec(&self, id: &Self::NodeId, predecessor: &Self::NodeId, state: &mut Self::GraphState) -> bool;
+
     /// Computes the `join` operation for succeeding elements in a CFG lattice.
     /// This is usually done in backward analysis.
     /// The result of the join operation is saved in place of the original state for the node with
@@ -1032,7 +1034,11 @@ pub trait CfgLattice<V: LatticeElement>: Sized {
     /// This function returns if the state of the target node changed due to this operation.
     fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool;
 
-    fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V>;
+    fn join_single_succ(&self, id: &Self::NodeId, successor: &Self::NodeId, state: &mut Self::GraphState) -> bool;
+
+    fn transfer_fn_forward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V>;
+
+    fn transfer_fn_backward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V>;
 
     fn all_nodes(&self) -> Vec<Self::NodeId>;
 
@@ -1068,6 +1074,10 @@ where E: TransferFn<Self, V> + Clone {
         changed
     }
 
+    fn join_single_prec(&self, id: &Self::NodeId, predecessor: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        todo!()
+    }
+
     fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
         // make sure a base state exists for `id`
         state.entry(*id).or_insert(HashNodeState::default());
@@ -1084,7 +1094,15 @@ where E: TransferFn<Self, V> + Clone {
         changed
     }
 
-    fn transfer_fn(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+    fn join_single_succ(&self, id: &Self::NodeId, successor: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+        todo!()
+    }
+
+    fn transfer_fn_forward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+        self.lattice[*id].clone()
+    }
+
+    fn transfer_fn_backward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
         self.lattice[*id].clone()
     }
 
@@ -1130,7 +1148,7 @@ where Cfg::GraphState: CfgGraphStateMut<V, Cfg::NodeState, NodeId=Cfg::NodeId>,
         while let Some(v) = work_list.pop() {
             num_iters += 1;
             let mut changed = cfg.join_prec(&v, state);
-            changed |= cfg.transfer_fn(&v)
+            changed |= cfg.transfer_fn_forward(&v)
                 .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
             // println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
 
@@ -1161,7 +1179,7 @@ where
         while let Some(v) = work_list.pop() {
             num_iters += 1;
             let mut changed = cfg.join_succ(&v, state);
-            changed |= cfg.transfer_fn(&v)
+            changed |= cfg.transfer_fn_backward(&v)
                 .transfer(state.node_state_mut(&v).unwrap(), cfg)?;
 
             if changed {
@@ -1197,7 +1215,7 @@ where
                 state.node_state(&v).unwrap()
             };
             let mut transfer_state = node_state.clone();
-            cfg.transfer_fn(&v).transfer(&mut transfer_state, cfg)?;
+            cfg.transfer_fn_forward(&v).transfer(&mut transfer_state, cfg)?;
 
             // println!("{v:?}   {:?}", transfer_state);
 
@@ -1250,7 +1268,7 @@ where
                 state.node_state(&v).unwrap()
             };
             let mut y = x.clone();
-            cfg.transfer_fn(&v).transfer(&mut y, cfg)?;
+            cfg.transfer_fn_backward(&v).transfer(&mut y, cfg)?;
 
             // add inverse of dependencies to worklist
             for dep in cfg.uplinks(&v).unwrap() {
