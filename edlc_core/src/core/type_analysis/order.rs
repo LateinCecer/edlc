@@ -14,14 +14,10 @@
  *    limitations under the License.
  */
 
+use crate::core::edl_error::EdlError;
+use crate::core::type_analysis::NodeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use edlc_analysis::graph::LatticeElement;
-use crate::core::edl_error::EdlError;
-use crate::core::edl_param_env::{EdlGenericParamValue, EdlParameterDef};
-use crate::core::edl_type::EdlTypeInstance;
-use crate::core::edl_value::EdlConstValue;
-use crate::core::type_analysis::NodeId;
 
 #[derive(Debug, Clone)]
 pub struct TypeAnalysisError {
@@ -37,83 +33,3 @@ impl Display for TypeAnalysisError {
 
 impl Error for TypeAnalysisError {}
 
-
-impl LatticeElement for EdlTypeInstance {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlParameterDef {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlGenericParamValue {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlConstValue {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}

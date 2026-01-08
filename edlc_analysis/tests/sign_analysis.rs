@@ -1,4 +1,4 @@
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashNodeState, Lattice, LatticeElement, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
+use edlc_analysis::graph::{CfgGraphState, CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashGraphState, HashNodeState, Lattice, LatticeElement, LatticeId, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -61,6 +61,14 @@ impl LatticeElement for Sign {
             (Sign::Unknown, _) | (Sign::Positive | Sign::Negative | Sign::Zero, Sign::Invalid) => true,
             (_, _) => false,
         }
+    }
+
+    fn bottom() -> Self {
+        Self::Invalid
+    }
+
+    fn top() -> Self {
+        Self::Unknown
     }
 }
 
@@ -284,8 +292,8 @@ impl Display for SignTransferFn {
     }
 }
 
-impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign> for SignTransferFn {
-    fn transfer(&self, input: &mut HashNodeState<CfgValueId, Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<bool, SignConflict> {
+impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign, HashGraphState<LatticeId, Sign, ()>> for SignTransferFn {
+    fn transfer(&self, input: &mut HashNodeState<CfgValueId, Sign>, ctx: &mut (), cfg: &ConstraintLattice<ExprPool, Self>) -> Result<bool, SignConflict> {
         match self {
             SignTransferFn::Assign(id, expr_id) => {
                 let y = input.element_value(id);
@@ -328,7 +336,7 @@ fn join() {
 
 #[test]
 fn solve_sign() {
-    let mut graph_state = HashMap::default();
+    let mut graph_state = HashGraphState::new(());
 
     let gen_state = CfgValueGenerator::default();
     let a = gen_state.generate();
@@ -404,7 +412,7 @@ fn solve_sign() {
     let states = [v1, v2_1, v2_2, v2_3, v3, v4, v5, v6, v7, v8];
     for state in states {
         let node_name = format!("{state}");
-        let node_state = &graph_state.get(&state);
+        let node_state = &graph_state.node_state(&state);
         println!("  ° <{node_name:<8}>");
         if let Some(node_state) = *node_state {
             println!("    {node_state:?}");
@@ -459,17 +467,17 @@ fn solve_sign_builder() {
     println!("{}", cfg.lattice);
 
     // worklist solver
-    let mut graph_state = HashMap::default();
+    let mut graph_state = HashGraphState::new(());
     WorkListFixpointForward.solve(&cfg, &mut graph_state).unwrap();
     println!("done analysing program.");
 
     // print info
     println!(" --- SIGN ANALYSIS OUTPUT --- ");
-    let mut keys = graph_state.keys().collect::<Vec<_>>();
+    let mut keys = graph_state.map.keys().collect::<Vec<_>>();
     keys.sort();
     for state in keys {
         let node_name = format!("{state}");
-        let node_state = &graph_state.get(state);
+        let node_state = &graph_state.node_state(state);
         println!("  ° <{node_name:<8}>");
         if let Some(node_state) = *node_state {
             println!("    {node_state:?}");

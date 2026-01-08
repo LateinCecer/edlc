@@ -18,7 +18,7 @@ use crate::core::edl_param_env::{EdlGenericParamValue, EdlGenericParamVariant, E
 use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
 use crate::core::type_analysis::{ExtConstUid, Infer, InferAt, InferError, Region, RegionData, TypeUid};
 use crate::prelude::edl_type::EdlEnvId;
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashNodeState, LatticeElement, NoopNode, TransferFn};
+use edlc_analysis::graph::{CfgValueGenerator, CfgValueId, GraphBuilder, LatticeElement, NoopNode};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -343,6 +343,14 @@ impl LatticeElement for RegionValue {
         let Self::Span(span_other) = other else { unreachable!() };
         span_own.is_superset(span_other)
     }
+
+    fn bottom() -> Self {
+        todo!()
+    }
+
+    fn top() -> Self {
+        todo!()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -375,27 +383,3 @@ impl Display for RegionTransferFn {
     }
 }
 
-impl TransferFn<ConstraintLattice<(), Self>, RegionValue> for RegionTransferFn {
-    fn transfer(
-        &self,
-        input: &mut HashNodeState<CfgValueId, RegionValue>,
-        _cfg: &ConstraintLattice<(), Self>,
-    ) -> Result<bool, RegionConflict> {
-        match self {
-            RegionTransferFn::Sub(lhs, rhs) => {
-                let prev = input.element_value(rhs);
-                let eval = input.element_value(lhs).upper(input.element_value(rhs))?;
-                let changed = &prev != &eval;
-                *input.element_value_mut(rhs) = eval;
-                Ok(changed)
-            }
-            RegionTransferFn::Other => Ok(false),
-            RegionTransferFn::Declare(x, reg) => {
-                let val = RegionValue::new(*reg);
-                let changed = &input.element_value(x) != &val;
-                *input.element_value_mut(x) = val;
-                Ok(changed)
-            }
-        }
-    }
-}

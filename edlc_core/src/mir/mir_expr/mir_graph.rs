@@ -24,7 +24,7 @@ use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::ops::{BitAnd, BitOr, Deref};
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
@@ -1420,16 +1420,21 @@ impl MirFlowGraph {
             }
 
             // now we can add the requirements to the input parameters of the block
+            let mut params_changed = false;
             required_parameters.into_iter()
                 .for_each(|param| if !self.blocks[block_index].parameters.contains(&param) {
-                    self.blocks[block_index].parameters.push(param)
+                    self.blocks[block_index].parameters.push(param);
+                    params_changed = true;
                 });
-            // update worklist with all the source blocks that can jump to the updated block
-            self.backlinks[block_index]
-                .iter()
-                .for_each(|source| if !work_list.contains(&source.0) {
-                    work_list.push(source.0);
-                });
+
+            if params_changed {
+                // update worklist with all the source blocks that can jump to the updated block
+                self.backlinks[block_index]
+                    .iter()
+                    .for_each(|source| if !work_list.contains(&source.0) {
+                        work_list.push(source.0);
+                    });
+            }
         }
 
         // generate parameter value lists for jumps and conditional jumps between blocks
@@ -1521,7 +1526,7 @@ impl MirFlowGraph {
 
         println!("result of const analysis:");
         for (node, const_state) in state.0.iter() {
-            println!("${:x}: {:?}", node.0, const_state);
+            println!("${:x}: {}", node.0, const_state);
         }
         Ok(())
     }
@@ -1568,15 +1573,15 @@ impl From<MirBlockRef> for MirGraphId {
 /// stable state in the analysis.
 /// This naturally implies that we do not need to track the state of each variable at each node.
 /// We only need one node state to represent the entire graph state.
-pub struct MirGraphState<V>(HashNodeState<MirValue, V>);
+pub struct MirGraphState<V, State>(HashNodeState<MirValue, V>, State);
 
-impl<V> Default for MirGraphState<V> {
+impl<V, State: Default> Default for MirGraphState<V, State> {
     fn default() -> Self {
-        Self(HashNodeState::default())
+        Self(HashNodeState::default(), State::default())
     }
 }
 
-impl<V> Deref for MirGraphState<V> {
+impl<V, State> Deref for MirGraphState<V, State> {
     type Target = HashNodeState<MirValue, V>;
 
     fn deref(&self) -> &Self::Target {
@@ -1584,21 +1589,31 @@ impl<V> Deref for MirGraphState<V> {
     }
 }
 
-impl<V: LatticeElement + Clone + Default> CfgGraphState<V, HashNodeState<MirValue, V>> for MirGraphState<V> {
+impl<V: LatticeElement + Clone + Default, Context> CfgGraphState<V> for MirGraphState<V, Context> {
     type NodeId = MirGraphId;
+    type NodeState = HashNodeState<MirValue, V>;
+    type Context = Context;
 
     fn node_state(&self, _node: &Self::NodeId) -> Option<&HashNodeState<MirValue, V>> {
         Some(&self.0)
     }
+
+    fn context(&self) -> &Self::Context {
+        &self.1
+    }
 }
 
-impl<V: LatticeElement + Clone + Default> CfgGraphStateMut<V, HashNodeState<MirValue, V>> for MirGraphState<V> {
-    fn node_state_mut(&mut self, _node: &Self::NodeId) -> Option<&mut HashNodeState<MirValue, V>> {
-        Some(&mut self.0)
+impl<V: LatticeElement + Clone + Default, Context> CfgGraphStateMut<V> for MirGraphState<V, Context> {
+    fn node_state_mut(&mut self, _node: &Self::NodeId) -> Option<(&mut HashNodeState<MirValue, V>, &mut Context)> {
+        Some((&mut self.0, &mut self.1))
     }
 
     fn insert_node_state(&mut self, _node: &Self::NodeId, _state: HashNodeState<MirValue, V>) {
         // do nothing
+    }
+
+    fn context_mut(&mut self) -> &mut Self::Context {
+        &mut self.1
     }
 }
 
@@ -1618,10 +1633,10 @@ pub struct BlockBackwardTransform {
 /// If the states for both values were the same to begin with, the join operation is never
 /// actually evaluated.
 #[inline(always)]
-fn join_param<E: LatticeElement + Default + Clone + Display>(
+fn join_param<E: LatticeElement + Default + Clone + Display, State>(
     target: &MirValue,
     rhs: &MirValue,
-    state: &mut MirGraphState<E>,
+    state: &mut MirGraphState<E, State>,
     op: fn(E, E) -> Result<E, E::Conflict>,
 ) -> Result<bool, E::Conflict> {
     let rhs_value = state.0.element_value(rhs);
@@ -1639,10 +1654,10 @@ fn join_param<E: LatticeElement + Default + Clone + Display>(
     }
 }
 
-fn join_parameters<'lhs, 'rhs, E, IL, IR>(
+fn join_parameters<'lhs, 'rhs, E, IL, IR, State>(
     target: IL,
     rhs: IR,
-    state: &mut MirGraphState<E>,
+    state: &mut MirGraphState<E, State>,
     op: fn(E, E) -> Result<E, E::Conflict>,
 ) -> Result<bool, E::Conflict>
 where
@@ -1657,14 +1672,51 @@ where
         .unwrap_or(Ok(false))
 }
 
+/// Joins a number of values into a single value.
+/// The joining operation is conducted without taking the current value of the target state into
+/// account.
+/// The value obtained in the end is compared to the original state of the target value and then
+/// written to the target state.
+/// If the target state changed, `true` is returned.
+#[inline(always)]
+fn join_forward_call<'lhs, 'rhs, E, IR, State>(
+    target: &'lhs MirValue,
+    mut rhs: IR,
+    state: &mut MirGraphState<E, State>,
+    op: fn(E, E) -> Result<E, E::Conflict>,
+) -> Result<bool, E::Conflict>
+where
+    E: LatticeElement + Default + Clone + Display,
+    IR: Iterator<Item = &'rhs MirValue>,
+{
+    let Some(rhs_value) = rhs.next() else {
+        return Ok(false);
+    };
+    let mut current_state = state.0.element_value(rhs_value);
+    for rhs_value in rhs {
+        let other_state = state.0.element_value(rhs_value);
+        if current_state != other_state {
+            current_state = op(current_state, other_state)?;
+        }
+    }
+
+    let target_state = state.0.element_value_mut(target);
+    if target_state != &current_state {
+        *target_state = current_state;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Joins the block parameters from a block call and the target block into one set of
 /// variables and reports if the original state of the target state changed during the
 /// operation.
 #[inline(always)]
-fn join_prec_block_parameters<E: LatticeElement + Default + Clone + Display>(
+fn join_prec_block_parameters<E: LatticeElement + Default + Clone + Display, State>(
     call: &BlockCall,
     block: &Block,
-    state: &mut MirGraphState<E>,
+    state: &mut MirGraphState<E, State>,
 ) -> bool {
     assert_eq!(call.params.len(), block.parameters.len());
     join_parameters(block.parameters.iter(), call.params.iter(), state, E::upper).unwrap()
@@ -1674,23 +1726,76 @@ fn join_prec_block_parameters<E: LatticeElement + Default + Clone + Display>(
 /// of the call and reports of the original state of the call parameters changed during the
 /// operation.
 #[inline(always)]
-fn join_succ_block_parameters<E: LatticeElement + Default + Clone + Display>(
+fn join_succ_block_parameters<E: LatticeElement + Default + Clone + Display, State>(
     call: &BlockCall,
     block: &Block,
-    state: &mut MirGraphState<E>,
+    state: &mut MirGraphState<E, State>,
 ) -> bool {
     assert_eq!(call.params.len(), block.parameters.len());
     join_parameters(call.params.iter(), block.parameters.iter(), state, E::lower).unwrap()
 }
 
 impl MirFlowGraph {
+    fn collect_block_forward_params(
+        &self,
+        id: &MirBlockRef,
+        predecessor: &Block,
+        params: &mut [Vec<MirValue>],
+    ) {
+        match &predecessor.seal {
+            Seal::None => panic!(),
+            Seal::Jump(call) => {
+                assert_eq!(&call.target, id);
+                assert_eq!(params.len(), call.params.len());
+                for (dst, src) in params.iter_mut().zip(call.params.iter()) {
+                    dst.push(*src);
+                }
+            }
+            Seal::Return(_) => panic!(),
+            Seal::Panic(_) => panic!(),
+            Seal::Cond { cond: _, then_target, else_target } => {
+                let mut i = 0usize;
+                if &then_target.target == id {
+                    assert_eq!(params.len(), then_target.params.len());
+                    params.iter_mut().zip(then_target.params.iter())
+                        .for_each(|(dst, src)| dst.push(*src));
+                    i += 1;
+                }
+                if &else_target.target == id {
+                    assert_eq!(params.len(), else_target.params.len());
+                    params.iter_mut().zip(else_target.params.iter())
+                        .for_each(|(dst, src)| dst.push(*src));
+                    i += 1;
+                }
+                assert!(i > 0);
+            }
+            Seal::Switch { cond: _, targets, default } => {
+                let mut i = 0usize;
+                for target in targets.iter() {
+                    if &target.block_call.target != id {
+                        continue;
+                    }
+                    assert_eq!(params.len(), target.block_call.params.len());
+                    params.iter_mut().zip(target.block_call.params.iter())
+                        .for_each(|(dst, src)| dst.push(*src));
+                }
+                if &default.target == id {
+                    assert_eq!(params.len(), default.params.len());
+                    params.iter_mut().zip(default.params.iter())
+                        .for_each(|(dst, src)| dst.push(*src));
+                }
+                assert!(i > 0);
+            }
+        }
+    }
+
     #[inline(always)]
-    fn join_block_forward<V: LatticeElement + Default + Clone + Display>(
+    fn join_block_forward<V: LatticeElement + Default + Clone + Display, State>(
         &self,
         id: &MirBlockRef,
         block: &Block,
         predecessor: &Block,
-        state: &mut MirGraphState<V>,
+        state: &mut MirGraphState<V, State>,
     ) -> bool {
         match &predecessor.seal {
             Seal::None => panic!("illegal state"),
@@ -1738,130 +1843,181 @@ impl MirFlowGraph {
     }
 }
 
-impl<V> CfgLattice<V> for MirFlowGraph
+impl<V, Context> CfgLattice<V, MirGraphState<V, Context>> for MirFlowGraph
 where
-    BlockForwardTransform: TransferFn<Self, V>,
-    BlockBackwardTransform: TransferFn<Self, V>,
+    BlockForwardTransform: TransferFn<Self, V, MirGraphState<V, Context>>,
+    BlockBackwardTransform: TransferFn<Self, V, MirGraphState<V, Context>>,
     V: LatticeElement + Default + Clone + Display {
-    type NodeState = HashNodeState<MirValue, V>;
-    type GraphState = MirGraphState<V>;
-    type NodeId = MirGraphId;
-
 
     /// If the preceding element is just a normal statement, then there is nothing to join, since
     /// all elements are already at their most reduced form.
     /// However, if the preceding element is in another block, then we need to join the block
     /// parameters of all blocks that precede this block and save the results into the block
     /// parameters values of this block.
-    fn join_prec(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
-        let mut changed = false;
+    fn join_prec(&self, id: &MirGraphId, state: &mut MirGraphState<V, Context>) -> bool {
         let block = &self.blocks[id.0.0];
+        let mut params = vec![vec![]; block.parameters.len()];
         for predecessor_ref in self.backlinks[id.0.0].iter() {
             let predecessor = &self.blocks[predecessor_ref.0];
-            changed |= self.join_block_forward(&id.0, block, predecessor, state);
+            self.collect_block_forward_params(&id.0, predecessor, &mut params);
+        }
+
+        let mut changed = false;
+        for (target, params) in block.parameters.iter()
+            .zip(params.into_iter()) {
+            // join parameters one by one
+            changed |= join_forward_call(target, params.iter(), state, V::upper).unwrap();
         }
         changed
     }
 
-    fn join_single_prec(&self, id: &Self::NodeId, predecessor: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+    fn join_single_prec(
+        &self,
+        id: &MirGraphId,
+        predecessor: &MirGraphId,
+        state: &mut MirGraphState<V, Context>,
+    ) -> bool {
         assert!(self.backlinks[id.0.0].contains(&predecessor.0));
         let block = &self.blocks[id.0.0];
         let predecessor = &self.blocks[predecessor.0.0];
-        self.join_block_forward(&id.0, block, predecessor, state)
+        let mut params = vec![vec![]; block.parameters.len()];
+        self.collect_block_forward_params(&id.0, predecessor, &mut params);
+
+        let mut changed = false;
+        for (target, params) in block.parameters.iter()
+            .zip(params.into_iter()) {
+            // join parameters one by one
+            changed |= join_forward_call(target, params.iter(), state, V::upper).unwrap();
+        }
+        changed
     }
 
     /// If the succeeding element is just a normal statement, then there is nothing to join, since
     /// all elements are already at their most reduced form.
     /// However, if the succeeding element is a seal, then we need to join the block parameter
     /// values from all succeeding blocks into the call parameters of the seal.
-    fn join_succ(&self, id: &Self::NodeId, state: &mut Self::GraphState) -> bool {
+    fn join_succ(&self, id: &MirGraphId, state: &mut MirGraphState<V, Context>) -> bool {
         let block = &self.blocks[id.0.0];
+        let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
+
         match &block.seal {
-            Seal::None => panic!("illegal state"),
+            Seal::None => panic!(),
+            Seal::Return(_) => panic!(),
+            Seal::Panic(_) => panic!(),
             Seal::Jump(call) => {
-                join_succ_block_parameters(call, block, state)
+                let successor = &self.blocks[call.target.0];
+                call.params.iter().zip(successor.parameters.iter())
+                    .for_each(|(call_param, target_param)| {
+                        params.entry(*call_param).or_insert_with(Vec::new)
+                            .push(*target_param);
+                    });
             },
-            Seal::Return(_) => false,
-            Seal::Panic(_) => false,
             Seal::Cond { cond: _, then_target, else_target } => {
-                join_succ_block_parameters(then_target, block, state)
-                    | join_succ_block_parameters(else_target, block, state)
+                let successor = &self.blocks[then_target.target.0];
+                then_target.params.iter().zip(successor.parameters.iter())
+                    .for_each(|(call_param, target_param)| {
+                        params.entry(*call_param).or_insert_with(Vec::new)
+                            .push(*target_param);
+                    });
+                let successor = &self.blocks[else_target.target.0];
+                else_target.params.iter().zip(successor.parameters.iter())
+                    .for_each(|(call_param, target_param)| {
+                        params.entry(*call_param).or_insert_with(Vec::new)
+                            .push(*target_param);
+                    });
             },
             Seal::Switch { cond: _, targets, default } => {
-                targets.iter()
-                    .map(|target| join_succ_block_parameters(&target.block_call, block, state))
-                    .reduce(bool::bitor)
-                    .unwrap_or(false)
-                    | join_succ_block_parameters(default, block, state)
-            },
+                for target in targets.iter() {
+                    let successor = &self.blocks[target.block_call.target.0];
+                    target.block_call.params.iter().zip(successor.parameters.iter())
+                        .for_each(|(call_param, target_param)| {
+                            params.entry(*call_param).or_insert_with(Vec::new)
+                                .push(*target_param);
+                        });
+                }
+                let successor = &self.blocks[default.target.0];
+                default.params.iter().zip(successor.parameters.iter())
+                    .for_each(|(call_param, target_param)| {
+                        params.entry(*call_param).or_insert_with(Vec::new)
+                            .push(*target_param);
+                    });
+            }
         }
+
+        let mut changed = false;
+        for (target, params) in params {
+            changed |= join_forward_call(&target, params.iter(), state, V::lower).unwrap();
+        }
+        changed
     }
 
     fn join_single_succ(
         &self,
-        id: &Self::NodeId,
-        successor: &Self::NodeId,
-        state: &mut Self::GraphState,
+        id: &MirGraphId,
+        successor: &MirGraphId,
+        state: &mut MirGraphState<V, Context>,
     ) -> bool {
-        let block = &self.blocks[id.0.0];
-        match &block.seal {
-            Seal::None => panic!("illegal state"),
-            Seal::Jump(call) => {
-                assert_eq!(&call.target, &successor.0);
-                join_succ_block_parameters(call, block, state)
-            },
-            Seal::Return(_) => false,
-            Seal::Panic(_) => false,
-            Seal::Cond { cond: _, then_target, else_target } => {
-                let mut changed = false;
-                let mut counter = 0usize;
-                if &then_target.target == &successor.0 {
-                    counter += 1;
-                    changed |= join_succ_block_parameters(then_target, block, state);
-                }
-                if &else_target.target == &successor.0 {
-                    counter += 1;
-                    changed |= join_succ_block_parameters(else_target, block, state);
-                }
-                assert!(counter > 0);
-                changed
-            },
-            Seal::Switch { cond: _, targets, default } => {
-                let mut changed = false;
-                let mut counter = 0usize;
-                for target in targets.iter() {
-                    if &default.target != &successor.0 {
-                        continue;
-                    }
-                    counter += 1;
-                    changed |= join_succ_block_parameters(&target.block_call, block, state);
-                }
-                if &default.target == &successor.0 {
-                    counter += 1;
-                    changed |= join_succ_block_parameters(default, block, state);
-                }
-                assert!(counter > 0);
-                changed
-            },
-        }
+        // let block = &self.blocks[id.0.0];
+        // match &block.seal {
+        //     Seal::None => panic!("illegal state"),
+        //     Seal::Jump(call) => {
+        //         assert_eq!(&call.target, &successor.0);
+        //         join_succ_block_parameters(call, block, state)
+        //     },
+        //     Seal::Return(_) => false,
+        //     Seal::Panic(_) => false,
+        //     Seal::Cond { cond: _, then_target, else_target } => {
+        //         let mut changed = false;
+        //         let mut counter = 0usize;
+        //         if &then_target.target == &successor.0 {
+        //             counter += 1;
+        //             changed |= join_succ_block_parameters(then_target, block, state);
+        //         }
+        //         if &else_target.target == &successor.0 {
+        //             counter += 1;
+        //             changed |= join_succ_block_parameters(else_target, block, state);
+        //         }
+        //         assert!(counter > 0);
+        //         changed
+        //     },
+        //     Seal::Switch { cond: _, targets, default } => {
+        //         let mut changed = false;
+        //         let mut counter = 0usize;
+        //         for target in targets.iter() {
+        //             if &default.target != &successor.0 {
+        //                 continue;
+        //             }
+        //             counter += 1;
+        //             changed |= join_succ_block_parameters(&target.block_call, block, state);
+        //         }
+        //         if &default.target == &successor.0 {
+        //             counter += 1;
+        //             changed |= join_succ_block_parameters(default, block, state);
+        //         }
+        //         assert!(counter > 0);
+        //         changed
+        //     },
+        // }
+
+        todo!()
     }
 
-    fn transfer_fn_forward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+    fn transfer_fn_forward(&self, id: &MirGraphId) -> impl TransferFn<Self, V, MirGraphState<V, Context>> {
         BlockForwardTransform { block: id.0, }
     }
 
-    fn transfer_fn_backward(&self, id: &Self::NodeId) -> impl TransferFn<Self, V> {
+    fn transfer_fn_backward(&self, id: &MirGraphId) -> impl TransferFn<Self, V, MirGraphState<V, Context>> {
         BlockBackwardTransform { block: id.0, }
     }
 
-    fn all_nodes(&self) -> Vec<Self::NodeId> {
+    fn all_nodes(&self) -> Vec<MirGraphId> {
         // gather all nodes in the graph
         self.blocks.iter().enumerate()
             .map(|(i, _)| MirBlockRef(i).into())
             .collect()
     }
 
-    fn downlinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
+    fn downlinks(&self, id: &MirGraphId) -> Option<impl IntoIterator<Item=MirGraphId>> {
         let block = &self.blocks[id.0.0];
         match &block.seal {
             Seal::None => None,
@@ -1893,7 +2049,7 @@ where
         }
     }
 
-    fn uplinks(&self, id: &Self::NodeId) -> Option<impl IntoIterator<Item=Self::NodeId>> {
+    fn uplinks(&self, id: &MirGraphId) -> Option<impl IntoIterator<Item=MirGraphId>> {
         Some(self.backlinks[id.0.0]
             .iter()
             .map(|target| MirGraphId(*target))
@@ -1914,37 +2070,42 @@ where
 /// if a expression in the code flow tree is constant or not.
 /// As such, the transfer function is an essential part of code analysis, transformation and
 /// optimization.
-impl<S: LatticeElement + Clone + Default + Display> TransferFn<MirFlowGraph, S> for BlockForwardTransform
+impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowGraph, S, MirGraphState<S, Context>> for BlockForwardTransform
 where
-    MirExprId: ExprTransfer<S>,
+    MirExprId: ExprTransfer<S, Context>,
+    Seal: SealEval<S, Context>,
 {
     fn transfer(
         &self,
         input: &mut HashNodeState<MirValue, S>,
+        ctx: &mut Context,
         cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict> {
         let mut changed = false;
         let block = &cfg.blocks[self.block.0];
         for statement in block.statements.iter() {
-            changed |= statement.transfer(input, cfg)?;
+            changed |= statement.transfer(input, ctx, cfg)?;
         }
-        changed |= block.seal.transfer(input, cfg)?;
+        changed |= block.seal.transfer(input, ctx, cfg)?;
         Ok(changed)
     }
 }
 
-impl<S: LatticeElement + Clone + Default + Display> TransferFn<MirFlowGraph, S> for BlockBackwardTransform
+impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowGraph, S, MirGraphState<S, Context>> for BlockBackwardTransform
 where
-    MirExprId: ExprTransfer<S> {
+    MirExprId: ExprTransfer<S, Context>,
+    Seal: SealEval<S, Context>,
+{
     fn transfer(
         &self,
         input: &mut HashNodeState<MirValue, S>,
+        ctx: &mut Context,
         cfg: &MirFlowGraph
     ) -> Result<bool, S::Conflict> {
         let block = &cfg.blocks[self.block.0];
-        let mut changed = block.seal.transfer(input, cfg)?;
+        let mut changed = block.seal.transfer(input, ctx, cfg)?;
         for statement in block.statements.iter().rev() {
-            changed |= statement.transfer(input, cfg)?;
+            changed |= statement.transfer(input, ctx, cfg)?;
         }
         Ok(changed)
     }
@@ -1954,18 +2115,19 @@ impl Statement {
     /// Transfers the state of a DFG based on a statement.
     /// For this function to work, the transformation for the lattice element must be implemented
     /// for expression evaluation.
-    fn transfer<S: LatticeElement + Clone + Default>(
+    fn transfer<S: LatticeElement + Clone + Default, Context>(
         &self,
         input: &mut HashNodeState<MirValue, S>,
+        ctx: &mut Context,
         cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict>
     where
-        MirExprId: ExprTransfer<S>,
-        MirFlowGraph: CfgLattice<S>, {
+        MirExprId: ExprTransfer<S, Context>,
+        MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>>, {
 
         match self {
             Statement::VarDef { value, var, uid: _ } => {
-                let new_value = value.expr_transfer(input, &cfg.expressions)?;
+                let new_value = value.expr_transfer(input, ctx, &cfg.expressions)?;
                 let changed = &new_value != &input.element_value(var);
                 if changed {
                     *input.element_value_mut(var) = new_value;
@@ -1989,94 +2151,93 @@ impl Statement {
     }
 }
 
-impl Seal {
-    fn transfer<S: LatticeElement + Clone + Default>(
+trait SealEval<S: LatticeElement + Clone + Default, Context>
+where MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>> {
+    fn transfer(
         &self,
-        _input: &mut HashNodeState<MirValue, S>,
-        _cfg: &MirFlowGraph,
-    ) -> Result<bool, S::Conflict>
-    where
-        MirExprId: ExprTransfer<S>,
-        MirFlowGraph: CfgLattice<S>, {
-        Ok(false)
-    }
+        input: &mut HashNodeState<MirValue, S>,
+        ctx: &mut Context,
+        cfg: &MirFlowGraph,
+    ) -> Result<bool, S::Conflict>;
 }
 
-trait ExprTransfer<S: LatticeElement> {
+trait ExprTransfer<S: LatticeElement, Context> {
 
     fn expr_transfer(
         &self,
         input: &HashNodeState<MirValue, S>,
+        ctx: &mut Context,
         expressions: &MirExprContainer,
     ) -> Result<S, S::Conflict>;
 }
 
-trait ExprEval<S: LatticeElement> {
-    fn eval(&self, input: &HashNodeState<MirValue, S>) -> Result<S, S::Conflict>;
+trait ExprEval<S: LatticeElement, Context> {
+    fn eval(&self, input: &HashNodeState<MirValue, S>, ctx: &mut Context) -> Result<S, S::Conflict>;
 }
 
-impl<S: LatticeElement> ExprTransfer<S> for MirExprId
+impl<S: LatticeElement, Context> ExprTransfer<S, Context> for MirExprId
 where
-    MirArrayInit: ExprEval<S>,
-    MirAs: ExprEval<S>,
-    MirCall: ExprEval<S>,
-    MirLiteral: ExprEval<S>,
-    MirGlobalVar: ExprEval<S>,
-    MirConstant: ExprEval<S>,
-    MirAssign: ExprEval<S>,
-    MirData: ExprEval<S>,
-    MirTypeInit: ExprEval<S>,
-    MirRef: ExprEval<S>,
-    MirDeref: ExprEval<S>,
-    MirDowncastRef: ExprEval<S>,
+    MirArrayInit: ExprEval<S, Context>,
+    MirAs: ExprEval<S, Context>,
+    MirCall: ExprEval<S, Context>,
+    MirLiteral: ExprEval<S, Context>,
+    MirGlobalVar: ExprEval<S, Context>,
+    MirConstant: ExprEval<S, Context>,
+    MirAssign: ExprEval<S, Context>,
+    MirData: ExprEval<S, Context>,
+    MirTypeInit: ExprEval<S, Context>,
+    MirRef: ExprEval<S, Context>,
+    MirDeref: ExprEval<S, Context>,
+    MirDowncastRef: ExprEval<S, Context>,
 {
     fn expr_transfer(
         &self,
         input: &HashNodeState<MirValue, S>,
+        ctx: &mut Context,
         expressions: &MirExprContainer,
     ) -> Result<S, S::Conflict> {
         match self.ty {
             MirExprVariant::ArrayInit => {
-                expressions.array_inits[self.id].eval(input)
+                expressions.array_inits[self.id].eval(input, ctx)
             }
             MirExprVariant::As => {
-                expressions.ases[self.id].eval(input)
+                expressions.ases[self.id].eval(input, ctx)
             }
             MirExprVariant::Call => {
-                expressions.call[self.id].eval(input)
+                expressions.call[self.id].eval(input, ctx)
             }
             MirExprVariant::Literal => {
-                expressions.literals[self.id].eval(input)
+                expressions.literals[self.id].eval(input, ctx)
             }
             MirExprVariant::Variable => {
-                expressions.variables[self.id].eval(input)
+                expressions.variables[self.id].eval(input, ctx)
             }
             MirExprVariant::Constant => {
-                expressions.constants[self.id].eval(input)
+                expressions.constants[self.id].eval(input, ctx)
             }
             MirExprVariant::Assign => {
-                expressions.assigns[self.id].eval(input)
+                expressions.assigns[self.id].eval(input, ctx)
             }
             MirExprVariant::Let => {
                 panic!("deprecated")
             }
             MirExprVariant::Data => {
-                expressions.data[self.id].eval(input)
+                expressions.data[self.id].eval(input, ctx)
             }
             MirExprVariant::Offset => {
                 panic!("deprecated")
             }
             MirExprVariant::Init => {
-                expressions.type_inits[self.id].eval(input)
+                expressions.type_inits[self.id].eval(input, ctx)
             }
             MirExprVariant::Ref => {
-                expressions.refs[self.id].eval(input)
+                expressions.refs[self.id].eval(input, ctx)
             }
             MirExprVariant::Deref => {
-                expressions.derefs[self.id].eval(input)
+                expressions.derefs[self.id].eval(input, ctx)
             }
             MirExprVariant::DowncastRef => {
-                expressions.downcasts[self.id].eval(input)
+                expressions.downcasts[self.id].eval(input, ctx)
             }
         }
     }

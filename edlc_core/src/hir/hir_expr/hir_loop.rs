@@ -284,7 +284,9 @@ impl MakeGraph for HirLoop {
         let block_value = graph.graph.create_temp_variable(block_ty);
         self.block.write_to_graph(graph, block_value)?;
 
-        graph.graph.insert_jump(graph.current_block, merge_block);
+        // seal loop body by inserting a jump instruction back to the head of the loop and continue
+        // writing in the merge block after the loop.
+        graph.graph.insert_jump(graph.current_block, header_block);
         graph.current_block = merge_block;
         Ok(())
     }

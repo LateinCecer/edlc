@@ -398,9 +398,15 @@ fn test_env() -> Result<(), anyhow::Error> {
         let x = if i == 3 {
             i
         } else {
-            std::input()
+            // std::input()
+            0
         };
-        let y = x + i;
+        let mut y = i + x;
+
+        loop {
+            if y == std::input() { break; }
+            y += 1;
+        }
     }
     "#))?;
     Ok(())
