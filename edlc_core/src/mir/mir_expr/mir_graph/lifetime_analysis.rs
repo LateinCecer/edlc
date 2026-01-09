@@ -30,6 +30,9 @@
 //! alive.
 
 use std::collections::HashSet;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use edlc_analysis::graph::LatticeElement;
 use crate::mir::mir_expr::MirGraphLoc;
 
 /// Lifetime analysis data for a MIR call graph.
@@ -50,6 +53,7 @@ impl LifetimeAnalysis {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 enum LifetimeSpan {
     Static,
     /// A scoped lifetime span explicitly specifies all points at which the lifetime is alive.
@@ -57,8 +61,66 @@ enum LifetimeSpan {
 }
 
 impl Default for LifetimeSpan {
-    fn default() -> LifetimeSpan {
+    fn default() -> Self {
         LifetimeSpan::Scoped(HashSet::new())
+    }
+}
+
+#[derive(Debug)]
+pub enum RegionError {
+
+}
+
+impl Display for RegionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+impl Error for RegionError {}
+
+
+impl LatticeElement for LifetimeSpan {
+    type Conflict = RegionError;
+
+    fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
+        match (self, other) {
+            (Self::Static, o) | (o, Self::Static) => Ok(o),
+            (Self::Scoped(a), Self::Scoped(b)) =>
+                Ok(Self::Scoped(a.intersection(&b).cloned().collect())),
+        }
+    }
+
+    fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
+        match (self, other) {
+            (Self::Static, _) | (_, Self::Static) => Ok(Self::Static),
+            (Self::Scoped(a), Self::Scoped(b)) =>
+                Ok(Self::Scoped(a.union(&b).cloned().collect())),
+        }
+    }
+
+    fn is_lower_bound(&self, other: &Self) -> bool {
+        match (self, other) {
+            (_, Self::Static) => true,
+            (Self::Scoped(a), Self::Scoped(b)) => a.is_subset(b),
+            _ => false,
+        }
+    }
+
+    fn is_upper_bound(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Static, _) => true,
+            (Self::Scoped(a), Self::Scoped(b)) => b.is_subset(a),
+            _ => false,
+        }
+    }
+
+    fn bottom() -> Self {
+        Self::Scoped(HashSet::new())
+    }
+
+    fn top() -> Self {
+        Self::Static
     }
 }
 
