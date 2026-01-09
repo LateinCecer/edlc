@@ -1522,7 +1522,7 @@ impl MirFlowGraph {
     /// be treated as constants.
     pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
         let mut state = MirGraphState::default();
-        WorkListFixpointForward.solve(self, &mut state)?;
+        WorkListFixpointForward.solve(self, &mut state, ConstState::upper)?;
 
         println!("result of const analysis:");
         for (node, const_state) in state.0.iter() {
@@ -1854,7 +1854,12 @@ where
     /// However, if the preceding element is in another block, then we need to join the block
     /// parameters of all blocks that precede this block and save the results into the block
     /// parameters values of this block.
-    fn join_prec(&self, id: &MirGraphId, state: &mut MirGraphState<V, Context>) -> bool {
+    fn join_prec(
+        &self,
+        id: &MirGraphId,
+        state: &mut MirGraphState<V, Context>,
+        op: fn(V, V) -> Result<V, V::Conflict>,
+    ) -> bool {
         let block = &self.blocks[id.0.0];
         let mut params = vec![vec![]; block.parameters.len()];
         for predecessor_ref in self.backlinks[id.0.0].iter() {
@@ -1866,7 +1871,7 @@ where
         for (target, params) in block.parameters.iter()
             .zip(params.into_iter()) {
             // join parameters one by one
-            changed |= join_forward_call(target, params.iter(), state, V::upper).unwrap();
+            changed |= join_forward_call(target, params.iter(), state, op).unwrap();
         }
         changed
     }
@@ -1876,6 +1881,7 @@ where
         id: &MirGraphId,
         predecessor: &MirGraphId,
         state: &mut MirGraphState<V, Context>,
+        op: fn(V, V) -> Result<V, V::Conflict>,
     ) -> bool {
         assert!(self.backlinks[id.0.0].contains(&predecessor.0));
         let block = &self.blocks[id.0.0];
@@ -1887,7 +1893,7 @@ where
         for (target, params) in block.parameters.iter()
             .zip(params.into_iter()) {
             // join parameters one by one
-            changed |= join_forward_call(target, params.iter(), state, V::upper).unwrap();
+            changed |= join_forward_call(target, params.iter(), state, op).unwrap();
         }
         changed
     }
@@ -1896,7 +1902,12 @@ where
     /// all elements are already at their most reduced form.
     /// However, if the succeeding element is a seal, then we need to join the block parameter
     /// values from all succeeding blocks into the call parameters of the seal.
-    fn join_succ(&self, id: &MirGraphId, state: &mut MirGraphState<V, Context>) -> bool {
+    fn join_succ(
+        &self,
+        id: &MirGraphId,
+        state: &mut MirGraphState<V, Context>,
+        op: fn(V, V) -> Result<V, V::Conflict>,
+    ) -> bool {
         let block = &self.blocks[id.0.0];
         let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
 
@@ -1946,7 +1957,7 @@ where
 
         let mut changed = false;
         for (target, params) in params {
-            changed |= join_forward_call(&target, params.iter(), state, V::lower).unwrap();
+            changed |= join_forward_call(&target, params.iter(), state, op).unwrap();
         }
         changed
     }
@@ -1954,52 +1965,80 @@ where
     fn join_single_succ(
         &self,
         id: &MirGraphId,
-        successor: &MirGraphId,
+        successor_id: &MirGraphId,
         state: &mut MirGraphState<V, Context>,
+        op: fn(V, V) -> Result<V, V::Conflict>,
     ) -> bool {
-        // let block = &self.blocks[id.0.0];
-        // match &block.seal {
-        //     Seal::None => panic!("illegal state"),
-        //     Seal::Jump(call) => {
-        //         assert_eq!(&call.target, &successor.0);
-        //         join_succ_block_parameters(call, block, state)
-        //     },
-        //     Seal::Return(_) => false,
-        //     Seal::Panic(_) => false,
-        //     Seal::Cond { cond: _, then_target, else_target } => {
-        //         let mut changed = false;
-        //         let mut counter = 0usize;
-        //         if &then_target.target == &successor.0 {
-        //             counter += 1;
-        //             changed |= join_succ_block_parameters(then_target, block, state);
-        //         }
-        //         if &else_target.target == &successor.0 {
-        //             counter += 1;
-        //             changed |= join_succ_block_parameters(else_target, block, state);
-        //         }
-        //         assert!(counter > 0);
-        //         changed
-        //     },
-        //     Seal::Switch { cond: _, targets, default } => {
-        //         let mut changed = false;
-        //         let mut counter = 0usize;
-        //         for target in targets.iter() {
-        //             if &default.target != &successor.0 {
-        //                 continue;
-        //             }
-        //             counter += 1;
-        //             changed |= join_succ_block_parameters(&target.block_call, block, state);
-        //         }
-        //         if &default.target == &successor.0 {
-        //             counter += 1;
-        //             changed |= join_succ_block_parameters(default, block, state);
-        //         }
-        //         assert!(counter > 0);
-        //         changed
-        //     },
-        // }
+        let block = &self.blocks[id.0.0];
+        match &block.seal {
+            Seal::None => panic!(),
+            Seal::Return(_) => panic!(),
+            Seal::Panic(_) => panic!(),
+            Seal::Jump(call) => {
+                let successor = &self.blocks[call.target.0];
+                assert_eq!(&successor_id.0, &call.target);
+                let mut changed = false;
+                call.params.iter().zip(successor.parameters.iter())
+                    .for_each(|(target, src)| {
+                        changed |= join_forward_call(target, [*src].iter(), state, op).unwrap();
+                    });
+                changed
+            }
+            Seal::Cond { cond: _, then_target, else_target } => {
+                let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
+                if &successor_id.0 == &then_target.target {
+                    let successor = &self.blocks[then_target.target.0];
+                    then_target.params.iter().zip(successor.parameters.iter())
+                        .for_each(|(call_param, target_param)| {
+                            params.entry(*call_param).or_insert_with(Vec::new)
+                                .push(*target_param);
+                        });
+                }
+                if &successor_id.0 == &else_target.target {
+                    let successor = &self.blocks[else_target.target.0];
+                    else_target.params.iter().zip(successor.parameters.iter())
+                        .for_each(|(call_param, target_param)| {
+                            params.entry(*call_param).or_insert_with(Vec::new)
+                                .push(*target_param);
+                        });
+                }
+                // merge
+                let mut changed = false;
+                for (target, params) in params {
+                    changed |= join_forward_call(&target, params.iter(), state, op).unwrap();
+                }
+                changed
+            }
+            Seal::Switch { cond: _, targets, default } => {
+                let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
 
-        todo!()
+                for target in targets.iter() {
+                    if &successor_id.0 == &target.block_call.target {
+                        let successor = &self.blocks[target.block_call.target.0];
+                        target.block_call.params.iter().zip(successor.parameters.iter())
+                            .for_each(|(call_param, target_param)| {
+                                params.entry(*call_param).or_insert_with(Vec::new)
+                                    .push(*target_param);
+                            });
+                    }
+                }
+
+                if &successor_id.0 == &default.target {
+                    let successor = &self.blocks[default.target.0];
+                    default.params.iter().zip(successor.parameters.iter())
+                        .for_each(|(call_param, target_param)| {
+                            params.entry(*call_param).or_insert_with(Vec::new)
+                                .push(*target_param);
+                        });
+                }
+
+                let mut changed = false;
+                for (target, params) in params {
+                    changed |= join_forward_call(&target, params.iter(), state, op).unwrap();
+                }
+                changed
+            }
+        }
     }
 
     fn transfer_fn_forward(&self, id: &MirGraphId) -> impl TransferFn<Self, V, MirGraphState<V, Context>> {
