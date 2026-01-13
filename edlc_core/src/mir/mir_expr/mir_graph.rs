@@ -19,15 +19,17 @@ mod deconstruction;
 mod const_propagation;
 pub mod lifetime_analysis;
 
+use std::cmp::Ordering;
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant, MirRef};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
+use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::{BitAnd, BitOr, Deref};
+use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::lifetime_analysis::LifetimeAnalysis;
+use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
@@ -43,6 +45,7 @@ use crate::mir::mir_expr::mir_graph::deconstruction::PartialSsaDeconstruction;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::MirPhase;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -57,11 +60,53 @@ struct Scope(usize);
 /// NOTE: most of these temporary variables can only be read once, as they are not actually
 ///       variables and are moved on use, instead of copied!
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirValue(usize);
+pub struct MirValue(pub(super) usize);
 
 /// Indicates a specific position in the MIR flow graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirGraphLoc(MirBlockRef, BlockLocalStatementUid);
+
+/// Is a location in a block that points either to a statement in the block or to the sealing
+/// identifier.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub enum MirLoc {
+    GraphLoc(MirGraphLoc),
+    Seal(MirBlockRef),
+}
+
+impl MirLoc {
+    pub fn block_ref(&self) -> &MirBlockRef {
+        match self {
+            Self::GraphLoc(MirGraphLoc(block_ref, _)) => block_ref,
+            Self::Seal(block_ref) => block_ref,
+        }
+    }
+}
+
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+/// Like the [MirLoc] enum, but instead of pointing to a specific location in the block at all times,
+/// it points to a location in the block that is only valid in the current state of the bock.
+/// If the state changes, then this location is no longer valid.
+/// On the other hand, since type allows for easy identification of the ordering between different
+/// statements within the same block.
+struct CurrentMirLoc {
+    block_ref: MirBlockRef,
+    /// Current index in the block.
+    /// If `index` is equal to the number of statements in the block, then it points to the sealing
+    /// statement of the block.
+    index: usize,
+}
+
+impl CurrentMirLoc {
+    fn try_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.block_ref != other.block_ref {
+            None
+        } else {
+            Some(self.index.cmp(&other.index))
+        }
+    }
+}
 
 impl MirGraphLoc {
     fn new(block_ref: MirBlockRef, uid: BlockLocalStatementUid) -> Self {
@@ -350,23 +395,20 @@ enum Seal {
 }
 
 impl Seal {
-    fn uses_var(&self, var: &VarUse) -> bool {
-        match var {
-            VarUse::Seal(_, var) => match self {
-                Self::Return(return_value) => return_value == var,
-                Self::Panic(panic_value) => panic_value == var,
-                Self::Jump(block_call) => block_call.uses_var(var),
-                Self::Cond { cond, then_target, else_target } => {
-                    cond == var || then_target.uses_var(var) || else_target.uses_var(var)
-                },
-                Self::Switch { cond, targets, default } => {
-                    cond == var
-                        || targets.iter().any(|target| target.uses_var(var))
-                        || default.uses_var(var)
-                },
-                Self::None => panic!("invalid state"),
-            }
-            VarUse::Statement(..) => false,
+    fn uses_var(&self, var: &MirValue) -> bool {
+         match self {
+            Self::Return(return_value) => return_value == var,
+            Self::Panic(panic_value) => panic_value == var,
+            Self::Jump(block_call) => block_call.uses_var(var),
+            Self::Cond { cond, then_target, else_target } => {
+                cond == var || then_target.uses_var(var) || else_target.uses_var(var)
+            },
+            Self::Switch { cond, targets, default } => {
+                cond == var
+                    || targets.iter().any(|target| target.uses_var(var))
+                    || default.uses_var(var)
+            },
+            Self::None => panic!("invalid state"),
         }
     }
 
@@ -696,6 +738,59 @@ impl Block {
             }
         });
         collection
+    }
+
+    fn find_closest_use(
+        &self,
+        block_ref: MirBlockRef,
+        expr_container: &MirExprContainer,
+        start: usize,
+        search_var: &MirValue,
+    ) -> Option<VarUse> {
+        let mut statement = if start < self.statements.len() {
+            self.statements
+                .iter()
+                .skip(start)
+                .find_map(|statement| if statement.uses_var(expr_container, search_var) {
+                    Some(VarUse::Statement(block_ref, *search_var, *statement.uid()))
+                } else {
+                    None
+                })
+        } else {
+            None
+        };
+
+        // look into sealing statement if the variable was not found in the statements
+        if statement.is_none() && self.seal.uses_var(search_var) {
+            statement = Some(VarUse::Seal(block_ref, *search_var));
+        }
+        statement
+    }
+
+    fn find_furthest_use(
+        &self,
+        block_ref: MirBlockRef,
+        expr_container: &MirExprContainer,
+        start: usize,
+        search_var: &MirValue,
+    ) -> Option<VarUse> {
+        if self.seal.uses_var(search_var) {
+            return Some(VarUse::Seal(block_ref, *search_var));
+        }
+
+        if start < self.statements.len() {
+            self.statements
+                .iter()
+                .skip(start)
+                .rev()
+                .find_map(|statement| if statement.uses_var(expr_container, search_var) {
+                    Some(VarUse::Statement(block_ref, *search_var, *statement.uid()))
+                } else {
+                    None
+                })
+        } else {
+            None
+        }
     }
 
     fn iter_value_uses<F: FnMut(VarUse)>(
@@ -1291,7 +1386,8 @@ impl MirFlowGraph {
             });
         self.build_reverse_jump_list();
         self.route_variables();
-        // self.bake_ssa_variables();
+        self.bake_ssa_variables();
+        self.promote_moves();
     }
 
     /// Generates the reverse jump list that is used as a quick lookup table by other algorithms
@@ -1518,6 +1614,28 @@ impl MirFlowGraph {
         }
     }
 
+    /// The CFG may contain instances of [Statement::VarMove].
+    /// If a value is used *after* it has been moved into another variable, we have a problem.
+    /// To prevent this, we can simply swap the move with a copy, if the source value is in use at
+    /// any later point.
+    ///
+    /// If copy is not implemented for the type, then this operation will result in an error.
+    fn promote_moves(&mut self) {
+        for (block_index, block) in self.blocks.iter_mut().enumerate() {
+            let block_ref = MirBlockRef(block_index);
+            for idx in 0..block.statements.len() {
+                let Statement::VarMove { var, uid, value } = &block.statements[idx] else {
+                    continue;
+                };
+                // look ahead to find latest use point
+                if block.find_closest_use(block_ref, &self.expressions, idx + 1, value).is_some() {
+                    let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value };
+                    block.statements[idx] = new_statement;
+                }
+            }
+        }
+    }
+
     /// Performs constant analysis on the MIR data flow graph to figure out which MIR values can
     /// be treated as constants.
     pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
@@ -1540,8 +1658,16 @@ impl MirFlowGraph {
     /// For the lifetime analysis to succeed, the code flow graph must the in full SSA
     /// representation with no open-ended variables.
     /// To ensure this, you can run [Self::seal] on the flow graph.
-    pub fn lifetimes(&self) -> LifetimeAnalysis {
-        todo!()
+    pub fn lifetimes(&self, mir_types: &MirTypeRegistry) -> Result<(), <LifetimeSpan as LatticeElement>::Conflict> {
+        let mut state: MirGraphState<LifetimeSpan, LifetimeAnalysis> = MirGraphState::default();
+        state.1.insert_references(self, mir_types);
+        WorkListFixpointBackward.solve(self, &mut state, LifetimeSpan::upper)?;
+
+        println!("result of lifetime analysis:");
+        for (node, const_state) in state.0.iter() {
+            println!("${:x} is alive in {const_state}", node.0);
+        }
+        Ok(())
     }
 
     /// Deconstructs the SSA variable tree in the call graph.
@@ -1913,8 +2039,8 @@ where
 
         match &block.seal {
             Seal::None => panic!(),
-            Seal::Return(_) => panic!(),
-            Seal::Panic(_) => panic!(),
+            Seal::Return(_) => (),
+            Seal::Panic(_) => (),
             Seal::Jump(call) => {
                 let successor = &self.blocks[call.target.0];
                 call.params.iter().zip(successor.parameters.iter())
@@ -1972,8 +2098,8 @@ where
         let block = &self.blocks[id.0.0];
         match &block.seal {
             Seal::None => panic!(),
-            Seal::Return(_) => panic!(),
-            Seal::Panic(_) => panic!(),
+            Seal::Return(_) => false,
+            Seal::Panic(_) => false,
             Seal::Jump(call) => {
                 let successor = &self.blocks[call.target.0];
                 assert_eq!(&successor_id.0, &call.target);
@@ -2113,6 +2239,7 @@ impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowG
 where
     MirExprId: ExprTransfer<S, Context>,
     Seal: SealEval<S, Context>,
+    S: TransferCopy<Context> + TransferMove<Context>,
 {
     fn transfer(
         &self,
@@ -2123,9 +2250,9 @@ where
         let mut changed = false;
         let block = &cfg.blocks[self.block.0];
         for statement in block.statements.iter() {
-            changed |= statement.transfer(input, ctx, cfg)?;
+            changed |= statement.transfer(input, ctx, self.block, cfg)?;
         }
-        changed |= block.seal.transfer(input, ctx, cfg)?;
+        changed |= block.seal.transfer(input, ctx, &self.block, cfg)?;
         Ok(changed)
     }
 }
@@ -2134,19 +2261,44 @@ impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowG
 where
     MirExprId: ExprTransfer<S, Context>,
     Seal: SealEval<S, Context>,
+    S: TransferCopy<Context> + TransferMove<Context>,
 {
     fn transfer(
         &self,
         input: &mut HashNodeState<MirValue, S>,
         ctx: &mut Context,
-        cfg: &MirFlowGraph
+        cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict> {
         let block = &cfg.blocks[self.block.0];
-        let mut changed = block.seal.transfer(input, ctx, cfg)?;
+        let mut changed = block.seal.transfer(input, ctx, &self.block, cfg)?;
         for statement in block.statements.iter().rev() {
-            changed |= statement.transfer(input, ctx, cfg)?;
+            changed |= statement.transfer(input, ctx, self.block, cfg)?;
         }
         Ok(changed)
+    }
+}
+
+trait TransferCopy<Context>: LatticeElement + IsDefault + Clone {
+    fn transfer_copy(
+        value: &MirValue,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut Context,
+        loc: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.replace(target, input.element_value(value)))
+    }
+}
+
+trait TransferMove<Context>: LatticeElement + IsDefault + Clone {
+    fn transfer_move(
+        value: &MirValue,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut Context,
+        loc: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.replace(target, input.element_value(value)))
     }
 }
 
@@ -2154,37 +2306,27 @@ impl Statement {
     /// Transfers the state of a DFG based on a statement.
     /// For this function to work, the transformation for the lattice element must be implemented
     /// for expression evaluation.
-    fn transfer<S: LatticeElement + Clone + Default, Context>(
+    fn transfer<S: LatticeElement + Clone + Default + IsDefault, Context>(
         &self,
         input: &mut HashNodeState<MirValue, S>,
         ctx: &mut Context,
+        block: MirBlockRef,
         cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict>
     where
         MirExprId: ExprTransfer<S, Context>,
-        MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>>, {
+        MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>>,
+        S: TransferCopy<Context> + TransferMove<Context> {
 
         match self {
-            Statement::VarDef { value, var, uid: _ } => {
-                let new_value = value.expr_transfer(input, ctx, &cfg.expressions)?;
-                let changed = &new_value != &input.element_value(var);
-                if changed {
-                    *input.element_value_mut(var) = new_value;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+            Statement::VarDef { value, var, uid } => {
+                value.expr_transfer(input, ctx, &MirGraphLoc(block, *uid), var, &cfg.expressions)
             }
-            Statement::VarMove { value, var, uid }
-            | Statement::VarCopy { value, var, uid } => {
-                let new_value = input.element_value(value);
-                let changed = &new_value != &input.element_value(var);
-                if changed {
-                    *input.element_value_mut(var) = new_value;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
+            Statement::VarMove { value, var, uid } => {
+                S::transfer_move(value, input, ctx, &MirGraphLoc(block, *uid), var)
+            }
+            Statement::VarCopy { value, var, uid } => {
+                S::transfer_copy(value, input, ctx, &MirGraphLoc(block, *uid), var)
             }
         }
     }
@@ -2196,6 +2338,7 @@ where MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>> {
         &self,
         input: &mut HashNodeState<MirValue, S>,
         ctx: &mut Context,
+        loc: &MirBlockRef,
         cfg: &MirFlowGraph,
     ) -> Result<bool, S::Conflict>;
 }
@@ -2204,14 +2347,22 @@ trait ExprTransfer<S: LatticeElement, Context> {
 
     fn expr_transfer(
         &self,
-        input: &HashNodeState<MirValue, S>,
+        input: &mut HashNodeState<MirValue, S>,
         ctx: &mut Context,
+        loc: &MirGraphLoc,
+        target: &MirValue,
         expressions: &MirExprContainer,
-    ) -> Result<S, S::Conflict>;
+    ) -> Result<bool, S::Conflict>;
 }
 
 trait ExprEval<S: LatticeElement, Context> {
-    fn eval(&self, input: &HashNodeState<MirValue, S>, ctx: &mut Context) -> Result<S, S::Conflict>;
+    fn eval(
+        &self,
+        input: &mut HashNodeState<MirValue, S>,
+        ctx: &mut Context,
+        loc: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, S::Conflict>;
 }
 
 impl<S: LatticeElement, Context> ExprTransfer<S, Context> for MirExprId
@@ -2231,52 +2382,54 @@ where
 {
     fn expr_transfer(
         &self,
-        input: &HashNodeState<MirValue, S>,
+        input: &mut HashNodeState<MirValue, S>,
         ctx: &mut Context,
+        loc: &MirGraphLoc,
+        target: &MirValue,
         expressions: &MirExprContainer,
-    ) -> Result<S, S::Conflict> {
+    ) -> Result<bool, S::Conflict> {
         match self.ty {
             MirExprVariant::ArrayInit => {
-                expressions.array_inits[self.id].eval(input, ctx)
+                expressions.array_inits[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::As => {
-                expressions.ases[self.id].eval(input, ctx)
+                expressions.ases[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Call => {
-                expressions.call[self.id].eval(input, ctx)
+                expressions.call[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Literal => {
-                expressions.literals[self.id].eval(input, ctx)
+                expressions.literals[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Variable => {
-                expressions.variables[self.id].eval(input, ctx)
+                expressions.variables[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Constant => {
-                expressions.constants[self.id].eval(input, ctx)
+                expressions.constants[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Assign => {
-                expressions.assigns[self.id].eval(input, ctx)
+                expressions.assigns[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Let => {
                 panic!("deprecated")
             }
             MirExprVariant::Data => {
-                expressions.data[self.id].eval(input, ctx)
+                expressions.data[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Offset => {
                 panic!("deprecated")
             }
             MirExprVariant::Init => {
-                expressions.type_inits[self.id].eval(input, ctx)
+                expressions.type_inits[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Ref => {
-                expressions.refs[self.id].eval(input, ctx)
+                expressions.refs[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::Deref => {
-                expressions.derefs[self.id].eval(input, ctx)
+                expressions.derefs[self.id].eval(input, ctx, loc, target)
             }
             MirExprVariant::DowncastRef => {
-                expressions.downcasts[self.id].eval(input, ctx)
+                expressions.downcasts[self.id].eval(input, ctx, loc, target)
             }
         }
     }

@@ -20,15 +20,15 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval};
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{MirDeref, MirDowncastRef, MirFlowGraph, MirRef, MirValue};
-use edlc_analysis::graph::{CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, LatticeElement, TransferFn};
+use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirRef, MirValue};
+use edlc_analysis::graph::{CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, TransferFn};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-
+use crate::prelude::mir_expr::MirGraphLoc;
 
 /// Lattice for Const analysis looks somewhat like this:
 ///
@@ -71,6 +71,12 @@ impl Display for ConstState {
             ConstState::Runtime => write!(f, "R"),
             ConstState::Invalid => write!(f, "I"),
         }
+    }
+}
+
+impl IsDefault for ConstState {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Invalid)
     }
 }
 
@@ -157,11 +163,15 @@ impl LatticeElement for ConstState {
     }
 }
 
+impl TransferCopy<ConstPropagation> for ConstState {}
+impl TransferMove<ConstPropagation> for ConstState {}
+
 impl SealEval<ConstState, ConstPropagation> for Seal {
     fn transfer(
         &self,
         _input: &mut HashNodeState<MirValue, ConstState>,
         _ctx: &mut ConstPropagation,
+        _log: &MirBlockRef,
         _cfg: &MirFlowGraph,
     ) -> Result<bool, ConstPropagationError> {
         Ok(false)
@@ -171,19 +181,21 @@ impl SealEval<ConstState, ConstPropagation> for Seal {
 impl ExprEval<ConstState, ConstPropagation> for MirArrayInit {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
         match &self.elements {
             MirArrayInitVariant::List(elements) => {
                 let mut state = ConstState::new_const(ctx);
                 for element in elements {
                     state = state.lower(input.element_value(element))?;
                 }
-                Ok(state)
+                Ok(input.replace(target, state))
             }
             MirArrayInitVariant::Copy { val, len: _ } => {
-                Ok(input.element_value(val))
+                Ok(input.replace(target, input.element_value(val)))
             }
         }
     }
@@ -192,32 +204,38 @@ impl ExprEval<ConstState, ConstPropagation> for MirArrayInit {
 impl ExprEval<ConstState, ConstPropagation> for MirAs {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
-        ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(input.element_value(&self.val))
+        input: &mut HashNodeState<MirValue, ConstState>,
+        _ctx: &mut ConstPropagation,
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, input.element_value(&self.val)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirAssign {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
-        ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(input.element_value(&self.rhs))
+        input: &mut HashNodeState<MirValue, ConstState>,
+        _ctx: &mut ConstPropagation,
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, input.element_value(&self.rhs)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirCall {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
         match &self.context {
-            CallContext::Comptime => Ok(ConstState::new_const(ctx)),
-            CallContext::Runtime => Ok(ConstState::Runtime),
+            CallContext::Comptime => Ok(input.replace(target, ConstState::new_const(ctx))),
+            CallContext::Runtime => Ok(input.replace(target, ConstState::Runtime)),
             CallContext::MaybeComptime => {
                 // All arguments must be constant for the function to be constant.
                 // We don't actually need to check if the comptime arguments are constant at this
@@ -225,10 +243,10 @@ impl ExprEval<ConstState, ConstPropagation> for MirCall {
                 // verification.
                 for param in self.args.iter() {
                     if !matches!(input.element_value(param), ConstState::Const(_)) {
-                        return Ok(ConstState::Unknown);
+                        return Ok(input.replace(target, ConstState::Unknown));
                     }
                 }
-                Ok(ConstState::new_const(ctx))
+                Ok(input.replace(target, ConstState::new_const(ctx)))
             }
         }
     }
@@ -237,43 +255,51 @@ impl ExprEval<ConstState, ConstPropagation> for MirCall {
 impl ExprEval<ConstState, ConstPropagation> for MirConstant {
     fn eval(
         &self,
-        _input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(ConstState::new_const(ctx))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, ConstState::new_const(ctx)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirData {
     fn eval(
         &self,
-        _input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(ConstState::new_const(ctx))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, ConstState::new_const(ctx)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirLiteral {
     fn eval(
         &self,
-        _input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(ConstState::new_const(ctx))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, ConstState::new_const(ctx)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirRef {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
         if self.mutable {
-            Ok(ConstState::Runtime)
+            Ok(input.replace(target, ConstState::Runtime))
         } else {
-            Ok(input.element_value(&self.value))
+            Ok(input.replace(target, input.element_value(&self.value)))
         }
     }
 }
@@ -281,45 +307,53 @@ impl ExprEval<ConstState, ConstPropagation> for MirRef {
 impl ExprEval<ConstState, ConstPropagation> for MirDeref {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(input.element_value(&self.value))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, input.element_value(&self.value)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirDowncastRef {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(input.element_value(&self.value))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, input.element_value(&self.value)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirTypeInit {
     fn eval(
         &self,
-        input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
         for init in self.inits.iter() {
             if !matches!(input.element_value(&init.val), ConstState::Const(_)) {
-                return Ok(ConstState::Unknown);
+                return Ok(input.replace(target, ConstState::Unknown));
             }
         }
-        Ok(ConstState::new_const(ctx))
+        Ok(input.replace(target, ConstState::new_const(ctx)))
     }
 }
 
 impl ExprEval<ConstState, ConstPropagation> for MirGlobalVar {
     fn eval(
         &self,
-        _input: &HashNodeState<MirValue, ConstState>,
+        input: &mut HashNodeState<MirValue, ConstState>,
         ctx: &mut ConstPropagation,
-    ) -> Result<ConstState, ConstPropagationError> {
-        Ok(ConstState::new_const(ctx))
+        _log: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, ConstPropagationError> {
+        Ok(input.replace(target, ConstState::new_const(ctx)))
     }
 }
 

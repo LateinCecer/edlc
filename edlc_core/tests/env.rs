@@ -127,20 +127,15 @@ impl TestCompiler {
 
         hir.write_to_graph(&mut graph_writer, ret_value)?;
         graph_writer.graph.insert_return(graph_writer.current_block, ret_value);
-
         graph_writer.graph.seal();
-        // print result
-        let mut out = std::io::stdout();
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&graph_writer.graph)?;
 
-        graph_writer.graph.bake_ssa_variables();
         // print result
         let mut out = std::io::stdout();
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&graph_writer.graph)?;
 
         graph_writer.graph.constant_analysis()?;
+        graph_writer.graph.lifetimes(&self.compiler.mir_phase.types)?;
         Ok(())
     }
 }

@@ -874,6 +874,25 @@ pub struct HashNodeState<I: Hash + PartialEq + Clone, E> {
     map: HashMap<I, E>,
 }
 
+pub trait IsDefault: Default {
+    fn is_default(&self) -> bool;
+}
+
+impl<I: Hash + PartialEq + Eq + Clone, E: IsDefault + PartialEq + Eq> HashNodeState<I, E> {
+    pub fn replace(&mut self, id: &I, element: E) -> bool {
+        if let Some(prev) = self.map.get_mut(id) {
+            let changed = prev != &element;
+            *prev = element;
+            changed
+        } else if !element.is_default() {
+            self.map.insert(id.clone(), element);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl<I: Hash + PartialEq + Clone, E> HashNodeState<I, E> {
     pub fn iter<'a>(&'a self) -> std::collections::hash_map::Iter<'a, I, E> {
         self.map.iter()
@@ -1228,7 +1247,8 @@ where
 
 pub struct PropagationWorkListForward;
 
-impl<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGraphStateMut<V> + Default + Clone> LogicSolver<Cfg, V, State> for PropagationWorkListForward
+impl<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGraphStateMut<V> + Default + Clone>
+LogicSolver<Cfg, V, State> for PropagationWorkListForward
 where
     State::NodeState: Default + Clone + CfgNodeStateMut<V>,
     State::NodeId: PartialEq,
