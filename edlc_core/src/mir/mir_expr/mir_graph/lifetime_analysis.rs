@@ -29,23 +29,23 @@
 //! In the end, we are left with a complete set of graph locations, at which each region must be
 //! alive.
 
-use std::collections::HashSet;
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::ops::{BitAnd, BitOr, Deref};
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
-use crate::mir::mir_expr::{BlockCall, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirLoc, MirRef, MirValue};
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{BlockCall, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirLoc, MirRef, MirValue};
 use crate::mir::mir_type::MirTypeRegistry;
+use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
+use std::collections::HashSet;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::ops::{BitOr, Range};
 
 /// Lifetime analysis data for a MIR call graph.
 /// Since we perform this lifetime analysis on SSA values that are not necessarily linked to
@@ -75,10 +75,15 @@ impl LifetimeAnalysis {
     }
 }
 
+#[derive(Default)]
+struct BlockLifenessData {
+    regions: Vec<(Range<usize>, MirValue)>
+}
+
 /// Provides an efficient list with a number of sets that represent the spans of each mir value.
-struct RegionLivenessList {
-    lookaside_table: Vec<usize>,
-    lifeness: Vec<MirGraphLoc>,
+pub struct RegionLivenessList {
+    regions: Vec<CurrentRegion>,
+    scopes: Vec<(MirBlockRef, Range<usize>)>,
 }
 
 /// Contains the correlations between lifetimes.
@@ -87,9 +92,78 @@ struct RegionCorrelationList {
     correlations: Vec<MirValue>,
 }
 
+enum CurrentRegion {
+    Static,
+    Scoped(Range<usize>)
+}
+
+impl CurrentRegion {
+    fn overlaps(&self, other: &CurrentRegion, scopes: &Vec<(MirBlockRef, Range<usize>)>) -> bool {
+        if matches!(self, Self::Static) || matches!(other, Self::Static) {
+            return true;
+        }
+        let Self::Scoped(a) = self else { unreachable!() };
+        let Self::Scoped(b) = other else { unreachable!() };
+
+        for lhs in scopes[a.clone()].iter() {
+            if Self::scope_contains(&scopes[b.clone()], lhs) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn contains(&self, lhs: &(MirBlockRef, Range<usize>), scopes: &Vec<(MirBlockRef, Range<usize>)>) -> bool {
+        let Self::Scoped(a) = self else {
+            return true;
+        };
+        Self::scope_contains(&scopes[a.clone()], lhs)
+    }
+
+    #[inline(always)]
+    fn scope_contains(
+        scopes: &[(MirBlockRef, Range<usize>)],
+        (block_lhs, range_lhs): &(MirBlockRef, Range<usize>),
+    ) -> bool {
+        scopes.iter().any(|(block_rhs, range_rhs)| {
+            block_rhs == block_lhs && (range_lhs.contains(&range_rhs.start) || range_lhs.contains(&(range_rhs.end - 1)))
+        })
+    }
+}
+
 impl RegionLivenessList {
-    fn new() -> Self {
-        Self { lookaside_table: Vec::new(), lifeness: Vec::new() }
+    pub fn new(nodes: &HashNodeState<MirValue, LifetimeSpan>, cfg: &MirFlowGraph) -> Self {
+        let mut regions = Vec::new();
+        let mut scopes = Vec::new();
+
+        for (value, span) in nodes.iter() {
+            while regions.len() <= value.0 {
+                regions.push(CurrentRegion::Static);
+            }
+
+            match span {
+                LifetimeSpan::Static => {
+                    regions[value.0] = CurrentRegion::Static;
+                },
+                LifetimeSpan::Scoped(set) => {
+                    let mut new_scopes = cfg.locations_to_ranges(set.iter());
+                    let start = scopes.len();
+                    let end = start + new_scopes.len();
+                    scopes.append(&mut new_scopes);
+                    regions[value.0] = CurrentRegion::Scoped(start..end);
+                }
+            }
+        }
+        RegionLivenessList { regions, scopes }
+    }
+
+    pub fn overlaps(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
+        self.regions[lhs.0].overlaps(&self.regions[rhs.0], &self.scopes)
+    }
+
+    pub fn is_alive_at(&self, value: &MirValue, loc: &MirLoc, cfg: &MirFlowGraph) -> bool {
+        let (block, current_index) = cfg.current_index(loc).unwrap();
+        self.regions[value.0].contains(&(block, current_index..(current_index + 1)), &self.scopes)
     }
 }
 
@@ -207,13 +281,10 @@ impl SealEval<LifetimeSpan, LifetimeAnalysis> for Seal {
             },
             Seal::Jump(target) => {
                 add_block_call(target, input, loc)
-                // Ok(false)
             },
             Seal::Cond { cond, then_target, else_target } => {
                 Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc))
                     | add_block_call(then_target, input, loc)? | add_block_call(else_target, input, loc)?)
-                // Ok(false)
-                // Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc)))
             },
             Seal::Switch { cond, targets, default } => {
                 let mut changed = input.element_value_mut(cond).add_use(MirLoc::Seal(*loc));

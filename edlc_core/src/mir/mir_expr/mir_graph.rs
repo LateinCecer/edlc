@@ -26,7 +26,7 @@ use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
-use std::ops::{BitAnd, BitOr, Deref};
+use std::ops::{BitAnd, BitOr, Deref, Range};
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
@@ -46,6 +46,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::MirPhase;
+use crate::prelude::mir_expr::lifetime_analysis::RegionLivenessList;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -495,6 +496,36 @@ struct Block {
 }
 
 impl Block {
+    /// Converts an iterator of locations in the block into a range of indices were an index
+    /// corresponds to the current index of the graph id in the block state.
+    fn locations_to_range<I: Iterator<Item=Item>, Item: Deref<Target=MirLoc> + Clone>(
+        &self,
+        id: &MirBlockRef,
+        iter: I,
+    ) -> Option<Range<usize>> {
+        let mut current: Option<Range<usize>> = None;
+        for item in iter {
+            let index = match *item.clone() {
+                MirLoc::GraphLoc(MirGraphLoc(block, uid)) => {
+                    if &block != id { continue; }
+                    self.find_current_index(&uid).unwrap()
+                }
+                MirLoc::Seal(block) => {
+                    if &block != id { continue; }
+                    self.statements.len()
+                }
+            };
+
+            if let Some(current) = current.as_mut() {
+                current.start = usize::min(current.start, index);
+                current.end = usize::max(current.end, index + 1);
+            } else {
+                current = Some(index..(index + 1));
+            }
+        }
+        current
+    }
+
     /// Finds and returns the closest definition point for a variable use point.
     /// If the variable is not defined at a point in the code flow _before_ the specified use point,
     /// then the code flow graph is in an illegal state.
@@ -1636,6 +1667,37 @@ impl MirFlowGraph {
         }
     }
 
+    pub fn current_index(&self, loc: &MirLoc) -> Option<(MirBlockRef, usize)> {
+        match loc {
+            MirLoc::GraphLoc(MirGraphLoc(block, uid)) => {
+                self.blocks[block.0].find_current_index(uid)
+                    .map(|index| (*block, index))
+            },
+            MirLoc::Seal(block) => {
+                Some((*block, self.blocks[block.0].statements.len()))
+            },
+        }
+    }
+
+    pub fn locations_to_ranges<I: Iterator<Item=Item>, Item: Deref<Target=MirLoc>>(
+        &self,
+        iter: I,
+    ) -> Vec<(MirBlockRef, Range<usize>)> {
+        let mut ranges = HashMap::new();
+        for item in iter {
+            let block_ref = *item.block_ref();
+            ranges.entry(block_ref).or_insert_with(Vec::new).push(item.clone())
+        }
+        ranges
+            .into_iter()
+            .map(|(block, locs)| {
+                self.blocks[block.0].locations_to_range(&block, locs.iter())
+                    .map(|(range)| (block, range))
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Performs constant analysis on the MIR data flow graph to figure out which MIR values can
     /// be treated as constants.
     pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
@@ -1658,7 +1720,10 @@ impl MirFlowGraph {
     /// For the lifetime analysis to succeed, the code flow graph must the in full SSA
     /// representation with no open-ended variables.
     /// To ensure this, you can run [Self::seal] on the flow graph.
-    pub fn lifetimes(&self, mir_types: &MirTypeRegistry) -> Result<(), <LifetimeSpan as LatticeElement>::Conflict> {
+    pub fn lifetimes(
+        &self,
+        mir_types: &MirTypeRegistry,
+    ) -> Result<RegionLivenessList, <LifetimeSpan as LatticeElement>::Conflict> {
         let mut state: MirGraphState<LifetimeSpan, LifetimeAnalysis> = MirGraphState::default();
         state.1.insert_references(self, mir_types);
         WorkListFixpointBackward.solve(self, &mut state, LifetimeSpan::upper)?;
@@ -1667,7 +1732,9 @@ impl MirFlowGraph {
         for (node, const_state) in state.0.iter() {
             println!("${:x} is alive in {const_state}", node.0);
         }
-        Ok(())
+
+        let liveness = RegionLivenessList::new(&state.0, self);
+        Ok(liveness)
     }
 
     /// Deconstructs the SSA variable tree in the call graph.
@@ -1681,7 +1748,8 @@ impl MirFlowGraph {
     /// - values that have life references pointing to them
     ///
     /// To determine this, we need the output of the life-time analysis.
-    pub fn deconstruct(&self, lifetimes: &LifetimeAnalysis) -> PartialSsaDeconstruction {
+    pub fn deconstruct(&self, lifetimes: &RegionLivenessList) -> PartialSsaDeconstruction {
+
         todo!()
     }
 }
