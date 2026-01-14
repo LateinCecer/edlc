@@ -16,7 +16,7 @@
 
 mod builder;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hash;
@@ -1187,20 +1187,25 @@ pub trait LogicSolver<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGr
 pub struct WorkListFixpointForward;
 
 impl<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGraphStateMut<V>> LogicSolver<Cfg, V, State> for WorkListFixpointForward
-where State::NodeId: PartialEq,
+where
+    State::NodeId: PartialEq + Debug,
+    State::NodeState: Clone + PartialEq,
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
         let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
             num_iters += 1;
+
+            let prev_state = state.node_state(&v).unwrap().clone();
             let mut changed = cfg.join_prec(&v, state, op);
+
             let (state, ctx) = state.node_state_mut(&v).unwrap();
             changed |= cfg.transfer_fn_forward(&v)
                 .transfer(state, ctx, cfg)?;
             // println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
 
-            if changed {
+            if changed && state != &prev_state {
                 // add inverse of dependencies to worklist
                 for dep in cfg.downlinks(&v).unwrap() {
                     if !work_list.contains(&dep) {
@@ -1219,27 +1224,33 @@ pub struct WorkListFixpointBackward;
 
 impl<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGraphStateMut<V>> LogicSolver<Cfg, V, State> for WorkListFixpointBackward
 where
-    State::NodeId: PartialEq
+    State::NodeId: PartialEq + Debug,
+    State::NodeState: Clone + PartialEq,
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
-        let mut work_list = cfg.all_nodes();
+        let mut work_list = VecDeque::from(cfg.all_nodes());
         let mut num_iters = 0usize;
-        while let Some(v) = work_list.pop() {
+        while let Some(v) = work_list.pop_front() {
             num_iters += 1;
+
+            let prev_state = state.node_state(&v).unwrap().clone();
             let mut changed = cfg.join_succ(&v, state, op);
+
             let (state, ctx) = state.node_state_mut(&v).unwrap();
             changed |= cfg.transfer_fn_backward(&v)
                 .transfer(state, ctx, cfg)?;
 
-            if changed {
+            if changed && state != &prev_state {
                 // add inverse of dependencies to worklist
                 for dep in cfg.uplinks(&v).unwrap() {
                     if !work_list.contains(&dep) {
-                        work_list.push(dep);
+                        work_list.push_back(dep);
                     }
                 }
             }
         }
+
+        #[cfg(debug_assertions)]
         println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }

@@ -206,8 +206,8 @@ impl SealEval<LifetimeSpan, LifetimeAnalysis> for Seal {
                 Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc)))
             },
             Seal::Jump(target) => {
-                // add_block_call(target, input, loc)
-                Ok(false)
+                add_block_call(target, input, loc)
+                // Ok(false)
             },
             Seal::Cond { cond, then_target, else_target } => {
                 Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc))
