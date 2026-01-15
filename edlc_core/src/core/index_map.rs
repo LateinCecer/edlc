@@ -244,6 +244,26 @@ impl<'a, T> IndexMapViewMut<'a, T> {
     pub fn remove(&mut self) {
         self.map.data[self.index] = None;
     }
+
+    pub fn get_or_insert(&mut self, val: T) -> &mut T {
+        while self.map.data.len() <= self.index {
+            self.map.data.push(None);
+        }
+        if self.map.data[self.index].is_none() {
+            self.map.data[self.index] = Some(val);
+        }
+        self.map.data[self.index].as_mut().unwrap()
+    }
+
+    pub fn get_or_insert_with(&mut self, f: impl FnOnce() -> T) -> &mut T {
+        while self.map.data.len() <= self.index {
+            self.map.data.push(None);
+        }
+        if self.map.data[self.index].is_none() {
+            self.map.data[self.index] = Some(f());
+        }
+        self.map.data[self.index].as_mut().unwrap()
+    }
 }
 
 impl<'a, T> Deref for IndexMapViewMut<'a, T> {

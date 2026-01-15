@@ -46,7 +46,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::MirPhase;
-use crate::prelude::mir_expr::lifetime_analysis::RegionLivenessList;
+use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -1723,7 +1723,7 @@ impl MirFlowGraph {
     pub fn lifetimes(
         &self,
         mir_types: &MirTypeRegistry,
-    ) -> Result<RegionLivenessList, <LifetimeSpan as LatticeElement>::Conflict> {
+    ) -> Result<RegionLifenessList, <LifetimeSpan as LatticeElement>::Conflict> {
         let mut state: MirGraphState<LifetimeSpan, LifetimeAnalysis> = MirGraphState::default();
         state.1.insert_references(self, mir_types);
         WorkListFixpointBackward.solve(self, &mut state, LifetimeSpan::upper)?;
@@ -1733,7 +1733,7 @@ impl MirFlowGraph {
             println!("${:x} is alive in {const_state}", node.0);
         }
 
-        let liveness = RegionLivenessList::new(&state.0, self);
+        let liveness = RegionLifenessList::new(&state.0, self);
         Ok(liveness)
     }
 
@@ -1748,7 +1748,7 @@ impl MirFlowGraph {
     /// - values that have life references pointing to them
     ///
     /// To determine this, we need the output of the life-time analysis.
-    pub fn deconstruct(&self, lifetimes: &RegionLivenessList) -> PartialSsaDeconstruction {
+    pub fn deconstruct(&self, lifetimes: &RegionLifenessList) -> PartialSsaDeconstruction {
 
         todo!()
     }

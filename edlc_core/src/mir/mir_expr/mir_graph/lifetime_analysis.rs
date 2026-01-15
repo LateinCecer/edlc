@@ -81,7 +81,7 @@ struct BlockLifenessData {
 }
 
 /// Provides an efficient list with a number of sets that represent the spans of each mir value.
-pub struct RegionLivenessList {
+pub struct RegionLifenessList {
     regions: Vec<CurrentRegion>,
     scopes: Vec<(MirBlockRef, Range<usize>)>,
 }
@@ -95,6 +95,18 @@ struct RegionCorrelationList {
 enum CurrentRegion {
     Static,
     Scoped(Range<usize>)
+}
+
+trait RangeOverlap {
+    /// Check if the two ranges overlap.
+    /// This function returns true exactly when the ranges share at least one value.
+    fn overlaps(&self, other: &Self) -> bool;
+}
+
+impl<I: PartialEq + Eq + Ord + PartialOrd + Copy> RangeOverlap for Range<I> {
+    fn overlaps(&self, other: &Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
 }
 
 impl CurrentRegion {
@@ -126,12 +138,12 @@ impl CurrentRegion {
         (block_lhs, range_lhs): &(MirBlockRef, Range<usize>),
     ) -> bool {
         scopes.iter().any(|(block_rhs, range_rhs)| {
-            block_rhs == block_lhs && (range_lhs.contains(&range_rhs.start) || range_lhs.contains(&(range_rhs.end - 1)))
+            block_rhs == block_lhs && range_rhs.overlaps(range_lhs)
         })
     }
 }
 
-impl RegionLivenessList {
+impl RegionLifenessList {
     pub fn new(nodes: &HashNodeState<MirValue, LifetimeSpan>, cfg: &MirFlowGraph) -> Self {
         let mut regions = Vec::new();
         let mut scopes = Vec::new();
@@ -154,7 +166,7 @@ impl RegionLivenessList {
                 }
             }
         }
-        RegionLivenessList { regions, scopes }
+        RegionLifenessList { regions, scopes }
     }
 
     pub fn overlaps(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
@@ -188,6 +200,7 @@ impl LifetimeAnalysis {
 pub enum LifetimeSpan {
     Static,
     /// A scoped lifetime span explicitly specifies all points at which the lifetime is alive.
+    /// TODO: also record as which value the scoped use is recorded
     Scoped(HashSet<MirLoc>),
 }
 

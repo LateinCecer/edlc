@@ -897,6 +897,10 @@ impl<I: Hash + PartialEq + Clone, E> HashNodeState<I, E> {
     pub fn iter<'a>(&'a self) -> std::collections::hash_map::Iter<'a, I, E> {
         self.map.iter()
     }
+
+    pub fn iter_mut<'a>(&'a mut self) -> std::collections::hash_map::IterMut<'a, I, E> {
+        self.map.iter_mut()
+    }
 }
 
 impl<I: Hash + PartialEq + Clone, E> Default for HashNodeState<I, E> {
