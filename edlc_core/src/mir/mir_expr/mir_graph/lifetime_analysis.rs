@@ -83,7 +83,7 @@ struct BlockLifenessData {
 /// Provides an efficient list with a number of sets that represent the spans of each mir value.
 pub struct RegionLifenessList {
     regions: Vec<CurrentRegion>,
-    scopes: Vec<(MirBlockRef, Range<usize>)>,
+    scopes: Vec<(MirBlockRef, MirValue, Range<usize>)>,
 }
 
 /// Contains the correlations between lifetimes.
@@ -97,7 +97,7 @@ enum CurrentRegion {
     Scoped(Range<usize>)
 }
 
-trait RangeOverlap {
+pub trait RangeOverlap {
     /// Check if the two ranges overlap.
     /// This function returns true exactly when the ranges share at least one value.
     fn overlaps(&self, other: &Self) -> bool;
@@ -110,7 +110,11 @@ impl<I: PartialEq + Eq + Ord + PartialOrd + Copy> RangeOverlap for Range<I> {
 }
 
 impl CurrentRegion {
-    fn overlaps(&self, other: &CurrentRegion, scopes: &Vec<(MirBlockRef, Range<usize>)>) -> bool {
+    fn overlaps(
+        &self,
+        other: &CurrentRegion,
+        scopes: &Vec<(MirBlockRef, MirValue, Range<usize>)>,
+    ) -> bool {
         if matches!(self, Self::Static) || matches!(other, Self::Static) {
             return true;
         }
@@ -118,27 +122,75 @@ impl CurrentRegion {
         let Self::Scoped(b) = other else { unreachable!() };
 
         for lhs in scopes[a.clone()].iter() {
-            if Self::scope_contains(&scopes[b.clone()], lhs) {
+            if Self::scope_contains(&scopes[b.clone()], &(lhs.0, lhs.2.clone())) {
                 return true;
             }
         }
         false
     }
 
-    fn contains(&self, lhs: &(MirBlockRef, Range<usize>), scopes: &Vec<(MirBlockRef, Range<usize>)>) -> bool {
+    fn overlaps_non_equal(
+        &self,
+        other: &CurrentRegion,
+        scopes: &Vec<(MirBlockRef, MirValue, Range<usize>)>,
+    ) -> bool {
+        if matches!(self, Self::Static) || matches!(other, Self::Static) {
+            return true;
+        }
+        let Self::Scoped(a) = self else { unreachable!() };
+        let Self::Scoped(b) = other else { unreachable!() };
+
+        for lhs in scopes[a.clone()].iter() {
+            if Self::scope_contains_non_equal(&scopes[b.clone()], lhs) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn contains(
+        &self,
+        lhs: &(MirBlockRef, Range<usize>),
+        scopes: &Vec<(MirBlockRef, MirValue, Range<usize>)>,
+    ) -> bool {
         let Self::Scoped(a) = self else {
             return true;
         };
         Self::scope_contains(&scopes[a.clone()], lhs)
     }
 
+    fn contains_non_equal(
+        &self,
+        lhs: &(MirBlockRef, MirValue, Range<usize>),
+        scopes: &Vec<(MirBlockRef, MirValue, Range<usize>)>,
+    ) -> bool {
+        let Self::Scoped(a) = self else {
+            return true;
+        };
+        Self::scope_contains_non_equal(&scopes[a.clone()], lhs)
+    }
+
     #[inline(always)]
     fn scope_contains(
-        scopes: &[(MirBlockRef, Range<usize>)],
+        scopes: &[(MirBlockRef, MirValue, Range<usize>)],
         (block_lhs, range_lhs): &(MirBlockRef, Range<usize>),
     ) -> bool {
-        scopes.iter().any(|(block_rhs, range_rhs)| {
+        scopes.iter().any(|(block_rhs, _value_rhs, range_rhs)| {
             block_rhs == block_lhs && range_rhs.overlaps(range_lhs)
+        })
+    }
+
+    /// Checks if the specified value scope is contained in the scopes list, but only for local
+    /// ranges that do not belong to the same [MirValue].
+    /// This is useful for checking if the lifetimes of two values overlap in any places where the
+    /// the local lifetimes are not carried by the same value.
+    #[inline(always)]
+    fn scope_contains_non_equal(
+        scopes: &[(MirBlockRef, MirValue, Range<usize>)],
+        (block_lhs, value_lhs, range_lhs): &(MirBlockRef, MirValue, Range<usize>),
+    ) -> bool {
+        scopes.iter().any(|(block_rhs, value_rhs, range_rhs)| {
+            value_lhs != value_rhs && block_rhs == block_lhs && range_rhs.overlaps(range_lhs)
         })
     }
 }
@@ -158,7 +210,9 @@ impl RegionLifenessList {
                     regions[value.0] = CurrentRegion::Static;
                 },
                 LifetimeSpan::Scoped(set) => {
-                    let mut new_scopes = cfg.locations_to_ranges(set.iter());
+                    let mut new_scopes = cfg.locations_to_ranges(set
+                        .iter()
+                        .map(|x| (x.loc.clone(), x.value)));
                     let start = scopes.len();
                     let end = start + new_scopes.len();
                     scopes.append(&mut new_scopes);
@@ -171,6 +225,10 @@ impl RegionLifenessList {
 
     pub fn overlaps(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
         self.regions[lhs.0].overlaps(&self.regions[rhs.0], &self.scopes)
+    }
+
+    pub fn overlaps_non_equal(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
+        self.regions[lhs.0].overlaps_non_equal(&self.regions[rhs.0], &self.scopes)
     }
 
     pub fn is_alive_at(&self, value: &MirValue, loc: &MirLoc, cfg: &MirFlowGraph) -> bool {
@@ -196,12 +254,17 @@ impl LifetimeAnalysis {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ValueUse {
+    value: MirValue,
+    loc: MirLoc,
+}
+
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub enum LifetimeSpan {
     Static,
     /// A scoped lifetime span explicitly specifies all points at which the lifetime is alive.
-    /// TODO: also record as which value the scoped use is recorded
-    Scoped(HashSet<MirLoc>),
+    Scoped(HashSet<ValueUse>),
 }
 
 impl Default for LifetimeSpan {
@@ -228,17 +291,16 @@ impl Display for RegionError {
 impl Error for RegionError {}
 
 impl LifetimeSpan {
-    fn add_use(&mut self, el: MirLoc) -> bool {
+    fn add_value(&mut self, u: ValueUse) -> bool {
         if let Self::Scoped(set) = self {
-            if !set.contains(&el) {
-                set.insert(el);
-                true
-            } else {
-                false
-            }
+            set.insert(u)
         } else {
             false
         }
+    }
+
+    fn add_use(&mut self, el: MirLoc, val: MirValue) -> bool {
+        self.add_value(ValueUse { value: val, loc: el })
     }
 }
 
@@ -280,30 +342,30 @@ impl SealEval<LifetimeSpan, LifetimeAnalysis> for Seal {
             loc: &MirBlockRef,
         ) -> Result<bool, RegionError> {
             Ok(call.params.iter().map(|param| {
-                input.element_value_mut(param).add_use(MirLoc::Seal(*loc))
+                input.element_value_mut(param).add_use(MirLoc::Seal(*loc), *param)
             }).reduce(bool::bitor).unwrap_or(false))
         }
 
         match self {
             Self::None => panic!(),
             Seal::Return(value) => {
-                Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc)))
+                Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc), *value))
             },
             Seal::Panic(value) => {
-                Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc)))
+                Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc), *value))
             },
             Seal::Jump(target) => {
                 add_block_call(target, input, loc)
             },
             Seal::Cond { cond, then_target, else_target } => {
-                Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc))
+                Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc), *cond)
                     | add_block_call(then_target, input, loc)? | add_block_call(else_target, input, loc)?)
             },
             Seal::Switch { cond, targets, default } => {
-                let mut changed = input.element_value_mut(cond).add_use(MirLoc::Seal(*loc));
+                let mut changed = input.element_value_mut(cond).add_use(MirLoc::Seal(*loc), *cond);
                 changed |= add_block_call(default, input, loc)?;
                 for target in targets.iter() {
-                    changed |= input.element_value_mut(&target.match_value).add_use(MirLoc::Seal(*loc));
+                    changed |= input.element_value_mut(&target.match_value).add_use(MirLoc::Seal(*loc), target.match_value);
                     changed |= add_block_call(&target.block_call, input, loc)?;
                 }
                 Ok(changed)
@@ -324,10 +386,10 @@ impl TransferCopy<LifetimeAnalysis> for LifetimeSpan {
             // if the target is a reference, then the source must outlive the target
             let target_value = input.element_value(target);
             let mut src_value = input.element_value(value);
-            src_value.add_use(MirLoc::GraphLoc(*loc));
+            src_value.add_use(MirLoc::GraphLoc(*loc), *value);
             Ok(input.replace(value, src_value.union(&target_value)?))
         } else {
-            Ok(input.element_value_mut(value).add_use(MirLoc::GraphLoc(*loc)))
+            Ok(input.element_value_mut(value).add_use(MirLoc::GraphLoc(*loc), *value))
         }
     }
 }
@@ -342,7 +404,7 @@ impl TransferMove<LifetimeAnalysis> for LifetimeSpan {
     ) -> Result<bool, Self::Conflict> {
         let target_value = input.element_value(target);
         let mut src_value = input.element_value(value);
-        src_value.add_use(MirLoc::GraphLoc(*loc));
+        src_value.add_use(MirLoc::GraphLoc(*loc), *value);
         Ok(input.replace(value, src_value.union(&target_value)?))
     }
 }
@@ -416,13 +478,13 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirArrayInit {
                     .iter()
                     .map(|el| input
                         .element_value_mut(el)
-                        .add_use(MirLoc::GraphLoc(*loc))
+                        .add_use(MirLoc::GraphLoc(*loc), *el)
                     )
                     .reduce(bool::bitor)
                     .unwrap_or(false))
             }
             MirArrayInitVariant::Copy { val, len: _ } => {
-                Ok(input.element_value_mut(val).add_use(MirLoc::GraphLoc(*loc)))
+                Ok(input.element_value_mut(val).add_use(MirLoc::GraphLoc(*loc), *val))
             }
         }
     }
@@ -438,7 +500,7 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirAs {
     ) -> Result<bool, RegionError> {
         Ok(input
             .element_value_mut(&self.val)
-            .add_use(MirLoc::GraphLoc(*loc))
+            .add_use(MirLoc::GraphLoc(*loc), self.val)
         )
     }
 }
@@ -451,8 +513,8 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirAssign {
         loc: &MirGraphLoc,
         _target: &MirValue,
     ) -> Result<bool, RegionError> {
-        Ok(input.element_value_mut(&self.rhs).add_use(MirLoc::GraphLoc(*loc))
-            | input.element_value_mut(&self.lhs).add_use(MirLoc::GraphLoc(*loc)))
+        Ok(input.element_value_mut(&self.rhs).add_use(MirLoc::GraphLoc(*loc), self.rhs)
+            | input.element_value_mut(&self.lhs).add_use(MirLoc::GraphLoc(*loc), self.lhs))
     }
 }
 
@@ -468,7 +530,7 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirCall {
             .iter()
             .map(|param| input
                 .element_value_mut(param)
-                .add_use(MirLoc::GraphLoc(*loc))
+                .add_use(MirLoc::GraphLoc(*loc), *param)
             )
             .reduce(bool::bitor)
             .unwrap_or(false)
@@ -476,7 +538,7 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirCall {
             .iter()
             .map(|param| input
                 .element_value_mut(&param.value_expr)
-                .add_use(MirLoc::GraphLoc(*loc))
+                .add_use(MirLoc::GraphLoc(*loc), param.value_expr)
             )
             .reduce(bool::bitor)
             .unwrap_or(false);
@@ -550,7 +612,9 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirRef {
         loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, RegionError> {
-        let mut changed = input.element_value_mut(&self.value).add_use(MirLoc::GraphLoc(*loc));
+        let mut changed = input
+            .element_value_mut(&self.value)
+            .add_use(MirLoc::GraphLoc(*loc), self.value);
         let target_region = input.element_value(&target);
         let value_region = input.element_value(&self.value);
         changed |= input.replace(&self.value, value_region.union(&target_region)?);
@@ -566,7 +630,9 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirDeref {
         loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, RegionError> {
-        let mut changed = input.element_value_mut(&self.value).add_use(MirLoc::GraphLoc(*loc));
+        let mut changed = input
+            .element_value_mut(&self.value)
+            .add_use(MirLoc::GraphLoc(*loc), self.value);
         if ctx.is_reference(target) {
             // if the target value is a reference, then the source must outlive the target
             let target_region = input.element_value(&target);

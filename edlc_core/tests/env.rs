@@ -135,7 +135,9 @@ impl TestCompiler {
         writer.print(&graph_writer.graph)?;
 
         graph_writer.graph.constant_analysis()?;
-        graph_writer.graph.lifetimes(&self.compiler.mir_phase.types)?;
+        let lifeness = graph_writer.graph.lifetimes(&graph_writer.mir_phase.types)?;
+        let deconstruction = graph_writer.graph.deconstruct(&lifeness)?;
+        deconstruction.print_mapping(graph_writer.graph);
         Ok(())
     }
 }

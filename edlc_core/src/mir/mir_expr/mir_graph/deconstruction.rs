@@ -6,7 +6,7 @@ use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue};
-use crate::mir::mir_expr::lifetime_analysis::RegionLifenessList;
+use crate::mir::mir_expr::lifetime_analysis::{RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
@@ -25,12 +25,53 @@ pub struct PartialSsaDeconstruction {
     /// For this, we use a simple lookup table that is always kept up to date when a value changes.
     transition_mapping: IndexMap<DataSource>,
     /// Contains the ranges of values that a data sources stretches.
-    ranges: IndexMap<HashSet<MirValue>>
+    ranges: IndexMap<HashSet<MirValue>>,
+    /// Mapping from [MirValue]s to [DataSource]s.
+    mapping: IndexMap<DataSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Region {
+    value: MirValue,
+    block_ref: MirBlockRef,
+    range: std::ops::Range<usize>,
+}
+
+impl Region {
+    /// Finds a region base on a local MIR value.
+    /// The region is extracted directly from the definition in the CFG.
+    fn new(
+        value: MirValue,
+        cfg: &MirFlowGraph,
+    ) -> Option<Self> {
+        let (block_ref, range) = cfg.find_local_lifetime(&value)?;
+        Some(Region {
+            value,
+            range,
+            block_ref,
+        })
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        self.block_ref == other.block_ref && self.range.overlaps(&other.range)
+    }
+}
+
+impl Default for PartialSsaDeconstruction {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PartialSsaDeconstruction {
     fn new() -> Self {
-        Self { source_count: 0, sources: HashMap::new(), transition_mapping: IndexMap::default(), ranges: IndexMap::default() }
+        Self {
+            source_count: 0,
+            sources: HashMap::new(),
+            transition_mapping: IndexMap::default(),
+            ranges: IndexMap::default(),
+            mapping: IndexMap::default(),
+        }
     }
 
     fn new_source(&mut self) -> DataSource {
@@ -44,6 +85,7 @@ impl PartialSsaDeconstruction {
             self.source_count += 1;
             DataSource(id)
         })
+        // self.new_source()
     }
 
     fn replace_item(
@@ -69,12 +111,19 @@ impl PartialSsaDeconstruction {
             .get(old.0)
             .map(|set| set.clone())
             .unwrap_or_else(HashSet::new);
-        self.ranges.view_mut(new.0).get_or_insert_with(HashSet::new).extend(old_ranges);
+        self.ranges
+            .view_mut(new.0)
+            .get_or_insert_with(HashSet::new)
+            .extend(old_ranges);
         // insert transition mapping
         self.transition_mapping
             .iter_mut()
             .for_each(|(_, src)| if src == &old { *src = new; });
         self.transition_mapping[old.0] = new;
+        // update mapping
+        self.mapping
+            .iter_mut()
+            .for_each(|(_, src)| if src == &old { *src = new; });
     }
 
     /// Checks if the lifetime of the specified data source collides with the lifetime of `value`.
@@ -84,17 +133,54 @@ impl PartialSsaDeconstruction {
         value: &MirValue,
         lifeness: &RegionLifenessList,
     ) -> bool {
-        self.ranges[data_source.0].iter().any(|r| {
-            lifeness.overlaps(r, value)
+        let Some(range) = self.ranges.get(data_source.0) else {
+            return false;
+        };
+        range.iter().any(|r| {
+            lifeness.overlaps_non_equal(r, value)
         })
     }
 
-    pub fn do_sources_overlap(&self, a: &DataSource, b: &DataSource, lifetimes: &RegionLifenessList) -> bool {
+    /// Checks if the lifetimes for the two specified data sources overlap.
+    fn do_sources_overlap(&self, a: &DataSource, b: &DataSource, lifeness: &RegionLifenessList) -> bool {
         let a = &self.transition_mapping[a.0];
         let b = &self.transition_mapping[b.0];
 
+        // get ranges
+        let Some(a_ranges) = self.ranges.get(a.0) else {
+            return false;
+        };
+        let Some(b_ranges) = self.ranges.get(b.0) else {
+            return false;
+        };
 
-        todo!()
+        a_ranges
+            .iter()
+            .any(|lhs| b_ranges
+                .iter()
+                .any(|rhs| lifeness.overlaps_non_equal(lhs, rhs)))
+    }
+
+    /// Checks if the lifetimes overlap at all.
+    /// This ignores if the base value is temporarily stored in the same [MirValue].
+    /// It basically checks if the lifetimes of the [DataSource]s are *not fully disjoint*.
+    fn do_source_overlap_total(&self, a: &DataSource, b: &DataSource, lifeness: &RegionLifenessList) -> bool {
+        let a = &self.transition_mapping[a.0];
+        let b = &self.transition_mapping[b.0];
+
+        // get ranges
+        let Some(a_ranges) = self.ranges.get(a.0) else {
+            return false;
+        };
+        let Some(b_ranges) = self.ranges.get(b.0) else {
+            return false;
+        };
+
+        a_ranges
+            .iter()
+            .any(|lhs| b_ranges
+                .iter()
+                .any(|rhs| lifeness.overlaps(lhs, rhs)))
     }
 
     /// Merges the data sources in the iterator into a single data source.
@@ -123,11 +209,11 @@ impl PartialSsaDeconstruction {
         els[0]
     }
 
-    fn consolidate(
+    pub fn consolidate(
         &mut self,
         state: &mut HashNodeState<MirValue, DataOrigin>,
         lifeness: &RegionLifenessList,
-    ) -> Deconstruction {
+    ) {
         let mut worklist = state
             .iter()
             .map(|(key, _)| *key).collect::<VecDeque<_>>();
@@ -136,35 +222,67 @@ impl PartialSsaDeconstruction {
             self.transition_mapping.view_mut(source_index).set(DataSource(source_index));
         }
 
-        let mut deconstruction = Deconstruction {
-            values: IndexMap::default(),
-        };
         while let Some(loc) = worklist.pop_front() {
             match state.element_value(&loc) {
                 DataOrigin::Unknown => panic!("invalid state"),
                 DataOrigin::Sources(sources) => {
                     let source = self.try_merge(loc, sources.iter().copied(), lifeness);
-                    deconstruction.values.view_mut(loc.0).set(source);
+                    self.mapping.view_mut(loc.0).set(source);
                 }
             }
         }
         // update deconstruction mapping in case old sources were merged
-        deconstruction
-            .values
+        self
+            .mapping
             .iter_mut()
             .for_each(|(_, src)| *src = self.transition_mapping[src.0]);
-        deconstruction
     }
-}
 
-pub struct Deconstruction {
-    values: IndexMap<DataSource>,
-}
+    pub fn reduce_further(&mut self, lifeness: &RegionLifenessList, cfg: &MirFlowGraph) {
+        let mut mapping = HashMap::new();
+        self.mapping.iter().for_each(|(idx, src)| {
+            let value = MirValue(idx);
+            let ty = cfg.get_var_type(&value);
+            mapping.entry(*ty).or_insert_with(HashSet::new).insert(*src);
+        });
 
-impl Deconstruction {
-    /// Returns a source for
+        println!("mapping: {:?}", mapping);
+
+
+        for (_ty, values) in mapping.into_iter() {
+            let mut worklist = VecDeque::from_iter(values.iter().copied());
+            while let Some(source) = worklist.pop_front() {
+                // try to find any other source that does not overlap this source in its lifetime
+                for (other_index, other) in worklist.iter().enumerate() {
+                    println!("checking overlap of {:?} and {:?}", source, other);
+                    if !self.do_source_overlap_total(&source, other, lifeness) {
+                        println!("     no overlap found!");
+                        // merge items
+                        let other = worklist.remove(other_index).unwrap();
+                        self.transition_value(other, source);
+                        worklist.push_back(source);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns a data source for the specified [MirValue].
+    /// This function should only be called **after** the deconstruction has been completed, i.e.,
+    /// after [PartialSsaDeconstruction::consolidate] and optionally
+    /// [PartialSsaDeconstruction::reduce_further] has been called.
     pub fn source(&self, value: &MirValue) -> &DataSource {
-        self.values.get(value.0).expect("no data source available for this value!")
+        self.mapping.get(value.0).expect("no data source available for this value!")
+    }
+
+    pub fn print_mapping(&self, cfg: &MirFlowGraph) {
+        println!("mapping:");
+        for (value, source) in self.mapping.iter() {
+            let value = MirValue(value);
+            println!("  ${:x} => {source}  :  {:?}", value.0, cfg.get_var_type(&value));
+        }
+        println!("----\n");
     }
 }
 
@@ -178,8 +296,8 @@ impl Display for DataSource {
 }
 
 /// Maps where data originates from.
-#[derive(Default, PartialEq, Eq, Clone)]
-enum DataOrigin {
+#[derive(Default, PartialEq, Eq, Clone, Debug)]
+pub enum DataOrigin {
     Sources(HashSet<DataSource>),
     #[default]
     Unknown,
@@ -201,7 +319,7 @@ impl IsDefault for DataOrigin {
 }
 
 #[derive(Debug, Default, Clone)]
-struct DeconstructionConflict;
+pub struct DeconstructionConflict;
 
 impl Display for DeconstructionConflict {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

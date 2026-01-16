@@ -1193,7 +1193,7 @@ pub struct WorkListFixpointForward;
 impl<Cfg: CfgLattice<V, State>, V: LatticeElement, State: CfgGraphStateMut<V>> LogicSolver<Cfg, V, State> for WorkListFixpointForward
 where
     State::NodeId: PartialEq + Debug,
-    State::NodeState: Clone + PartialEq,
+    State::NodeState: Clone + PartialEq + Debug,
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
@@ -1207,7 +1207,7 @@ where
             let (state, ctx) = state.node_state_mut(&v).unwrap();
             changed |= cfg.transfer_fn_forward(&v)
                 .transfer(state, ctx, cfg)?;
-            // println!("[FIXP]>   <{v:?}> in state {:?}", state.node_state(&v).unwrap());
+            // println!("[FIXP]>   <{v:?}> in state {:?}", state);
 
             if changed && state != &prev_state {
                 // add inverse of dependencies to worklist

@@ -41,7 +41,7 @@ use crate::prelude::ModuleSrc;
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
-use crate::mir::mir_expr::mir_graph::deconstruction::PartialSsaDeconstruction;
+use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, DataSource, PartialSsaDeconstruction};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
@@ -496,14 +496,66 @@ struct Block {
 }
 
 impl Block {
+    /// Checks if this block contains the specified variable.
+    /// If we are using propper SSA values, this should be true for *at most* one block in the CFG
+    /// for any one value.
+    fn contains_var(&self, value: &MirValue) -> bool {
+        self.parameters.contains(value) || self.statements.iter().any(|s| s.defines_var(value))
+    }
+
+    /// Finds the current scope of the value in the block.
+    /// Since the scope is local to this block, we don't need to consider the lifetime of the value
+    /// outside of this block.
+    fn find_local_scope(
+        &self,
+        block_id: &MirBlockRef,
+        value: &MirValue,
+        expr_container: &MirExprContainer,
+    ) -> Option<Range<usize>> {
+        let definition = self.find_var_definition(block_id, value)?;
+        let def_index = match definition {
+            DefPoint::Definition(def) => {
+                self.find_current_index(&def.1).unwrap()
+            },
+            DefPoint::BlockParameter(..) => {
+                0
+            }
+        };
+
+        let last_use = self.find_furthest_use(*block_id, expr_container, 0, value);
+        let last_index = if let Some(last_use) = last_use {
+            match last_use {
+                VarUse::Statement(_, _, uid) => {
+                    self.find_current_index(&uid).unwrap()
+                },
+                VarUse::Seal(..) => {
+                    self.statements.len()
+                },
+            }
+        } else {
+            def_index
+        };
+
+        Some(def_index..last_index)
+    }
+
     /// Converts an iterator of locations in the block into a range of indices were an index
     /// corresponds to the current index of the graph id in the block state.
     fn locations_to_range<I: Iterator<Item=Item>, Item: Deref<Target=MirLoc> + Clone>(
         &self,
         id: &MirBlockRef,
+        value: &MirValue,
         iter: I,
     ) -> Option<Range<usize>> {
-        let mut current: Option<Range<usize>> = None;
+        // find definition point for the variable
+        let definition = self.find_var_definition(id, value)?;
+        let def_index = match definition {
+            DefPoint::BlockParameter(_, _) => 0,
+            DefPoint::Definition(def) => self.find_current_index(&def.1).unwrap(),
+        };
+
+        // find usages
+        let mut current: Range<usize> = def_index..def_index;
         for item in iter {
             let index = match *item.clone() {
                 MirLoc::GraphLoc(MirGraphLoc(block, uid)) => {
@@ -516,14 +568,29 @@ impl Block {
                 }
             };
 
-            if let Some(current) = current.as_mut() {
-                current.start = usize::min(current.start, index);
-                current.end = usize::max(current.end, index + 1);
-            } else {
-                current = Some(index..(index + 1));
-            }
+            current.start = usize::min(current.start, index);
+            current.end = usize::max(current.end, index + 1);
         }
-        current
+        Some(current)
+    }
+
+    fn find_var_definition(&self, block_id: &MirBlockRef, var: &MirValue) -> Option<DefPoint> {
+        // look in parameters first
+        if let Some(def) = self.parameters
+            .iter()
+            .enumerate()
+            .find(|(_, param_var)| *param_var == var)
+            .map(|(idx, _)| DefPoint::BlockParameter(*block_id, BlockParameterIndex(idx))) {
+            return Some(def);
+        }
+        // look in statements
+        self.statements
+            .iter()
+            .find_map(|item| if item.defines_var(var) {
+                Some(DefPoint::Definition(MirGraphLoc::new(*block_id, *item.uid())))
+            } else {
+                None
+            })
     }
 
     /// Finds and returns the closest definition point for a variable use point.
@@ -1679,23 +1746,51 @@ impl MirFlowGraph {
         }
     }
 
-    pub fn locations_to_ranges<I: Iterator<Item=Item>, Item: Deref<Target=MirLoc>>(
+    pub fn locations_to_ranges<I: Iterator<Item=(MirLoc, MirValue)>>(
         &self,
         iter: I,
-    ) -> Vec<(MirBlockRef, Range<usize>)> {
+    ) -> Vec<(MirBlockRef, MirValue, Range<usize>)> {
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        struct Index {
+            block: MirBlockRef,
+            value: MirValue,
+        }
+
         let mut ranges = HashMap::new();
         for item in iter {
-            let block_ref = *item.block_ref();
-            ranges.entry(block_ref).or_insert_with(Vec::new).push(item.clone())
+            let block_ref = Index {
+                block: *item.0.block_ref(),
+                value: item.1,
+            };
+            ranges.entry(block_ref).or_insert_with(Vec::new).push(item.0.clone())
         }
         ranges
             .into_iter()
             .map(|(block, locs)| {
-                self.blocks[block.0].locations_to_range(&block, locs.iter())
-                    .map(|(range)| (block, range))
+                self.blocks[block.block.0].locations_to_range(&block.block, &block.value, locs.iter())
+                    .map(|(range)| (block.block, block.value, range))
             })
             .flatten()
             .collect()
+    }
+
+    /// Finds the block that contains the specified value.
+    pub fn find_block(&self, value: &MirValue) -> Option<MirBlockRef> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .find_map(|(idx, block)| if block.contains_var(value) {
+                Some(MirBlockRef(idx))
+            } else {
+                None
+            })
+    }
+
+    /// Finds the block local lifetime for the specified value.
+    pub fn find_local_lifetime(&self, value: &MirValue) -> Option<(MirBlockRef, Range<usize>)> {
+        let block = self.find_block(value)?;
+        self.blocks[block.0].find_local_scope(&block, value, &self.expressions)
+            .map(|range| (block, range))
     }
 
     /// Performs constant analysis on the MIR data flow graph to figure out which MIR values can
@@ -1748,9 +1843,22 @@ impl MirFlowGraph {
     /// - values that have life references pointing to them
     ///
     /// To determine this, we need the output of the life-time analysis.
-    pub fn deconstruct(&self, lifetimes: &RegionLifenessList) -> PartialSsaDeconstruction {
+    pub fn deconstruct(
+        &self,
+        lifeness: &RegionLifenessList,
+    ) -> Result<PartialSsaDeconstruction, <DataOrigin as LatticeElement>::Conflict> {
+        let mut state: MirGraphState<DataOrigin, PartialSsaDeconstruction> = MirGraphState::default();
+        WorkListFixpointForward.solve(self, &mut state, DataOrigin::upper)?;
 
-        todo!()
+        println!("result of joined data origin resolution:");
+        for (node, state) in state.0.iter() {
+            println!("${:x} is saved in {state}", node.0);
+        }
+
+        println!("trying to consolidate data sources...");
+        state.1.consolidate(&mut state.0, lifeness);
+        state.1.reduce_further(lifeness, self);
+        Ok(state.1)
     }
 }
 
@@ -1941,7 +2049,10 @@ impl MirFlowGraph {
             Seal::Jump(call) => {
                 assert_eq!(&call.target, id);
                 assert_eq!(params.len(), call.params.len());
-                for (dst, src) in params.iter_mut().zip(call.params.iter()) {
+                for (dst, src) in params
+                    .iter_mut()
+                    .zip(call.params.iter()) {
+
                     dst.push(*src);
                 }
             }
@@ -1972,11 +2083,13 @@ impl MirFlowGraph {
                     assert_eq!(params.len(), target.block_call.params.len());
                     params.iter_mut().zip(target.block_call.params.iter())
                         .for_each(|(dst, src)| dst.push(*src));
+                    i += 1;
                 }
                 if &default.target == id {
                     assert_eq!(params.len(), default.params.len());
                     params.iter_mut().zip(default.params.iter())
                         .for_each(|(dst, src)| dst.push(*src));
+                    i += 1;
                 }
                 assert!(i > 0);
             }
