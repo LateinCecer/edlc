@@ -276,6 +276,23 @@ impl PartialSsaDeconstruction {
         self.mapping.get(value.0).expect("no data source available for this value!")
     }
 
+    pub fn print_ranges(&self) {
+        println!("source ranges:");
+        for (source, range) in self.ranges.iter() {
+            print!("source{source} [");
+            let mut first = true;
+            for r in range.iter() {
+                if first {
+                    first = false;
+                } else {
+                    print!(", ");
+                }
+                print!("${:x}", r.0);
+            }
+            println!("]");
+        }
+    }
+
     pub fn print_mapping(&self, cfg: &MirFlowGraph) {
         println!("mapping:");
         for (value, source) in self.mapping.iter() {

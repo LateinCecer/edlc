@@ -202,7 +202,7 @@ impl RegionLifenessList {
 
         for (value, span) in nodes.iter() {
             while regions.len() <= value.0 {
-                regions.push(CurrentRegion::Static);
+                regions.push(CurrentRegion::Scoped(0..0));
             }
 
             match span {
