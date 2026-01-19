@@ -115,6 +115,10 @@ impl PartialSsaDeconstruction {
             .view_mut(new.0)
             .get_or_insert_with(HashSet::new)
             .extend(old_ranges);
+        // remove ranges in old mapping
+        if let Some(ranges) = self.ranges.get_mut(old.0) {
+            ranges.clear();
+        }
         // insert transition mapping
         self.transition_mapping
             .iter_mut()
@@ -246,17 +250,14 @@ impl PartialSsaDeconstruction {
             mapping.entry(*ty).or_insert_with(HashSet::new).insert(*src);
         });
 
-        println!("mapping: {:?}", mapping);
-
-
         for (_ty, values) in mapping.into_iter() {
             let mut worklist = VecDeque::from_iter(values.iter().copied());
             while let Some(source) = worklist.pop_front() {
                 // try to find any other source that does not overlap this source in its lifetime
                 for (other_index, other) in worklist.iter().enumerate() {
-                    println!("checking overlap of {:?} and {:?}", source, other);
+                    // println!("checking overlap of {:?} and {:?}", source, other);
                     if !self.do_source_overlap_total(&source, other, lifeness) {
-                        println!("     no overlap found!");
+                        // println!("     no overlap found!");
                         // merge items
                         let other = worklist.remove(other_index).unwrap();
                         self.transition_value(other, source);
@@ -297,7 +298,7 @@ impl PartialSsaDeconstruction {
         println!("mapping:");
         for (value, source) in self.mapping.iter() {
             let value = MirValue(value);
-            println!("  ${:x} => {source}  :  {:?}", value.0, cfg.get_var_type(&value));
+            println!("  ${:x} => {source}  :  <type {:x}>", value.0, cfg.get_var_type(&value).0);
         }
         println!("----\n");
     }
