@@ -17,9 +17,10 @@
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 
@@ -32,6 +33,44 @@ pub struct MirArrayInit {
     pub ty: MirTypeId,
     pub element_ty: MirTypeId,
     pub elements: MirArrayInitVariant,
+}
+
+impl MirArrayInit {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        let alignment = reg.byte_alignment(self.ty).unwrap();
+        let MirTypeLayout::Array(layout) = reg.get_layout(self.ty).unwrap() else {
+            return;
+        };
+
+        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
+        assert_eq!(target_ty, &self.ty);
+
+        // write element values into offset of the base array
+        match &self.elements {
+            MirArrayInitVariant::List(els) => {
+                for (index, value) in els.iter().enumerate() {
+                    let offset = layout.element_offset(alignment, index) + target_range.start;
+                    let element_range = offset..(offset + layout.element_size);
+                    let src = stack_frame.get_offset(value).unwrap();
+                    vm.memcpy(&(element_range, src.1), src);
+                }
+            }
+            MirArrayInitVariant::Copy { val, len } => {
+                let src = stack_frame.get_offset(val).unwrap();
+                for index in 0..reg.get_const_value(len).unwrap().into_usize().unwrap() {
+                    let offset = layout.element_offset(alignment, index) + target_range.start;
+                    let element_range = offset..(offset + layout.element_size);
+                    vm.memcpy(&(element_range, src.1), src);
+                }
+            }
+        }
+    }
 }
 
 impl MirGraphElement for MirArrayInit {

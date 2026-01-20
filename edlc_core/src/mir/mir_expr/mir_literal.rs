@@ -15,9 +15,10 @@
  */
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 
@@ -29,6 +30,18 @@ pub struct MirLiteral {
     pub id: MirUid,
     pub ty: MirTypeId,
     pub value: MirLiteralValue,
+}
+
+impl MirLiteral {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
 }
 
 impl MirGraphElement for MirLiteral {

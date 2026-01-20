@@ -25,9 +25,9 @@ use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
 use std::collections::{HashMap, HashSet};
+use std::env::current_exe;
 use std::fmt::{Debug, Display};
-use std::ops::{BitAnd, BitOr, Deref, Range};
-use crate::hir::HirPhase;
+use std::ops::{Deref, Range};
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
@@ -37,16 +37,17 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
-use crate::prelude::ModuleSrc;
+use crate::prelude::{ExecutorVM, ModuleSrc};
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
-use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, DataSource, PartialSsaDeconstruction};
+use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, PartialSsaDeconstruction};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::MirPhase;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
+
+pub(crate) use crate::mir::mir_expr::mir_graph::deconstruction::StackFrameLayout;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -355,6 +356,26 @@ impl Statement {
             Self::VarDef { var, .. }
             | Self::VarMove { var, .. }
             | Self::VarCopy { var, .. } => Some(var),
+        }
+    }
+
+    fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        expr: &MirExprContainer,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) {
+        match self {
+            Self::VarMove { var, value, uid: _ }
+                | Self::VarCopy { var, value, uid: _ } => {
+                let dst = stack_frame.get_offset(var).unwrap();
+                let src = stack_frame.get_offset(value).unwrap();
+                vm.memcpy(dst, src);
+            }
+            Self::VarDef { var, value, uid: _ } => {
+                expr.execute(vm,  stack_frame, *value, var, reg);
+            }
         }
     }
 }
@@ -1005,6 +1026,18 @@ impl Block {
             Seal::None => panic!("block is not sealed!"),
         }
     }
+
+    fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        expr: &MirExprContainer,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) {
+        for statement in self.statements.iter() {
+            statement.execute(vm, expr, stack_frame, reg);
+        }
+    }
 }
 
 pub struct BlockBuilder<'graph> {
@@ -1087,6 +1120,80 @@ impl MirFlowGraph {
             ctx,
         });
         out
+    }
+
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) {
+        let mut current_block = self.root();
+        'outer: loop {
+            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg);
+            // jump to other block using sealing statement
+            match &self.blocks[current_block.0].seal {
+                Seal::Return(value) => {
+                    println!("returning from execution");
+                    break;
+                }
+                Seal::Panic(value) => {
+                    println!("panic in execution");
+                    break;
+                }
+                Seal::Jump(target) => {
+                    vm.memcpy_slice(
+                        self.blocks[target.target.0].parameters.as_slice(),
+                        target.params.as_slice(),
+                        stack_frame,
+                    );
+                    current_block = target.target;
+                }
+                Seal::Cond { cond, then_target, else_target } => {
+                    let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
+                    if cond_value {
+                        vm.memcpy_slice(
+                            self.blocks[then_target.target.0].parameters.as_slice(),
+                            then_target.params.as_slice(),
+                            stack_frame,
+                        );
+                        current_block = then_target.target;
+                    } else {
+                        vm.memcpy_slice(
+                            self.blocks[else_target.target.0].parameters.as_slice(),
+                            else_target.params.as_slice(),
+                            stack_frame,
+                        );
+                        current_block = else_target.target;
+                    }
+                }
+                Seal::Switch { cond, targets, default } => {
+                    let (cond_range, cond_ty) = stack_frame.get_offset(cond).unwrap();
+                    let cond_data = vm.get_data(cond_range.clone(), *cond_ty);
+
+                    for target in targets.iter() {
+                        let (target_range, target_ty) = stack_frame.get_offset(&target.match_value).unwrap();
+                        if vm.get_data(target_range.clone(), *target_ty) == cond_data {
+                            vm.memcpy_slice(
+                                self.blocks[target.block_call.target.0].parameters.as_slice(),
+                                target.block_call.params.as_slice(),
+                                stack_frame,
+                            );
+                            current_block = target.block_call.target;
+                            continue 'outer; // continue execution in the new block
+                        }
+                    }
+
+                    vm.memcpy_slice(
+                        self.blocks[default.target.0].parameters.as_slice(),
+                        default.params.as_slice(),
+                        stack_frame,
+                    );
+                    current_block = default.target;
+                }
+                Seal::None => panic!("block is not sealed!"),
+            }
+        }
     }
 
     pub fn is_block_sealed(&self, block: &MirBlockRef) -> bool {

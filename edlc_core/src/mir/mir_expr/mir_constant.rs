@@ -17,9 +17,10 @@
 use crate::core::edl_value::EdlLiteralValue;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirUid};
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +31,18 @@ pub struct MirConstant {
     pub id: MirUid,
     pub value: EdlLiteralValue,
     pub ty: MirTypeId,
+}
+
+impl MirConstant {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
 }
 
 impl MirGraphElement for MirConstant {

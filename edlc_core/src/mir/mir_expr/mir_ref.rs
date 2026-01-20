@@ -2,8 +2,9 @@
 
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue};
+use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
+use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, PartialEq)]
 /// Creates a reference from a value type.
@@ -433,6 +434,16 @@ impl MirRef {
     pub fn is_reference_from_owner(&self, reg: &MirTypeRegistry) -> bool {
         reg.is_ref(&self.src_ty) || reg.is_mut_ref(&self.src_ty)
     }
+
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +519,16 @@ impl MirDeref {
             value,
         }
     }
+
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -548,5 +569,15 @@ impl MirDowncastRef {
             ty: target_ty,
             value,
         }
+    }
+
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
     }
 }

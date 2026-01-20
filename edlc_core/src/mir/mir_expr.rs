@@ -45,6 +45,7 @@ mod mir_ref;
 
 pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
 pub use mir_graph::*;
+use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct MirExprUid(usize);
@@ -116,6 +117,32 @@ pub trait MirGraphElement {
 }
 
 impl MirExprContainer {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        expr: MirExprId,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::As => self.ases[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Literal => self.literals[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Variable => self.variables[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Constant => self.constants[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Assign => self.assigns[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Let => { todo!() }
+            MirExprVariant::Data => self.data[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Offset => { todo!() }
+            MirExprVariant::Init => self.type_inits[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Ref => self.refs[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Deref => self.derefs[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].execute(vm, stack_frame, target, reg),
+        }
+    }
+
     /// Collects all values that are used by the expression.
     pub fn collect_vars(&self, expr: MirExprId) -> Vec<MirValue> {
         match &expr.ty {

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::ops;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
@@ -16,6 +17,7 @@ use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 
 pub struct PartialSsaDeconstruction {
     source_count: usize,
@@ -301,6 +303,71 @@ impl PartialSsaDeconstruction {
             println!("  ${:x} => {source}  :  <type {:x}>", value.0, cfg.get_var_type(&value).0);
         }
         println!("----\n");
+    }
+}
+
+pub struct StackFrameLayout {
+    alignment: usize,
+    size: usize,
+    members: IndexMap<(ops::Range<usize>, MirTypeId)>,
+    frame_offset: usize,
+}
+
+pub struct StackFrameOptions {
+    pub store_plane: bool,
+    pub alignment: usize,
+    pub frame_offset: usize,
+}
+
+impl Default for StackFrameOptions {
+    fn default() -> Self {
+        StackFrameOptions {
+            store_plane: false,
+            alignment: 16,
+            frame_offset: 0,
+        }
+    }
+}
+
+impl StackFrameLayout {
+    pub fn new(
+        partial: &PartialSsaDeconstruction,
+        options: StackFrameOptions,
+        cfg: &MirFlowGraph,
+        reg: &MirTypeRegistry,
+    ) -> Self {
+        let mut members: IndexMap<(ops::Range<usize>, MirTypeId)> = IndexMap::default();
+        assert_eq!(options.frame_offset % options.alignment, 0);
+
+        let mut offset: usize = 0;
+        for (_source, range) in partial.ranges.iter() {
+            if range.is_empty() {
+                continue;
+            }
+            let first = range.iter().next().unwrap();
+            let ty = cfg.get_var_type(first);
+            if !reg.is_plane_type(*ty) || options.store_plane {
+                let align = reg.byte_alignment(*ty).unwrap();
+                let size = reg.byte_size(*ty).unwrap();
+
+                offset = offset.div_ceil(align) * align;
+                range.iter().for_each(|val| {
+                    members.view_mut(val.0).set((offset..(offset + size), *ty));
+                });
+                offset += reg.byte_size(*ty).unwrap();
+            }
+        }
+
+        StackFrameLayout {
+            alignment: options.alignment,
+            size: offset,
+            members,
+            frame_offset: options.frame_offset,
+        }
+    }
+
+    pub fn get_offset(&self, val: &MirValue) -> Option<&(ops::Range<usize>, MirTypeId)> {
+        self.members.get(val.0)
     }
 }
 

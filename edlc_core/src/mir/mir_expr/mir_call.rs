@@ -16,11 +16,12 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
 use crate::mir::mir_opt::{Optimizer, Verifier};
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 
@@ -79,6 +80,16 @@ impl MirGraphElement for MirCall {
 }
 
 impl MirCall {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
+
     fn check_usize<B: Backend>(
         lhs: &MirValue,
         opt: &Verifier<'_, B>

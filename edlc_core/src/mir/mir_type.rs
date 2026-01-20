@@ -926,7 +926,7 @@ impl MirTypeRegistry {
     }
 
     pub fn get_const_value(
-        &mut self,
+        &self,
         const_val: &EdlConstValue
     ) -> Option<EdlLiteralValue> {
         match const_val {
@@ -1023,6 +1023,20 @@ impl MirTypeRegistry {
 
     pub fn never(&self) -> MirTypeId {
         self.literal_types.as_ref().unwrap().never
+    }
+
+    pub fn is_plane_type(&self, ty: MirTypeId) -> bool {
+        ty == self.i8() || ty == self.i16()
+            || ty == self.i32() || ty == self.i64()
+            || ty == self.i128() || ty == self.isize()
+            || ty == self.u8() || ty == self.u16()
+            || ty == self.u32() || ty == self.u64()
+            || ty == self.u128() || ty == self.usize()
+            || ty == self.f32() || ty == self.f64()
+            || ty == self.bool() || ty == self.char()
+            || ty == self.str() || ty == self.empty()
+            || ty == self.never()
+            || self.is_ref(&ty) || self.is_mut_ref(&ty)
     }
 
     pub fn is_i_type(&self, ty: MirTypeId) -> bool {

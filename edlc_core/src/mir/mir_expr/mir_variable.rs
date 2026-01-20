@@ -35,10 +35,11 @@ use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 /// This MIR expression can be used to access global variables.
@@ -68,6 +69,16 @@ pub struct MirGlobalVar {
 }
 
 impl MirGlobalVar {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
+
     /// Performs some basic assertion checks on the types of this MIR expression.
     /// The type of the expression itself must be a reference type and the base type inside of that
     /// reference must match the type of the global variable.

@@ -4,14 +4,16 @@
 //! of the code library must spoof these functions for basic compilation checks.
 
 use std::cell::{Ref, RefCell, RefMut};
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
 use edlc_core::prelude::mir_expr::{AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
+use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{HirExpression, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_vars::VariableMapper;
@@ -25,7 +27,8 @@ struct TestCompiler {
 }
 
 struct TestBackend {
-    funcs: RefCell<MirFuncRegistry<Self>>
+    funcs: RefCell<MirFuncRegistry<Self>>,
+    intrinsics: HashMap<MirFuncId, FunctionBinding>,
 }
 
 impl TestCompiler {
@@ -41,20 +44,20 @@ impl TestCompiler {
         self.compiler.push_core_traits()?;
 
         self.compiler.prepare_module(&vec!["std"].into())?;
-        self.backend.load_binop_math(&mut self.compiler, "usize")?;
-        self.backend.load_binop_math(&mut self.compiler, "isize")?;
-        self.backend.load_binop_math(&mut self.compiler, "u8")?;
-        self.backend.load_binop_math(&mut self.compiler, "u16")?;
-        self.backend.load_binop_math(&mut self.compiler, "u32")?;
-        self.backend.load_binop_math(&mut self.compiler, "u64")?;
-        self.backend.load_binop_math(&mut self.compiler, "u128")?;
-        self.backend.load_binop_math(&mut self.compiler, "i8")?;
-        self.backend.load_binop_math(&mut self.compiler, "i16")?;
-        self.backend.load_binop_math(&mut self.compiler, "i32")?;
-        self.backend.load_binop_math(&mut self.compiler, "i64")?;
-        self.backend.load_binop_math(&mut self.compiler, "i128")?;
-        self.backend.load_binop_math(&mut self.compiler, "f32")?;
-        self.backend.load_binop_math(&mut self.compiler, "f64")?;
+        self.backend.load_binop_math::<usize>(&mut self.compiler, "usize")?;
+        self.backend.load_binop_math::<isize>(&mut self.compiler, "isize")?;
+        self.backend.load_binop_math::<u8>(&mut self.compiler, "u8")?;
+        self.backend.load_binop_math::<u16>(&mut self.compiler, "u16")?;
+        self.backend.load_binop_math::<u32>(&mut self.compiler, "u32")?;
+        self.backend.load_binop_math::<u64>(&mut self.compiler, "u64")?;
+        self.backend.load_binop_math::<u128>(&mut self.compiler, "u128")?;
+        self.backend.load_binop_math::<i8>(&mut self.compiler, "i8")?;
+        self.backend.load_binop_math::<i16>(&mut self.compiler, "i16")?;
+        self.backend.load_binop_math::<i32>(&mut self.compiler, "i32")?;
+        self.backend.load_binop_math::<i64>(&mut self.compiler, "i64")?;
+        self.backend.load_binop_math::<i128>(&mut self.compiler, "i128")?;
+        self.backend.load_binop_math_float::<f32>(&mut self.compiler, "f32")?;
+        self.backend.load_binop_math_float::<f64>(&mut self.compiler, "f64")?;
         Ok(())
     }
 
@@ -233,36 +236,100 @@ impl TestBackend {
     fn new() -> Self {
         TestBackend {
             funcs: RefCell::new(MirFuncRegistry::default()),
+            intrinsics: HashMap::new(),
         }
     }
 
-    fn load_binop_math(&mut self, comp: &mut EdlCompiler, ty: &'static str) -> Result<(), anyhow::Error> {
-        self.load_binop(comp, &BinopInfo::base("add", ty, "core::Add"))?;
-        self.load_binop(comp, &BinopInfo::base("sub", ty, "core::Sub"))?;
-        self.load_binop(comp, &BinopInfo::base("div", ty, "core::Div"))?;
-        self.load_binop(comp, &BinopInfo::base("mul", ty, "core::Mul"))?;
+    extern "C" fn add<T: Add<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs + rhs
+    }
 
-        self.load_binop(comp, &BinopInfo::base("add_assign", ty, "core::AddAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("sub_assign", ty, "core::SubAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("div_assign", ty, "core::DivAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("mul_assign", ty, "core::MulAssign"))?;
+    extern "C" fn sub<T: Sub<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs - rhs
+    }
 
-        self.load_binop(comp, &BinopInfo::base("rem", ty, "core::Rem"))?;
-        self.load_binop(comp, &BinopInfo::base("and", ty, "core::And"))?;
-        self.load_binop(comp, &BinopInfo::base("or", ty, "core::Or"))?;
-        self.load_binop(comp, &BinopInfo::base("xor", ty, "core::Xor"))?;
+    extern "C" fn mul<T: Mul<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs * rhs
+    }
 
-        self.load_binop(comp, &BinopInfo::base("rem_assign", ty, "core::RemAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("and_assign", ty, "core::AndAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("or_assign", ty, "core::OrAssign"))?;
-        self.load_binop(comp, &BinopInfo::base("xor_assign", ty, "core::XorAssign"))?;
+    extern "C" fn div<T: Div<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs / rhs
+    }
 
-        self.load_compare(comp, &CompareOpInfo { func: "partial_eq", ty, trait_name: "core::PartialEq" })?;
+    extern "C" fn rem<T: Rem<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs % rhs
+    }
+
+    extern "C" fn bit_and<T: BitAnd<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs & rhs
+    }
+
+    extern "C" fn bit_or<T: BitOr<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs | rhs
+    }
+
+    extern "C" fn bit_xor<T: BitXor<Output=T>>(lhs: T, rhs: T) -> T {
+        lhs ^ rhs
+    }
+
+    extern "C" fn partial_eq<T: PartialEq>(lhs: T, rhs: T) -> bool {
+        lhs == rhs
+    }
+
+    fn load_binop_math<T: Add<Output=T> + Sub<Output=T> + Div<Output=T> + Mul<Output=T> + Rem<Output=T> + BitAnd<Output=T> + BitOr<Output=T> + BitXor<Output=T> + PartialEq + 'static>(
+        &mut self,
+        comp: &mut EdlCompiler,
+        ty: &'static str,
+    ) -> Result<(), anyhow::Error> {
+        self.load_binop(comp, &BinopInfo::base("add", ty, "core::Add"), Self::add::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("sub", ty, "core::Sub"), Self::sub::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("div", ty, "core::Div"), Self::div::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("mul", ty, "core::Mul"), Self::mul::<T>)?;
+
+        self.load_binop(comp, &BinopInfo::base("add_assign", ty, "core::AddAssign"), Self::add::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("sub_assign", ty, "core::SubAssign"), Self::sub::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("div_assign", ty, "core::DivAssign"), Self::div::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("mul_assign", ty, "core::MulAssign"), Self::mul::<T>)?;
+
+        self.load_binop(comp, &BinopInfo::base("rem", ty, "core::Rem"), Self::rem::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("and", ty, "core::And"), Self::bit_and::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("or", ty, "core::Or"), Self::bit_or::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("xor", ty, "core::Xor"), Self::bit_xor::<T>)?;
+
+        self.load_binop(comp, &BinopInfo::base("rem_assign", ty, "core::RemAssign"), Self::rem::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("and_assign", ty, "core::AndAssign"), Self::bit_and::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("or_assign", ty, "core::OrAssign"), Self::bit_or::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("xor_assign", ty, "core::XorAssign"), Self::bit_xor::<T>)?;
+
+        self.load_compare(comp, &CompareOpInfo { func: "partial_eq", ty, trait_name: "core::PartialEq" }, Self::partial_eq::<T>)?;
         // self.load_compare(comp, &CompareOpInfo { func: "eq", ty, trait_name: "core::Eq" })?;
         Ok(())
     }
 
-    fn load_compare(&mut self, comp: &mut EdlCompiler, info: &CompareOpInfo) -> Result<(), anyhow::Error> {
+    fn load_binop_math_float<T: Add<Output=T> + Sub<Output=T> + Div<Output=T> + Mul<Output=T> + Rem<Output=T> + PartialEq + 'static>(
+        &mut self,
+        comp: &mut EdlCompiler,
+        ty: &'static str,
+    ) -> Result<(), anyhow::Error> {
+        self.load_binop(comp, &BinopInfo::base("add", ty, "core::Add"), Self::add::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("sub", ty, "core::Sub"), Self::sub::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("div", ty, "core::Div"), Self::div::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("mul", ty, "core::Mul"), Self::mul::<T>)?;
+
+        self.load_binop(comp, &BinopInfo::base("add_assign", ty, "core::AddAssign"), Self::add::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("sub_assign", ty, "core::SubAssign"), Self::sub::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("div_assign", ty, "core::DivAssign"), Self::div::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("mul_assign", ty, "core::MulAssign"), Self::mul::<T>)?;
+
+        self.load_binop(comp, &BinopInfo::base("rem", ty, "core::Rem"), Self::rem::<T>)?;
+        self.load_binop(comp, &BinopInfo::base("rem_assign", ty, "core::RemAssign"), Self::rem::<T>)?;
+
+        self.load_compare(comp, &CompareOpInfo { func: "partial_eq", ty, trait_name: "core::PartialEq" }, Self::partial_eq::<T>)?;
+        // self.load_compare(comp, &CompareOpInfo { func: "eq", ty, trait_name: "core::Eq" })?;
+        Ok(())
+    }
+
+    fn load_compare<T: 'static>(&mut self, comp: &mut EdlCompiler, info: &CompareOpInfo, op: extern "C" fn(T, T) -> bool) -> Result<(), anyhow::Error> {
         let [f] = comp.parse_impl(
             inline_code!("<>"),
             inline_code!(info.ty),
@@ -276,6 +343,8 @@ impl TestBackend {
                 inline_code!(&format!("<{}, {}>", info.ty, info.ty))
             )),
         )?;
+
+        let name = format!("{}_{}", info.func, info.ty);
         self.funcs.borrow_mut().register_intrinsic(
             comp.get_func_instance(
                 f,
@@ -286,12 +355,17 @@ impl TestBackend {
             true,
             &comp.mir_phase.types,
             &comp.phase.types,
-            &format!("{}_{}", info.func, info.ty),
+            &name,
         )?;
+        let func_id = {
+            let binding = self.funcs.borrow();
+            *binding.get_intrinsic(&name).unwrap()
+        };
+        self.intrinsics.insert(func_id, FunctionBinding::from_function(op));
         Ok(())
     }
 
-    fn load_binop(&mut self, comp: &mut EdlCompiler, info: &BinopInfo) -> Result<(), anyhow::Error> {
+    fn load_binop<T: 'static>(&mut self, comp: &mut EdlCompiler, info: &BinopInfo, op: extern "C" fn(T, T) -> T) -> Result<(), anyhow::Error> {
         let [f] = comp.parse_impl(
             inline_code!("<>"),
             inline_code!(info.ty),
@@ -300,6 +374,8 @@ impl TestBackend {
             ],
             Some((inline_code!(info.trait_name), inline_code!(&format!("<{}, {}>", info.lhs, info.rhs)))),
         )?;
+
+        let name = format!("{}_{}", info.func, info.ty);
         self.funcs.borrow_mut().register_intrinsic(
             comp.get_func_instance(
                 f,
@@ -310,8 +386,13 @@ impl TestBackend {
             true,
             &comp.mir_phase.types,
             &comp.phase.types,
-            &format!("{}_{}", info.func, info.ty),
+            &name,
         )?;
+        let func_id = {
+            let binding = self.funcs.borrow();
+            *binding.get_intrinsic(&name).unwrap()
+        };
+        self.intrinsics.insert(func_id, FunctionBinding::from_function(op));
         Ok(())
     }
 }
@@ -362,8 +443,8 @@ impl Backend for TestBackend {
         self.funcs.borrow_mut()
     }
 
-    fn is_generating_symbol(&self, func_id: &MirFuncId) -> bool {
-        false
+    fn intrinsic_binding(&self, func: MirFuncId) -> &FunctionBinding {
+        self.intrinsics.get(&func).unwrap()
     }
 }
 

@@ -636,7 +636,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         Ok(())
     }
 
-    pub fn get_intrinsic(&self, name: &'static str) -> Option<&MirFuncId> {
+    pub fn get_intrinsic(&self, name: &str) -> Option<&MirFuncId> {
         self.compiler_intrinsic_functions.get(name)
     }
 

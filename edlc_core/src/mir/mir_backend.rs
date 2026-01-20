@@ -24,6 +24,7 @@ use crate::core::EdlVarId;
 use crate::hir::HirPhase;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use crate::mir::{MirError, MirPhase};
+use crate::mir::mir_executor::FunctionBinding;
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
 
 
@@ -60,11 +61,8 @@ pub trait Backend: Sized {
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>>;
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;
 
-    /// Returns true if the backend is currently in the process of generating a symbol for the
-    /// specified function.
-    /// In other words, if this function returns `true`, then the backend is currently in the
-    /// process of generating the executable code for the specified function.
-    fn is_generating_symbol(&self, func_id: &MirFuncId) -> bool;
+    /// Returns a function binding for an intrinsic function based on a MIR function ID.
+    fn intrinsic_binding(&self, func: MirFuncId) -> &FunctionBinding;
 }
 
 

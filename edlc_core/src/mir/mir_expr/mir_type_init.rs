@@ -15,9 +15,10 @@
  */
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +35,18 @@ pub struct MirTypeInit {
     pub id: MirUid,
     pub ty: MirTypeId,
     pub inits: Vec<MirInitAssign>,
+}
+
+impl MirTypeInit {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
 }
 
 impl MirGraphElement for MirTypeInit {

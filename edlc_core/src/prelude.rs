@@ -22,6 +22,7 @@ pub use crate::hir::*;
 pub use crate::mir::*;
 pub use crate::mir::mir_type::layout::MirLayout;
 pub use crate::mir::mir_type::option::EdlOption;
+pub use crate::mir::mir_executor::*;
 pub use crate::compiler::JitCompiler;
 pub use crate::compiler::EdlCompiler;
 pub use crate::compiler::ErrorFormatter;

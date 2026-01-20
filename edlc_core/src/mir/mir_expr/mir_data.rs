@@ -17,11 +17,12 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 use std::mem;
+use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirData {
@@ -46,6 +47,16 @@ impl MirGraphElement for MirData {
 }
 
 impl MirData {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+    ) {
+        todo!()
+    }
+
     pub fn as_usize<B: Backend>(&self, phase: &MirPhase) -> Result<usize, MirError<B>> {
         if self.ty != phase.types.usize() {
             return Err(MirError::TypeMismatch {
