@@ -269,7 +269,17 @@ impl MakeGraph for HirRef {
 
         // we don't have a downcast here, proceed as usual
         let value_type = self.value.mir_type(graph)?;
+        if value_type != self.value.mir_deref_type(graph)? {
+            // LHS compiles to an internal reference. We can assume that this is enough to fulfill
+            // the requirements and just exit here
+            self.value.write_to_graph(graph, target)?;
+            return Ok(());
+        }
+
+        // LHS does not compile to an internal reference.
+        // in this case, we need to actually create the reference to a temporary value in MIR
         let value = graph.graph.create_temp_variable(value_type);
+        self.value.write_to_graph(graph, value)?;
         if self.mutable {
             graph.graph.def_mut_ref(
                 graph.current_block,
@@ -292,11 +302,27 @@ impl MakeGraph for HirRef {
         Ok(())
     }
 
-    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty,
+                pos: self.pos,
+            });
+        }
+        let ty = ty.unwrap();
+        graph.mir_phase.types
+            .mir_id(&ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 
-    fn mir_deref_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        self.mir_type(graph)
     }
 }

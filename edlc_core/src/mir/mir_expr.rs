@@ -223,7 +223,7 @@ impl MirExprContainer {
     pub fn insert_deref(&mut self, expr: MirDeref) -> MirExprId {
         self.derefs.push(expr);
         MirExprId {
-            id: self.refs.len() - 1,
+            id: self.derefs.len() - 1,
             ty: MirExprVariant::Deref,
         }
     }

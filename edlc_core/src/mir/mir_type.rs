@@ -40,6 +40,7 @@ use crate::mir::mir_backend::Backend;
 use crate::mir::mir_funcs::ComptimeParams;
 use crate::mir::mir_str::FatPtr;
 use crate::mir::mir_type::abi::{AbiConfig, AbiLayout};
+use crate::mir::mir_type::layout::Layout;
 use crate::mir::MirError;
 use crate::mir::MirError::UnknownConst;
 use crate::prelude::mir_funcs::UnifiedComptimeParam;
@@ -1200,6 +1201,8 @@ impl MirTypeRegistry {
             Ok(*value)
         } else if edl_type.ty == edl_type::EDL_ARRAY {
             self.register_array(edl_type.clone(), edl_reg)
+        } else if edl_type.ty == edl_type::EDL_REF || edl_type.ty == edl_type::EDL_MUT_REF {
+            self.register_ref(edl_type.clone(), edl_reg)
         } else {
             // try to generate structured type
             let layout = generation::generate_type(edl_type.clone(), edl_reg, self)?;
@@ -1308,6 +1311,45 @@ impl MirTypeRegistry {
         let mir_id = MirTypeId(self.types.insert(ty));
         self.conversion_map.insert(tmir, mir_id);
         Ok(mir_id)
+    }
+
+    fn register_ref(
+        &mut self,
+        ty: EdlTypeInstance,
+        edl_reg: &EdlTypeRegistry,
+    ) -> Result<MirTypeId, EdlError> {
+        let tmir = TMirType::from_edl(ty.clone(), self, edl_reg)?;
+        if let Some(&id) = self.conversion_map.get(&tmir) {
+            // place the layout
+            return Ok(id);
+        }
+
+        let layout = self.get_reference_layout(ty)?;
+        let ty = MirType {
+            size: layout.size,
+            alignment: layout.align,
+            tmir_version: tmir.clone(),
+            rust_repr: None,
+            layout: layout.layout,
+        };
+        let mir_id = MirTypeId(self.types.insert(ty));
+        self.conversion_map.insert(tmir, mir_id);
+        Ok(mir_id)
+    }
+
+    fn get_reference_layout(
+        &mut self,
+        ty: EdlTypeInstance,
+    ) -> Result<Layout, EdlError> {
+        if ty.ty != edl_type::EDL_REF && ty.ty != edl_type::EDL_MUT_REF {
+            return Err(EdlError::E003 { exp: edl_type::EDL_REF, got: ty.ty });
+        }
+
+        Ok(Layout {
+            align: align_of::<*const u8>(),
+            size: size_of::<*const u8>(),
+            layout: MirTypeLayout::Integer,
+        })
     }
 
     fn register_array(

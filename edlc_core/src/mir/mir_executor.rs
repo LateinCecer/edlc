@@ -52,7 +52,7 @@ impl<'a> From<AmorphusDataMut<'a>> for AmorphusData<'a> {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub struct AmorphusData<'a> {
     data: &'a [u8],
     ty: MirTypeId,
@@ -415,8 +415,9 @@ impl ExecutorVM {
         reg: &MirTypeRegistry,
     ) {
         let (range, ty) = layout.get_offset(&dst).unwrap();
-        let lhs = reg.get_rust_from_type(*ty).unwrap();
-        assert_eq!(TypeId::of::<T>(), lhs);
+        if let Some(lhs) = reg.get_rust_from_type(*ty) {
+            assert_eq!(TypeId::of::<T>(), lhs);
+        }
         unsafe { std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut T, value) };
     }
 
@@ -427,8 +428,9 @@ impl ExecutorVM {
         reg: &MirTypeRegistry,
     ) -> Option<T> {
         let (range, ty) = layout.get_offset(&value)?;
-        let lhs = reg.get_rust_from_type(*ty)?;
-        assert_eq!(TypeId::of::<T>(), lhs);
+        if let Some(lhs) = reg.get_rust_from_type(*ty) {
+            assert_eq!(TypeId::of::<T>(), lhs);
+        }
         Some(unsafe { std::ptr::read(self.memory[range.clone()].as_ptr() as *const T) })
     }
 

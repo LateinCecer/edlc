@@ -454,20 +454,34 @@ impl MirRef {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        let (range, _ty) = stack_frame.get_offset(&self.value).unwrap();
-        let base_ty = reg.get_ref_type(&self.ty)
+        let (range, ty) = stack_frame.get_offset(&self.value).unwrap();
+        let base_ty = reg
+            .get_ref_type(&self.ty)
             .or_else(|| reg.get_mut_ref_type(&self.ty))
             .unwrap();
 
+        let ptr = if reg.is_ref(ty) || reg.is_mut_ref(ty) {
+            // the base value is already a reference.
+            // for all offset calculations, we read `value` as a pointer and then add the offset to
+            // that
+            // if this operator is a reference to the entire pointer, then we ignore this value and
+            // create a pointer of a pointer instead (see match clause below)
+            vm.read(self.value, stack_frame, reg).unwrap()
+        } else {
+            // the base value is not a reference, which means that we have to create a new reference
+            // to the memory region in which the base value resides.
+            vm.get_data(range.clone(), *ty).as_ptr()
+        };
+
         match &self.offset {
             RefOffset::Entire => {
+                // in either case, we create a reference to the base value and do not just repeat
+                // the reference
                 let data = vm.get_data(range.clone(), base_ty);
                 vm.write_ptr(*target, data.as_ptr(), stack_frame, reg);
             }
             RefOffset::Const(const_offset) => {
-                let start = range.start + const_offset.offset;
-                let end = start + const_offset.size;
-                let data = vm.get_ptr(start..end);
+                let data = unsafe { ptr.add(const_offset.offset) };
                 vm.write_ptr(*target, data, stack_frame, reg);
             }
             RefOffset::ArrayIndex { index, array_size, element_ty } => {
@@ -475,10 +489,7 @@ impl MirRef {
                 let index: usize = vm.read(*index, stack_frame, reg).unwrap();
                 let offset = element_size * index;
                 assert!(index < *array_size);
-
-                let start = range.start + offset;
-                let end = start + element_size;
-                let data = vm.get_ptr(start..end);
+                let data = unsafe { ptr.add(offset) };
                 vm.write_ptr(*target, data, stack_frame, reg);
             }
             RefOffset::SliceIndex { index, slice_size, element_ty } => {
@@ -487,10 +498,7 @@ impl MirRef {
                 let offset = element_size * index;
                 let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
                 assert!(index < slice_size);
-
-                let start = range.start + offset;
-                let end = start + slice_size;
-                let data = vm.get_ptr(start..end);
+                let data = unsafe { ptr.add(offset) };
                 vm.write_ptr(*target, data, stack_frame, reg);
             }
             RefOffset::ArrayRange { start, end, array_size, element_ty } => {
@@ -498,10 +506,7 @@ impl MirRef {
                 let start: usize = vm.read(*start, stack_frame, reg).unwrap();
                 let end: usize = vm.read(*end, stack_frame, reg).unwrap();
                 assert!(end <= *array_size);
-
-                let start = range.start + start * element_size;
-                let end = range.start + end * element_size;
-                let data = vm.get_ptr(start..end);
+                let data = unsafe { ptr.add(start * element_size) };
                 vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
             }
             RefOffset::SliceRange { start, end, slice_size, element_ty } => {
@@ -510,10 +515,7 @@ impl MirRef {
                 let end: usize = vm.read(*end, stack_frame, reg).unwrap();
                 let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
                 assert!(end <= slice_size);
-
-                let start = range.start + start * element_size;
-                let end = range.start + end * element_size;
-                let data = vm.get_ptr(start..end);
+                let data = unsafe {  ptr.add(start * element_size) };
                 vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
             }
         }
@@ -607,6 +609,7 @@ impl MirDeref {
     ) {
         let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
         let ptr: *const u8 = vm.read(self.value, stack_frame, reg).unwrap();
+
         let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
         assert_eq!(reg.get_ref_type(value_ty).or_else(|| reg.get_mut_ref_type(value_ty)).unwrap(), *target_ty);
 

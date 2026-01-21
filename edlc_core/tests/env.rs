@@ -574,6 +574,12 @@ fn test_env() -> Result<(), anyhow::Error> {
         };
         let mut y = i + x;
 
+        // create an array to test internal references
+        let arr = [1_i32, 2, 4, 8, 16, 32];
+        std::print("array index access: ");
+        std::print(arr[2]);
+        std::print("\n");
+
         loop {
             if y == std::input() { break; }
             std::print("loop index: ");

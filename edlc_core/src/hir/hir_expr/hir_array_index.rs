@@ -24,7 +24,7 @@ use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph};
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
-use crate::issue::{SrcError, SrcRange};
+use crate::issue::{format_type_args, SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{MirRef, MirValue};
@@ -33,6 +33,7 @@ use crate::mir::mir_type::MirTypeId;
 use crate::prelude::hir_expr::HirTreeWalker;
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::core::edl_param_env::EdlGenericParamValue;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -98,8 +99,32 @@ impl HirArrayIndex {
             &self.lhs, issue::format_type_args!(
                 format_args!("LHS of index operator")
         ))?;
+
+        // check that the type of LHS is a reference (must be enforced as such during type inference)
+        let reference = lhs_ty.unwrap();
+        if reference.ty != edl_type::EDL_REF && reference.ty != edl_type::EDL_MUT_REF {
+            phase.report_error(
+                format_type_args!(
+                    format_args!("LHS of index operator must be a reference")
+                ),
+                &[SrcError::Single {
+                    pos: self.lhs.pos().clone().into(),
+                    src: self.src.clone(),
+                    error: format_type_args!(
+                        format_args!("LHS is type `"),
+                        &reference as &dyn FmtType,
+                        format_args!("` which is not a reference type")
+                    ),
+                }],
+                None,
+            );
+        }
+        let EdlGenericParamValue::Type(array) = &reference.param.params[0] else {
+            unreachable!();
+        };
+
         // check type of index
-        if matches!(&lhs_ty, EdlMaybeType::Fixed(array) if array.ty == edl_type::EDL_ARRAY) {
+        if array.ty == edl_type::EDL_ARRAY {
             // index must be `usize` for native array access
             let index_ty = EdlMaybeType::Fixed(phase.types.usize());
             phase.check_report_type_expr(
@@ -113,7 +138,7 @@ impl HirArrayIndex {
                     },
                     remark: issue::format_type_args!(
                         format_args!("LHS of index operator has type "),
-                        &lhs_ty as &dyn FmtType
+                        array as &dyn FmtType
                     )
                 },
                 &self.index,
@@ -135,7 +160,7 @@ impl HirArrayIndex {
                         second: self.pos.into(),
                         error_first: issue::format_type_args!(
                             format_args!("LHS of index operator is type "),
-                            &lhs_ty as &dyn FmtType,
+                            array as &dyn FmtType,
                             format_args!(" which is not an array type")
                         ),
                         error_second: issue::format_type_args!(
@@ -148,7 +173,7 @@ impl HirArrayIndex {
                     set to the desugared into the [core::Index] and [core::IndexMut] pseudotraits. \
                     For a future-proof work around, you can use the `index(..)` and \
                     `index_set(..)` functions of the trait implementation for type "),
-                    &lhs_ty as &dyn FmtType,
+                    array as &dyn FmtType,
                     format_args!(" directly.")
                 )),
             );
@@ -477,8 +502,34 @@ impl MakeGraph for HirArrayIndex {
             Ok(())
         } else {
             // get as shared offset, then dereference immediately
-            panic!("internal compiler error: array index operations always return references in \
-            MIR – dereferencing must be done explicitly _before_ lowering");
+            let ref_type = self.mir_type(graph)?;
+            let index_expr = graph.graph.expressions.insert_ref(MirRef::shared_array_index(
+                lhs_expr, // assume that lhs is a shared reference type - there are checks for this later down te pipeline
+                index_expr,
+                ref_type,
+                &graph.graph,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            ));
+            let temp_value = graph.graph.create_temp_variable(ref_type);
+            graph.graph.insert_def(
+                graph.current_block,
+                temp_value,
+                index_expr,
+                &graph.mir_phase.types,
+            );
+
+            // explicitly dereference temporary value and write result into the target value
+            graph.graph.def_deref(
+                graph.current_block,
+                temp_value,
+                target,
+                &graph.mir_phase.types,
+                self.pos,
+                self.src.clone(),
+            );
+            Ok(())
         }
     }
 
