@@ -20,6 +20,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirUid};
+use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
@@ -41,7 +42,64 @@ impl MirConstant {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        match &self.value {
+            EdlLiteralValue::Usize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::Isize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::Bool(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::U8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::U16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::U32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::U64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::U128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::I8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::I16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::I32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::I64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::I128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::Str(val) => {
+                let bytes = val.as_bytes();
+                let bytes_range = vm.alloc_const(bytes.len(), 16);
+                vm.copy_bytes(bytes_range.start, bytes);
+                let ptr = vm.get_ptr(bytes_range.clone());
+                vm.write_fat_ptr(
+                    *target,
+                    ptr,
+                    bytes_range.len(),
+                    stack_frame,
+                    reg
+                );
+            }
+            EdlLiteralValue::Char(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            EdlLiteralValue::Empty() => (),
+        }
     }
 }
 

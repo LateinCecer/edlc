@@ -52,9 +52,11 @@ impl MirData {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         target: &MirValue,
-        reg: &MirTypeRegistry,
+        _reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
+        assert_eq!(target_ty, &self.ty);
+        vm.copy_bytes(target_range.start, self.value.as_slice());
     }
 
     pub fn as_usize<B: Backend>(&self, phase: &MirPhase) -> Result<usize, MirError<B>> {

@@ -29,6 +29,7 @@ use std::env::current_exe;
 use std::fmt::{Debug, Display};
 use std::ops::{Deref, Range};
 use crate::lexer::SrcPos;
+use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -37,7 +38,7 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
-use crate::prelude::{ExecutorVM, ModuleSrc};
+use crate::prelude::{AmorphusDataCopy, ExecutorVM, ModuleSrc};
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
@@ -47,7 +48,7 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
-pub(crate) use crate::mir::mir_expr::mir_graph::deconstruction::StackFrameLayout;
+pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -365,6 +366,7 @@ impl Statement {
         expr: &MirExprContainer,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
         match self {
             Self::VarMove { var, value, uid: _ }
@@ -374,7 +376,7 @@ impl Statement {
                 vm.memcpy(dst, src);
             }
             Self::VarDef { var, value, uid: _ } => {
-                expr.execute(vm,  stack_frame, *value, var, reg);
+                expr.execute(vm,  stack_frame, *value, var, reg, backend);
             }
         }
     }
@@ -1033,9 +1035,10 @@ impl Block {
         expr: &MirExprContainer,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
         for statement in self.statements.iter() {
-            statement.execute(vm, expr, stack_frame, reg);
+            statement.execute(vm, expr, stack_frame, reg, backend);
         }
     }
 }
@@ -1092,6 +1095,10 @@ impl Block {
     }
 }
 
+pub struct ExecutionError {
+    value: AmorphusDataCopy,
+}
+
 impl MirFlowGraph {
     pub fn new<I: Iterator<Item=MirTypeId>>(parameters: I, return_type: MirTypeId, ctx: Context) -> Self {
         let mut out = Self {
@@ -1104,8 +1111,7 @@ impl MirFlowGraph {
         };
         let scope = out.new_scope();
         let parameters = parameters
-            .enumerate()
-            .map(|(_parameter_index, ty)| {
+            .map(|(ty)| {
                 out.temp_vars.push(TempVarData {
                     ty,
                 });
@@ -1127,19 +1133,24 @@ impl MirFlowGraph {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
-    ) {
+        backend: &impl Backend,
+    ) -> Result<AmorphusDataCopy, ExecutionError> {
         let mut current_block = self.root();
         'outer: loop {
-            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg);
+            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg, backend);
             // jump to other block using sealing statement
             match &self.blocks[current_block.0].seal {
                 Seal::Return(value) => {
                     println!("returning from execution");
-                    break;
+                    let (range, ty) = stack_frame.get_offset(value).unwrap();
+                    let data = vm.get_data(range.clone(), *ty);
+                    break Ok(data.get_copy(reg));
                 }
                 Seal::Panic(value) => {
                     println!("panic in execution");
-                    break;
+                    let (range, ty) = stack_frame.get_offset(value).unwrap();
+                    let data = vm.get_data(range.clone(), *ty);
+                    break Err(ExecutionError { value: data.get_copy(reg) });
                 }
                 Seal::Jump(target) => {
                     vm.memcpy_slice(

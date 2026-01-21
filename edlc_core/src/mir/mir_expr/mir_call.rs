@@ -21,7 +21,7 @@ use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
 use crate::mir::mir_opt::{Optimizer, Verifier};
-use crate::prelude::ExecutorVM;
+use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use crate::resolver::ScopeId;
 
 
@@ -86,8 +86,21 @@ impl MirCall {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
-        todo!()
+        let func = backend.intrinsic_binding(self.func);
+        let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
+        let params = self.args.iter()
+            .map(|par| {
+                let (par_range, par_ty) = stack_frame.get_offset(par).unwrap();
+                vm.get_data(par_range.clone(), *par_ty)
+            })
+            .collect::<Vec<_>>();
+        func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+
+        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
+        let [mut target] = vm.get_data_mut([target_range.clone()], &[*target_ty]);
+        target.memcpy(&ret_value.as_data());
     }
 
     fn check_usize<B: Backend>(

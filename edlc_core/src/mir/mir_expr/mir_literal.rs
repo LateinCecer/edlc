@@ -16,6 +16,7 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -40,7 +41,69 @@ impl MirLiteral {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        match &self.value {
+            MirLiteralValue::Char(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Bool(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Str(s) => {
+                let bytes = s.as_bytes();
+                let bytes_range = vm.alloc_const(bytes.len(), 16);
+                vm.copy_bytes(bytes_range.start, bytes);
+                let ptr = vm.get_ptr(bytes_range.clone());
+                vm.write_fat_ptr(
+                    *target,
+                    ptr,
+                    bytes_range.len(),
+                    stack_frame,
+                    reg
+                );
+            }
+            MirLiteralValue::U8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Usize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Isize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::F32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::F64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+        }
     }
 }
 

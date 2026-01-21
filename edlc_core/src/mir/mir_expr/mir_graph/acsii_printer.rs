@@ -95,26 +95,26 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             RefOffset::Const(offset) => {
                 write!(self.writer, " offset: [{}..{}]", offset.offset, offset.offset + offset.size)?;
             }
-            RefOffset::ArrayIndex { index, array_size } => {
+            RefOffset::ArrayIndex { index, array_size, .. } => {
                 write!(self.writer, " index: [")?;
                 self.write_value(index)?;
                 write!(self.writer, " < {array_size}]")?;
             }
-            RefOffset::SliceIndex { index, slice_size } => {
+            RefOffset::SliceIndex { index, slice_size, .. } => {
                 write!(self.writer, " index: [")?;
                 self.write_value(index)?;
                 write!(self.writer, " < ")?;
                 self.write_value(slice_size)?;
                 write!(self.writer, "]")?;
             }
-            RefOffset::ArrayRange { start, end, array_size } => {
+            RefOffset::ArrayRange { start, end, array_size, .. } => {
                 write!(self.writer, " range: [")?;
                 self.write_value(start)?;
                 write!(self.writer, "..")?;
                 self.write_value(end)?;
                 write!(self.writer, " < {array_size}]")?;
             }
-            RefOffset::SliceRange { start, end, slice_size } => {
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
                 write!(self.writer, " range: [")?;
                 self.write_value(start)?;
                 write!(self.writer, "..")?;

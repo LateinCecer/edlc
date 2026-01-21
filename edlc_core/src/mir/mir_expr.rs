@@ -124,11 +124,12 @@ impl MirExprContainer {
         expr: MirExprId,
         target: &MirValue,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
         match &expr.ty {
             MirExprVariant::ArrayInit => self.array_inits[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::As => self.ases[expr.id].execute(vm, stack_frame, target, reg),
-            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, target, reg, backend),
             MirExprVariant::Literal => self.literals[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Variable => self.variables[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Constant => self.constants[expr.id].execute(vm, stack_frame, target, reg),

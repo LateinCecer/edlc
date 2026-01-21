@@ -45,10 +45,15 @@ impl MirAssign {
         &self,
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
-        target: &MirValue,
+        _target: &MirValue, // no need to write into target, since its always a empty value
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let dst_ptr: *mut u8 = vm.read(self.lhs, stack_frame, reg).unwrap();
+        let (value_range, value_ty) = stack_frame.get_offset(&self.rhs).unwrap();
+        let value = vm.get_data(value_range.clone(), *value_ty);
+        unsafe {
+            std::ptr::copy(value.as_ptr(), dst_ptr, value_range.len());
+        }
     }
 
     pub fn assert_check(&self, graph: &MirFlowGraph, types: &MirTypeRegistry) {

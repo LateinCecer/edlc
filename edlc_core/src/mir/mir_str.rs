@@ -16,7 +16,7 @@
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialOrd, PartialEq, Eq, Ord, Hash)]
-pub struct MemPtr(pub usize);
+pub struct MemPtr(pub *const u8);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

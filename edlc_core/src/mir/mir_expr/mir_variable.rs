@@ -76,7 +76,8 @@ impl MirGlobalVar {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let global_var_offset = vm.get_global(&self.var);
+        vm.write_ptr(*target, global_var_offset, stack_frame, reg);
     }
 
     /// Performs some basic assertion checks on the types of this MIR expression.

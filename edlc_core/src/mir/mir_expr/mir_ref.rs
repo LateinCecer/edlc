@@ -39,7 +39,7 @@ impl MirGraphElement for MirRef {
             RefOffset::ArrayIndex { index, .. } => {
                 out.push(*index);
             }
-            RefOffset::SliceIndex { index, slice_size } => {
+            RefOffset::SliceIndex { index, slice_size, .. } => {
                 out.push(*index);
                 out.push(*slice_size);
             }
@@ -47,7 +47,7 @@ impl MirGraphElement for MirRef {
                 out.push(*start);
                 out.push(*end);
             }
-            RefOffset::SliceRange { start, end, slice_size } => {
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
                 out.push(*start);
                 out.push(*end);
                 out.push(*slice_size);
@@ -63,13 +63,13 @@ impl MirGraphElement for MirRef {
             RefOffset::ArrayIndex { index, .. } => {
                 index == val
             }
-            RefOffset::SliceIndex { index, slice_size } => {
+            RefOffset::SliceIndex { index, slice_size, .. } => {
                 index == val || slice_size == val
             }
             RefOffset::ArrayRange { start, end, .. } => {
                 start == val || end == val
             }
-            RefOffset::SliceRange { start, end, slice_size } => {
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
                 start == val || end == val || slice_size == val
             }
             RefOffset::Entire => false,
@@ -87,7 +87,7 @@ impl MirGraphElement for MirRef {
                     *index = *repl;
                 }
             }
-            RefOffset::SliceIndex { index, slice_size } => {
+            RefOffset::SliceIndex { index, slice_size, .. } => {
                 if index == var {
                     *index = *repl;
                 }
@@ -103,7 +103,7 @@ impl MirGraphElement for MirRef {
                     *end = *repl;
                 }
             }
-            RefOffset::SliceRange { start, end, slice_size } => {
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
                 if start == var {
                     *start = *repl;
                 }
@@ -226,6 +226,7 @@ impl MirRef {
     pub fn shared_array_index(
         value: MirValue,
         index: MirValue,
+        ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
         pos: SrcPos,
@@ -235,14 +236,16 @@ impl MirRef {
         let base_type = reg.get_ref_type(&src_ty)
             .or_else(|| reg.get_mut_ref_type(&src_ty))
             .unwrap_or(src_ty);
-        let (array_element, array_size) = reg.get_array_type(&base_type).unwrap();
+        let (element_ty, array_size) = reg.get_array_type(&base_type).unwrap();
+        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+
         MirRef {
             mutable: false,
             value,
             src,
             pos,
-            offset: RefOffset::ArrayIndex { index, array_size },
-            ty: array_element,
+            offset: RefOffset::ArrayIndex { index, array_size, element_ty },
+            ty,
             src_ty,
         }
     }
@@ -250,6 +253,7 @@ impl MirRef {
     pub fn shared_slice_index(
         value: MirValue,
         index: MirValue,
+        ty: MirTypeId,
         slice_length: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -260,14 +264,16 @@ impl MirRef {
         let base_type = reg.get_ref_type(&src_ty)
             .or_else(|| reg.get_mut_ref_type(&src_ty))
             .unwrap_or(src_ty);
-        let slice_element = reg.get_slice_type(&base_type).unwrap();
+        let element_ty = reg.get_slice_type(&base_type).unwrap();
+        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+
         MirRef {
             mutable: false,
             value,
             src,
             pos,
-            offset: RefOffset::SliceIndex { index, slice_size: slice_length },
-            ty: slice_element,
+            offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
+            ty,
             src_ty,
         }
     }
@@ -295,7 +301,7 @@ impl MirRef {
             value,
             src,
             pos,
-            offset: RefOffset::ArrayRange { start, end, array_size },
+            offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty
         }
@@ -357,6 +363,7 @@ impl MirRef {
     pub fn mut_array_index(
         value: MirValue,
         index: MirValue,
+        ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
         pos: SrcPos,
@@ -365,14 +372,16 @@ impl MirRef {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_mut_ref_type(&src_ty)
             .unwrap_or(src_ty);
-        let (array_element, array_size) = reg.get_array_type(&base_type).unwrap();
+        let (element_ty, array_size) = reg.get_array_type(&base_type).unwrap();
+        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+
         MirRef {
             mutable: true,
             value,
             src,
             pos,
-            offset: RefOffset::ArrayIndex { index, array_size },
-            ty: array_element,
+            offset: RefOffset::ArrayIndex { index, array_size, element_ty },
+            ty,
             src_ty,
         }
     }
@@ -380,6 +389,7 @@ impl MirRef {
     pub fn mut_slice_index(
         value: MirValue,
         index: MirValue,
+        ty: MirTypeId,
         slice_length: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -389,14 +399,16 @@ impl MirRef {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_mut_ref_type(&src_ty)
             .unwrap_or(src_ty);
-        let slice_element = reg.get_slice_type(&base_type).unwrap();
+        let element_ty = reg.get_slice_type(&base_type).unwrap();
+        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+
         MirRef {
             mutable: true,
             value,
             src,
             pos,
-            offset: RefOffset::SliceIndex { index, slice_size: slice_length },
-            ty: slice_element,
+            offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
+            ty,
             src_ty,
         }
     }
@@ -423,7 +435,7 @@ impl MirRef {
             value,
             src,
             pos,
-            offset: RefOffset::ArrayRange { start, end, array_size },
+            offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty
         }
@@ -442,7 +454,69 @@ impl MirRef {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let (range, _ty) = stack_frame.get_offset(&self.value).unwrap();
+        let base_ty = reg.get_ref_type(&self.ty)
+            .or_else(|| reg.get_mut_ref_type(&self.ty))
+            .unwrap();
+
+        match &self.offset {
+            RefOffset::Entire => {
+                let data = vm.get_data(range.clone(), base_ty);
+                vm.write_ptr(*target, data.as_ptr(), stack_frame, reg);
+            }
+            RefOffset::Const(const_offset) => {
+                let start = range.start + const_offset.offset;
+                let end = start + const_offset.size;
+                let data = vm.get_ptr(start..end);
+                vm.write_ptr(*target, data, stack_frame, reg);
+            }
+            RefOffset::ArrayIndex { index, array_size, element_ty } => {
+                let element_size = reg.byte_size(*element_ty).unwrap();
+                let index: usize = vm.read(*index, stack_frame, reg).unwrap();
+                let offset = element_size * index;
+                assert!(index < *array_size);
+
+                let start = range.start + offset;
+                let end = start + element_size;
+                let data = vm.get_ptr(start..end);
+                vm.write_ptr(*target, data, stack_frame, reg);
+            }
+            RefOffset::SliceIndex { index, slice_size, element_ty } => {
+                let element_size = reg.byte_size(*element_ty).unwrap();
+                let index: usize = vm.read(*index, stack_frame, reg).unwrap();
+                let offset = element_size * index;
+                let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
+                assert!(index < slice_size);
+
+                let start = range.start + offset;
+                let end = start + slice_size;
+                let data = vm.get_ptr(start..end);
+                vm.write_ptr(*target, data, stack_frame, reg);
+            }
+            RefOffset::ArrayRange { start, end, array_size, element_ty } => {
+                let element_size = reg.byte_size(*element_ty).unwrap();
+                let start: usize = vm.read(*start, stack_frame, reg).unwrap();
+                let end: usize = vm.read(*end, stack_frame, reg).unwrap();
+                assert!(end <= *array_size);
+
+                let start = range.start + start * element_size;
+                let end = range.start + end * element_size;
+                let data = vm.get_ptr(start..end);
+                vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
+            }
+            RefOffset::SliceRange { start, end, slice_size, element_ty } => {
+                let element_size = reg.byte_size(*element_ty).unwrap();
+                let start: usize = vm.read(*start, stack_frame, reg).unwrap();
+                let end: usize = vm.read(*end, stack_frame, reg).unwrap();
+                let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
+                assert!(end <= slice_size);
+
+                let start = range.start + start * element_size;
+                let end = range.start + end * element_size;
+                let data = vm.get_ptr(start..end);
+                vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
+            }
+        }
     }
 }
 
@@ -456,23 +530,27 @@ pub(super) enum RefOffset {
     ArrayIndex {
         index: MirValue,
         array_size: usize,
+        element_ty: MirTypeId,
     },
     /// A specified index from a slice is referenced.
     SliceIndex {
         index: MirValue,
         slice_size: MirValue,
+        element_ty: MirTypeId,
     },
     /// A specific range from an array is referenced.
     ArrayRange {
         start: MirValue,
         end: MirValue,
         array_size: usize,
+        element_ty: MirTypeId,
     },
     /// A specific range from a slice is referenced.
     SliceRange {
         start: MirValue,
         end: MirValue,
         slice_size: MirValue,
+        element_ty: MirTypeId,
     }
 }
 
@@ -527,7 +605,15 @@ impl MirDeref {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
+        let ptr: *const u8 = vm.read(self.value, stack_frame, reg).unwrap();
+        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
+        assert_eq!(reg.get_ref_type(value_ty).or_else(|| reg.get_mut_ref_type(value_ty)).unwrap(), *target_ty);
+
+        let [mut target_buf] = vm.get_data_mut([target_range.clone()], &[*target_ty]);
+        unsafe {
+            target_buf.read_ptr(ptr);
+        }
     }
 }
 
@@ -578,6 +664,9 @@ impl MirDowncastRef {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let (_, target_ty) = stack_frame.get_offset(target).unwrap();
+        let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
+        assert_eq!(reg.get_ref_type(target_ty).unwrap(), reg.get_mut_ref_type(value_ty).unwrap());
+        vm.memcpy_slice(&[*target], &[self.value], stack_frame);
     }
 }

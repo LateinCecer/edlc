@@ -307,16 +307,18 @@ impl PartialSsaDeconstruction {
 }
 
 pub struct StackFrameLayout {
-    alignment: usize,
-    size: usize,
+    pub(crate) alignment: usize,
+    pub(crate) size: usize,
     members: IndexMap<(ops::Range<usize>, MirTypeId)>,
-    frame_offset: usize,
+    pub(crate) frame_offset: usize,
+    pub(crate) red_zone: usize,
 }
 
 pub struct StackFrameOptions {
     pub store_plane: bool,
     pub alignment: usize,
     pub frame_offset: usize,
+    pub red_zone: usize,
 }
 
 impl Default for StackFrameOptions {
@@ -325,6 +327,7 @@ impl Default for StackFrameOptions {
             store_plane: false,
             alignment: 16,
             frame_offset: 0,
+            red_zone: 128,
         }
     }
 }
@@ -363,6 +366,7 @@ impl StackFrameLayout {
             size: offset,
             members,
             frame_offset: options.frame_offset,
+            red_zone: options.red_zone,
         }
     }
 

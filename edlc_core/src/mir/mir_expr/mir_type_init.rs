@@ -43,9 +43,18 @@ impl MirTypeInit {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         target: &MirValue,
-        reg: &MirTypeRegistry,
+        _reg: &MirTypeRegistry,
     ) {
-        todo!()
+        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
+        assert_eq!(target_ty, &self.ty);
+        for MirInitAssign { off, val } in self.inits.iter() {
+            let source = stack_frame.get_offset(val).unwrap();
+            let dst_offset = target_range.start + *off;
+            vm.memcpy(
+                &(dst_offset..(dst_offset + source.0.len()), source.1),
+                source,
+            );
+        }
     }
 }
 

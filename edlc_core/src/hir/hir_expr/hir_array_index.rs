@@ -444,6 +444,7 @@ impl MakeGraph for HirArrayIndex {
             let index_expr = graph.graph.expressions.insert_ref(MirRef::mut_array_index(
                 lhs_expr, // assume that lhs is a mutable reference type - there are checks for this later down the pipeline
                 index_expr,
+                target_type,
                 &graph.graph,
                 &graph.mir_phase.types,
                 self.pos,
@@ -461,6 +462,7 @@ impl MakeGraph for HirArrayIndex {
             let index_expr = graph.graph.expressions.insert_ref(MirRef::shared_array_index(
                 lhs_expr, // assume that lhs is a shared reference type - there are checks for this later down te pipeline
                 index_expr,
+                target_type,
                 &graph.graph,
                 &graph.mir_phase.types,
                 self.pos,

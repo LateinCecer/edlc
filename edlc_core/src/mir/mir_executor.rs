@@ -15,8 +15,11 @@
  */
 use std::any::TypeId;
 use std::mem::MaybeUninit;
-use std::ops;
+use std::{mem, ops};
+use std::collections::HashMap;
+use crate::core::EdlVarId;
 use crate::mir::mir_expr::StackFrameLayout;
+use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirValue;
 
@@ -29,6 +32,17 @@ impl<'a> AmorphusDataMut<'a> {
     pub fn memcpy(&mut self, dst: &AmorphusData<'_>) {
         assert_eq!(self.ty, dst.ty);
         self.data.copy_from_slice(dst.data);
+    }
+
+    /// Reads the contents of the src pointer into the contents of this amorphus data slice.
+    ///
+    /// # Safety
+    ///
+    /// Since a raw pointer does not come with any kind of type annotation, this function is highly
+    /// unsafe and *will* result in unknown and potentially harmful behavior!
+    /// **Only proceed if you are absolutely sure what you are doing!**
+    pub unsafe fn read_ptr(&mut self, src: *const u8) {
+        std::ptr::copy(src, self.data.as_mut_ptr(), self.data.len());
     }
 }
 
@@ -44,11 +58,77 @@ pub struct AmorphusData<'a> {
     ty: MirTypeId,
 }
 
+impl<'a> AmorphusData<'a> {
+    pub fn as_ptr(&self) -> *const u8 {
+        self.data.as_ptr()
+    }
+
+    pub fn get_copy(&self, reg: &MirTypeRegistry) -> AmorphusDataCopy {
+        AmorphusDataCopy {
+            align: reg.byte_alignment(self.ty).unwrap(),
+            data: self.data.to_vec(),
+            ty: self.ty,
+        }
+    }
+}
+
+pub struct AmorphusDataCopy {
+    align: usize,
+    data: Vec<u8>,
+    ty: MirTypeId,
+}
+
+impl AmorphusDataCopy {
+    pub fn uninit(ty: MirTypeId, reg: &MirTypeRegistry) -> Option<Self> {
+        let size = reg.byte_size(ty)?;
+        let align = reg.byte_alignment(ty)?;
+        Some(Self {
+            align,
+            data: vec![0u8; size],
+            ty,
+        })
+    }
+
+    /// Creates a new data copy from the specified data value.
+    /// For this function to succeed the specified MIR Type ID must match the Rust type id of `val`.
+    /// If this is not the case, the program panics.
+    ///
+    /// # Safety
+    ///
+    /// This function uses [std::ptr::copy] to copy data from the source object to the destination
+    /// buffer.
+    /// Since we effectively replicate `val` through this action *without* this copy being tracked
+    /// by the Rust compiler (see this as a manual move operation) we need to tell RustC to not
+    /// keep track of `val` anymore (don't invoke [Drop::drop] when it goes out of scope).
+    /// This is fine as long as the destination of the data keeps track of scopes and handles manual
+    /// drops for us – this should be the case for the EDL const execution VM and the actual EDL
+    /// JIT runtime.
+    /// Please refrain from using this function for usages outside the normal EDL pipeline, if
+    /// you are not 100% sure you know what you are doing.
+    pub fn new<T: 'static>(ty: MirTypeId, reg: &MirTypeRegistry, val: T) -> Option<Self> {
+        assert_eq!(reg.get_rust_from_type(ty).unwrap(), TypeId::of::<T>());
+        let mut out = Self::uninit(ty, reg)?;
+        unsafe {
+            std::ptr::copy(&val as *const T, out.data.as_mut_ptr() as *mut T, 1);
+        }
+        std::mem::forget(val);
+        Some(out)
+    }
+
+    pub fn as_data(&self) -> AmorphusData<'_> {
+        AmorphusData { data: &self.data[..], ty: self.ty }
+    }
+
+    pub fn as_data_mut(&mut self) -> AmorphusDataMut<'_> {
+        AmorphusDataMut { data: &mut self.data[..], ty: self.ty }
+    }
+}
+
 pub struct FunctionBinding {
     func: usize,
     call_func: for <'s, 'a, 'b, 'c, 'reg> unsafe fn(
         &'s FunctionBinding,
-        &'a mut [AmorphusDataMut<'b>],
+        &'a [AmorphusData<'b>],
         ret_buf: AmorphusDataMut<'c>,
         &'reg MirTypeRegistry,
     ) -> Result<(), TypeError>,
@@ -62,7 +142,7 @@ trait ExecFunction<F> {
     type Error;
     unsafe fn exec(
         &self,
-        params: &mut [AmorphusDataMut<'_>],
+        params: &[AmorphusData<'_>],
         ret_buffer: AmorphusDataMut<'_>,
         reg: &MirTypeRegistry,
     ) -> Result<(), Self::Error>;
@@ -105,7 +185,7 @@ macro_rules! impl_from_function(
             unsafe fn exec(
                 &self,
                 #[allow(unused)]
-                params: &mut [AmorphusDataMut<'_>],
+                params: &[AmorphusData<'_>],
                 ret_buffer: AmorphusDataMut<'_>,
                 reg: &MirTypeRegistry,
             ) -> Result<(), Self::Error> {
@@ -165,7 +245,7 @@ impl FunctionBinding {
     /// Otherwise, please refrain from using this.
     pub fn run(
         &self,
-        params: &mut [AmorphusDataMut<'_>],
+        params: &[AmorphusData<'_>],
         ret_buf: AmorphusDataMut<'_>,
         reg: &MirTypeRegistry,
     ) -> Result<(), TypeError> {
@@ -181,11 +261,68 @@ impl FunctionBinding {
 /// compile time.
 /// Safety is much more important here.
 pub struct ExecutorVM {
-    global_vars: Vec<usize>,
+    global_vars: HashMap<EdlVarId, ops::Range<usize>>,
     memory: Vec<u8>,
+    const_region: usize,
+    const_region_size: usize,
+    stack_region: usize,
+    stack_region_size: usize,
 }
 
 impl ExecutorVM {
+    pub fn new(stack_size: usize) -> Self {
+        let const_size = 1024 * 1024; // allocate 1 MB for consts by default
+        let memory = vec![0; const_size + stack_size];
+
+        ExecutorVM {
+            stack_region: 0,
+            stack_region_size: stack_size,
+            const_region: stack_size,
+            const_region_size: const_size,
+            memory,
+            global_vars: HashMap::new(),
+        }
+    }
+
+    pub fn get_global(&self, id: &EdlVarId) -> *const u8 {
+        self.memory[self.global_vars[id].clone()].as_ptr()
+    }
+
+    pub fn insert_global(&mut self, id: &EdlVarId, raw: &[u8]) {
+        let range = self.alloc_const(raw.len(), 16);
+        self.copy_bytes(range.start, raw);
+        self.global_vars.insert(*id, range);
+    }
+
+    pub fn alloc_stack_frame(&mut self, stack: &mut StackFrameLayout) {
+        let mut start = self.stack_region;
+        start = (start + stack.red_zone).div_ceil(stack.alignment) * stack.alignment;
+        if start + stack.size > self.stack_region_size {
+            panic!("out of memory");
+        }
+
+        self.stack_region = start + stack.size;
+        stack.frame_offset = start;
+    }
+
+    pub fn pop_frame(&mut self, stack_frame: &mut StackFrameLayout) {
+        self.stack_region = stack_frame.frame_offset - stack_frame.red_zone;
+    }
+
+    /// Allocates const memory in the VM.
+    pub fn alloc_const(&mut self, size: usize, align: usize) -> ops::Range<usize> {
+        let mut start = self.const_region;
+        start = start.div_ceil(align) * align; // align
+
+        if start + size > self.const_region_size {
+            let to_alloc = start + size - self.const_region_size;
+            (0..to_alloc).for_each(|_| self.memory.push(0u8));
+            self.const_region_size += to_alloc;
+        }
+        self.const_region = start + size;
+        start..(start + size)
+    }
+
     pub fn get_data_mut<const N: usize>(
         &mut self,
         locs: [ops::Range<usize>; N],
@@ -202,6 +339,14 @@ impl ExecutorVM {
     pub fn get_data(&self, loc: ops::Range<usize>, ty: MirTypeId) -> AmorphusData<'_> {
         let slice = &self.memory[loc];
         AmorphusData { data: slice, ty }
+    }
+
+    pub fn get_ptr(&self, loc: ops::Range<usize>) -> *const u8 {
+        self.memory[loc].as_ptr()
+    }
+
+    pub fn copy_bytes(&mut self, offset: usize, raw: &[u8]) {
+        self.memory[offset..(offset + raw.len())].copy_from_slice(raw);
     }
 
     pub fn memcpy_slice(
@@ -232,6 +377,34 @@ impl ExecutorVM {
             &[*dst_ty, *src_ty],
         );
         dst.memcpy(&src.into());
+    }
+
+    pub fn write_ptr(
+        &mut self,
+        dst: MirValue,
+        value: *const u8,
+        layout: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) {
+        let (range, ty) = layout.get_offset(&dst).unwrap();
+        assert!(reg.is_ref(ty) || reg.is_mut_ref(ty));
+        unsafe { std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut *const u8, value) };
+    }
+
+    pub fn write_fat_ptr(
+        &mut self,
+        dst: MirValue,
+        value: *const u8,
+        value_size: usize,
+        layout: &StackFrameLayout,
+        _reg: &MirTypeRegistry,
+    ) {
+        let (range, _ty) = layout.get_offset(&dst).unwrap();
+        assert_eq!(range.len(), size_of::<*const u8>() * 2);
+        unsafe { std::ptr::write(
+            self.memory[range.clone()].as_mut_ptr() as *mut FatPtr,
+            FatPtr { ptr: MemPtr(value), size: value_size }
+        ) };
     }
 
     pub fn write<T: 'static + Copy + Clone>(

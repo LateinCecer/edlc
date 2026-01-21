@@ -8,14 +8,16 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
+use std::thread::current;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
-use edlc_core::prelude::mir_expr::{AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue};
+use edlc_core::prelude::mir_expr::{AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
+use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{HirExpression, LoopMapper, MakeGraph, MirGraph};
+use edlc_core::prelude::mir_str::FatPtr;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
 use edlc_core::prelude::type_analysis::{InferProvider, InferState};
@@ -118,30 +120,53 @@ impl TestCompiler {
 
         let mut var_mapper = VariableMapper::new();
         let mut loop_manager = LoopMapper::new();
-        let mut graph_writer = MirGraph {
-            current_block: body.root(),
-            graph: &mut body,
-            mir_phase: &mut self.compiler.mir_phase,
-            hir_phase: &mut self.compiler.phase,
-            mir_funcs: &mut self.backend.func_reg_mut(),
-            var_mapper: &mut var_mapper,
-            loop_mapper: &mut loop_manager,
-        };
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase: &mut self.compiler.mir_phase,
+                hir_phase: &mut self.compiler.phase,
+                mir_funcs: &mut self.backend.func_reg_mut(),
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_manager,
+            };
 
-        hir.write_to_graph(&mut graph_writer, ret_value)?;
-        graph_writer.graph.insert_return(graph_writer.current_block, ret_value);
-        graph_writer.graph.seal();
+            hir.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
+        };
+        body.insert_return(current_block, ret_value);
+        body.seal();
 
         // print result
         let mut out = std::io::stdout();
         let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&graph_writer.graph)?;
+        writer.print(&body)?;
 
-        graph_writer.graph.constant_analysis()?;
-        let lifeness = graph_writer.graph.lifetimes(&graph_writer.mir_phase.types)?;
-        let deconstruction = graph_writer.graph.deconstruct(&lifeness)?;
+        body.constant_analysis()?;
+        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        let deconstruction = body.deconstruct(&lifeness)?;
         deconstruction.print_ranges();
-        deconstruction.print_mapping(graph_writer.graph);
+        deconstruction.print_mapping(&body);
+
+        // create stack frame
+        let options = StackFrameOptions {
+            store_plane: true,
+            .. Default::default()
+        };
+        let mut stack_frame = StackFrameLayout::new(
+            &deconstruction, options, &body, &self.compiler.mir_phase.types);
+        let mut vm = ExecutorVM::new(1024 * 1024);
+        vm.alloc_stack_frame(&mut stack_frame);
+        let res = body
+            .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
+        match res {
+            Ok(val) => {
+                println!("success!");
+            },
+            Err(err) => {
+                println!("executor panicked!");
+            },
+        }
         Ok(())
     }
 }
@@ -471,21 +496,93 @@ fn test_env() -> Result<(), anyhow::Error> {
             "input_func_i32",
         )?;
 
+    extern "C" fn input_binding() -> i32 {
+        42
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
         let i: i32 = 3 + 2;
         let x = if i == 3 {
+            std::print("something is very wrong here!\n");
             i
         } else {
             // std::input()
+            std::print("hello, world!\n");
             0
         };
         let mut y = i + x;
 
         loop {
             if y == std::input() { break; }
+            std::print("loop index: ");
+            std::print(y);
+            std::print("\n");
             y += 1;
         }
+        std::print(y);
+        std::print("\n");
     }
     "#))?;
     Ok(())
