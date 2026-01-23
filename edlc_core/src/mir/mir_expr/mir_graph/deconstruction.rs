@@ -306,6 +306,7 @@ impl PartialSsaDeconstruction {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct StackFrameLayout {
     pub(crate) alignment: usize,
     pub(crate) size: usize,

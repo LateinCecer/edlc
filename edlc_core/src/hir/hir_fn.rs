@@ -642,12 +642,19 @@ impl HirFn {
         }
         // translate body
         // let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
-        let parameters = signature
+        let mut parameters = signature
             .params
             .iter()
-            .map(|param| param.ty);
+            .map(|param| param.ty)
+            .collect::<Vec<_>>();
+        // we add the compile parameters after
+        parameters
+            .extend(signature.comptime_params
+                .iter()
+                .map(|param| param.ty));
+
         let return_type = signature.ret;
-        let mut body = MirFlowGraph::new(parameters, return_type, ctx);
+        let mut body = MirFlowGraph::new(parameters.into_iter(), return_type, ctx);
         let ret_value = body.create_temp_variable(return_type);
 
         let mut var_mapper = VariableMapper::new();

@@ -27,7 +27,7 @@ use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirFlowGraph;
+use crate::mir::mir_expr::{ExecutionError, MirFlowGraph, StackFrameLayout};
 pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
@@ -36,7 +36,9 @@ use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::{mem, ops};
 use std::path::PathBuf;
+use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
 pub const INTR_SUB_USIZE: &str = "sub_usize";
@@ -55,8 +57,9 @@ impl MirFuncId {
 
 enum CodeGenState<B: Backend> {
     Waiting,
-    Ready(Box<dyn CodeGen<B>>),
-    Inline(Box<MirFn>, Box<dyn CodeGen<B>>, bool),
+    MirPass { body: Box<MirFn> },
+    Ready { body: Box<MirFn>, call_gen: Box<dyn CodeGen<B>> },
+    Internal { call_gen: Box<dyn CodeGen<B>> },
 }
 
 pub struct MirFuncInfo<B: Backend> {
@@ -483,17 +486,12 @@ impl<B: Backend> MirFuncRegistry<B> {
         // this is done to avoid infinite recursion during MIR function resolution.
         let im = im.clone();
         let mut mir_instance = im.mir_repr(hir_phase, mir_phase, self, edl, comptime_params, force_comptime_call)?;
+        mir_instance.mir_id = Some(id);
 
         // now that the code-gen is ready, place it into the function registry
-        let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
-        let func = self.generators.get_mut(id.0).unwrap();
-        if !mir_instance.inline {
-            self.body_generators.push(mir_instance);
-            func.code_gen = CodeGenState::Ready(loc);
-        } else {
-            self.body_generators.push(mir_instance.clone());
-            func.code_gen = CodeGenState::Inline(Box::new(mir_instance), loc, true);
-        }
+        // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+        let func = self.generators.get_mut(id.0).unwrap();;
+        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
     }
 
@@ -527,17 +525,43 @@ impl<B: Backend> MirFuncRegistry<B> {
         // this is done to avoid infinite recursive loops during MIR function resolution.
         let def = def.clone(); // we have to clone that here, since we need `&mut self`
         let mut mir_instance = def.mir_repr(hir_phase, mir_phase, self, &edl.param, comptime_params, forced_comptime_call)?;
+        mir_instance.mir_id = Some(id);
         // now that the code-gen is ready, place it into the function registry
-        let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+        // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+
         let func = self.generators.get_mut(id.0).unwrap();
-        if !mir_instance.inline {
-            self.body_generators.push(mir_instance);
-            func.code_gen = CodeGenState::Ready(loc);
-        } else {
-            self.body_generators.push(mir_instance.clone());
-            func.code_gen = CodeGenState::Inline(Box::new(mir_instance), loc, true);
-        }
+        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
+    }
+
+    /// Collects all functions in the function registry that must be transformed during a MIR pass.
+    /// This must, unfortunately, be done through explicit copies, since the transformation itself
+    /// requires mutable access to the function registry itself (usually).
+    ///
+    /// After transformation, the results are reinserted into the registry with
+    /// [Self::finish_mir_pass].
+    pub fn collect_mir_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                Some(body.as_ref().clone())
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    /// Can be used to reinsert transformed functions back into the function registry.
+    pub fn finish_mir_pass(&mut self, pass: Vec<MirFn>)
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+        for mut func in pass.into_iter() {
+            let id = func.mir_id.unwrap();
+            let call_generator = func.reserve_loc(id).unwrap();
+            self.generators
+                .get_mut(id.0)
+                .unwrap()
+                .code_gen = CodeGenState::Ready { call_gen: call_generator, body: Box::new(func) };
+        }
     }
 
     /// Registers a function definition.
@@ -576,7 +600,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         let f = MirFuncInfo {
             edl_version: tmir.clone(),
-            code_gen: CodeGenState::Ready(Box::new(code_gen)),
+            code_gen: CodeGenState::Internal { call_gen: Box::new(code_gen) },
             comptime,
             comptime_only,
         };
@@ -670,38 +694,30 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         match code_gen {
             CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
-            CodeGenState::Ready(gen) => gen.code_gen(backend, type_reg),
-            CodeGenState::Inline(body, gen, has_signature) => {
-                // Inlined functions do not always generate a function signature at all.
-                // If we want to generate the function, we need to make sure that the function
-                // actually exists.
-                // Thus, we need to add the generator to the set of function body generators if it
-                // is not already present in there
-                if !*has_signature {
-                    self.body_generators.push(*body.clone());
-                    *has_signature = true;
-                }
-                gen.code_gen(backend, type_reg)
-            },
+            CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
+            CodeGenState::Ready{ call_gen, .. }
+                | CodeGenState::Internal { call_gen } => call_gen
+                .code_gen(backend, type_reg),
         }
     }
 
     /// Gets the function body of a function to inline.
     /// If the function is not marked for inlining, `None` is returned.
-    pub fn get_inline_body(&self, id: MirFuncId, _mir_phase: &mut MirPhase) -> Result<Option<Box<MirFn>>, MirError<B>> {
-        if let CodeGenState::Inline(body, _, _) = &self.generators.get(id.0)
+    pub fn get_inline_body(
+        &self,
+        id: MirFuncId,
+        _mir_phase: &mut MirPhase,
+    ) -> Result<Option<&MirFn>, MirError<B>> {
+        if let CodeGenState::MirPass { body }
+            | CodeGenState::Ready { body, .. } = &self.generators.get(id.0)
             .expect("Invalid MIR function id").code_gen {
-            // copy body and insert comptime parameters if necessary
             /*
             Note: For function body inlining, we can assume that the comptime parameter values are
               present, since they can be evaluated and insert right before inlining.
               Therefore, if `define_comptime_parameters` tries to defer verification, we can be
               sure that there is en error.
              */
-            let body = body.clone();
-            // <CompileResult<B> as Into<Result<(), MirError<B>>>>::into(
-            //     body.define_comptime_parameters(mir_phase, self))?;
-            Ok(Some(body))
+            Ok(Some(body.as_ref()))
         } else {
             Ok(None)
         }
@@ -887,11 +903,14 @@ pub struct MirFnParam {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MirFn {
     pub signature: MirFnSignature,
     pub body: MirFlowGraph,
     pub comptime_params: ComptimeParams,
+
+    // safe some analysis results for this function.
+    pub stack_frame_layout: Option<StackFrameLayout>,
 
     pub mir_id: Option<MirFuncId>,
     /// The instruction pointer at which the function can be found after compiling
@@ -930,17 +949,49 @@ impl<B: Backend> From<CompileResult<B>> for Result<(), MirError<B>> {
 
 
 impl MirFn {
-    pub fn new(signature: MirFnSignature, body: MirFlowGraph, params: ComptimeParams, force_comptime: bool) -> Self {
+    pub fn new(
+        signature: MirFnSignature,
+        body: MirFlowGraph,
+        params: ComptimeParams,
+        force_comptime: bool,
+    ) -> Self {
         MirFn {
             inline: false,
             force_comptime,
             signature,
             body,
+            stack_frame_layout: None,
             mir_id: None,
             id: None,
             approx_size: None,
             comptime_params: params,
         }
+    }
+
+    /// Executes the function in the virtual executor.
+    pub fn execute_in_vm(
+        &self,
+        params: &[(ops::Range<usize>, MirTypeId)],
+        vm: &mut ExecutorVM,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<AmorphusDataCopy, ExecutionError> {
+        // copy parameter values from the source to the parameter slot
+        let stack_frame_layout = self.stack_frame_layout.as_ref().unwrap();
+        let root_parameters = self.body.get_root_parameters();
+        for (index, param_src) in params.iter().enumerate() {
+            let param_dst = stack_frame_layout
+                .get_offset(&root_parameters[index]).unwrap();
+            vm.memcpy(param_dst, param_src);
+        }
+        // get comptime parameters
+        for (_index, param) in self.comptime_params.iter().enumerate() {
+            let _value = backend.func_reg().comptime_mapper.get(param.value).unwrap();
+            todo!("value should be raw data instead of an obscure value")
+        }
+
+        // execute body
+        self.body.execute(vm, stack_frame_layout, reg, backend)
     }
 
     /// Lists all the dependencies to other functions that exist in this MIR function
@@ -1147,8 +1198,6 @@ pub trait FnCodeGen<B: Backend> {
 
     fn reserve_loc(
         &mut self,
-        phase: &mut MirPhase,
-        func_reg: &mut MirFuncRegistry<B>,
         id: MirFuncId
     ) -> Result<Self::CallGen, HirTranslationError>;
 }

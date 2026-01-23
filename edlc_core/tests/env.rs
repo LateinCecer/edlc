@@ -223,8 +223,6 @@ impl FnCodeGen<TestBackend> for MirFn {
 
     fn reserve_loc(
         &mut self,
-        phase: &mut MirPhase,
-        func_reg: &mut MirFuncRegistry<TestBackend>,
         id: MirFuncId,
     ) -> Result<Self::CallGen, HirTranslationError> {
         Ok(Box::new(TestCallGen))

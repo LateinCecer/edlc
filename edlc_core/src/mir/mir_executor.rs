@@ -446,3 +446,4 @@ impl ExecutorVM {
         Some(unsafe { std::ptr::read(self.memory[range.clone()].as_ptr() as *const T) })
     }
 }
+

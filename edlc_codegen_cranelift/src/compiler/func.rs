@@ -310,8 +310,6 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
 
     fn reserve_loc(
         &mut self,
-        _phase: &mut MirPhase,
-        _func_reg: &mut MirFuncRegistry<JIT<Runtime>>,
         id: MirFuncId,
     ) -> Result<Self::CallGen, HirTranslationError> {
         assert!(self.mir_id.is_none());

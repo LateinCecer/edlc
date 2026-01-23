@@ -27,6 +27,7 @@ use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeS
 use std::collections::{HashMap, HashSet};
 use std::env::current_exe;
 use std::fmt::{Debug, Display};
+use std::ops;
 use std::ops::{Deref, Range};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
@@ -1128,6 +1129,12 @@ impl MirFlowGraph {
         out
     }
 
+    /// The block parameters that the root block takes.
+    /// In function bodies this represents the function parameters.
+    pub fn get_root_parameters(&self) -> &[MirValue] {
+        &self.blocks[self.root().0].parameters
+    }
+
     pub fn execute(
         &self,
         vm: &mut ExecutorVM,
@@ -1922,6 +1929,22 @@ impl MirFlowGraph {
             println!("${:x}: {}", node.0, const_state);
         }
         Ok(())
+    }
+
+    /// Resolves the constants in the flow graph.
+    /// Since constant propagation requires an executor to actually execute constant expressions,
+    /// we need to ship the executor in the parameters of this method.
+    /// To propagate constants in function bodies of hybrid functions, we need to ship the regions
+    /// in the executor VM in which the compile-time parameters reside.
+    pub fn propagate_constants(
+        &mut self,
+        comptime_params: &[(Range<usize>, MirTypeId)],
+        vm: &mut ExecutorVM,
+        mir_types: &MirTypeRegistry,
+        backend: &mut impl Backend,
+    ) -> Result<(), ExecutionError> {
+
+        todo!()
     }
 
     /// Performs a non-lexical lifetime analysis on the call graph.
