@@ -90,6 +90,21 @@ impl PartialSsaDeconstruction {
         // self.new_source()
     }
 
+    pub fn insert_root_parameters(
+        &mut self,
+        cfg: &MirFlowGraph,
+        state: &mut HashNodeState<MirValue, DataOrigin>,
+    ) {
+        cfg.get_root_parameters()
+            .iter()
+            .for_each(|param| {
+                state.replace(
+                    param,
+                    DataOrigin::Sources(HashSet::from([self.new_source()])),
+                );
+            })
+    }
+
     fn replace_item(
         state: &mut HashNodeState<MirValue, DataOrigin>,
         target: &DataSource,

@@ -35,6 +35,14 @@ impl VariableMapper {
         }
     }
 
+    pub fn insert_mapping(
+        &mut self,
+        var: EdlVarId,
+        value: MirValue,
+    ) {
+        self.mapping.insert(var, value);
+    }
+
     pub fn get_or_create(
         &mut self,
         var: EdlVarId,

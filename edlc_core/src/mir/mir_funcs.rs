@@ -706,7 +706,6 @@ impl<B: Backend> MirFuncRegistry<B> {
     pub fn get_inline_body(
         &self,
         id: MirFuncId,
-        _mir_phase: &mut MirPhase,
     ) -> Result<Option<&MirFn>, MirError<B>> {
         if let CodeGenState::MirPass { body }
             | CodeGenState::Ready { body, .. } = &self.generators.get(id.0)
@@ -976,8 +975,16 @@ impl MirFn {
         reg: &MirTypeRegistry,
         backend: &impl Backend,
     ) -> Result<AmorphusDataCopy, ExecutionError> {
+        // create a copy of the stack frame layout and allocate memory for it.
+        // we need the copy here since the allocation might do some changes to the layout depending
+        // on the actual location of the stack frame in memory.
+        // since this might be a recursive function call, we need to copy the stack frame layout
+        // just in case.
+        // keep in mind that this is not a problem that we encounter in the actual codegen backend.
+        let mut stack_frame_layout = self.stack_frame_layout
+            .as_ref().unwrap().clone();
+        vm.alloc_stack_frame(&mut stack_frame_layout);
         // copy parameter values from the source to the parameter slot
-        let stack_frame_layout = self.stack_frame_layout.as_ref().unwrap();
         let root_parameters = self.body.get_root_parameters();
         for (index, param_src) in params.iter().enumerate() {
             let param_dst = stack_frame_layout
@@ -991,7 +998,10 @@ impl MirFn {
         }
 
         // execute body
-        self.body.execute(vm, stack_frame_layout, reg, backend)
+        let res = self.body
+            .execute(vm, &stack_frame_layout, reg, backend);
+        vm.pop_frame(&mut stack_frame_layout);
+        res
     }
 
     /// Lists all the dependencies to other functions that exist in this MIR function

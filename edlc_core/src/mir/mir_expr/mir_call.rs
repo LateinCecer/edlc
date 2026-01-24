@@ -88,15 +88,35 @@ impl MirCall {
         reg: &MirTypeRegistry,
         backend: &impl Backend,
     ) {
-        let func = backend.intrinsic_binding(self.func);
-        let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
-        let params = self.args.iter()
-            .map(|par| {
-                let (par_range, par_ty) = stack_frame.get_offset(par).unwrap();
-                vm.get_data(par_range.clone(), *par_ty)
-            })
-            .collect::<Vec<_>>();
-        func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+        let ret_value = if let Some(func) = backend.intrinsic_binding(self.func) {
+            let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
+            let params = self.args.iter()
+                .map(|par| {
+                    let (par_range, par_ty) = stack_frame.get_offset(par).unwrap();
+                    vm.get_data(par_range.clone(), *par_ty)
+                })
+                .collect::<Vec<_>>();
+
+            func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+            ret_value
+        } else {
+            let func_reg = backend.func_reg();
+            let inline_body = func_reg.get_inline_body(self.func).unwrap()
+                .expect("no function body found!");
+
+            let params = self.args.iter()
+                .map(|par| {
+                    stack_frame.get_offset(par).unwrap().clone()
+                })
+                .collect::<Vec<_>>();
+
+            match inline_body.execute_in_vm(params.as_slice(), vm, reg, backend) {
+                Ok(s) => s,
+                Err(err) => {
+                    panic!("execution error encountered while executing function body in executor VM!");
+                },
+            }
+        };
 
         let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
         let [mut target] = vm.get_data_mut([target_range.clone()], &[*target_ty]);

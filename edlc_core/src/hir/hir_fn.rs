@@ -657,18 +657,41 @@ impl HirFn {
         let mut body = MirFlowGraph::new(parameters.into_iter(), return_type, ctx);
         let ret_value = body.create_temp_variable(return_type);
 
+        // create variable mapper and inset function parameters
         let mut var_mapper = VariableMapper::new();
+        signature
+            .params
+            .iter()
+            .zip(body.get_root_parameters()[..self.signature.params.len()].iter())
+            .for_each(|(param, value)| {
+                var_mapper.insert_mapping(param.var_id, *value)
+            });
+        signature
+            .comptime_params
+            .iter()
+            .zip(body.get_root_parameters()[self.signature.params.len()..].iter())
+            .for_each(|(param, value)| {
+                var_mapper.insert_mapping(param.var_id, *value)
+            });
+
         let mut loop_mapper = LoopMapper::new();
-        let mut graph_writer = MirGraph {
-            current_block: body.root(),
-            graph: &mut body,
-            mir_phase,
-            hir_phase: phase,
-            mir_funcs,
-            var_mapper: &mut var_mapper,
-            loop_mapper: &mut loop_mapper,
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase,
+                hir_phase: phase,
+                mir_funcs,
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_mapper,
+            };
+            self.body.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
         };
-        self.body.write_to_graph(&mut graph_writer, ret_value)?;
+        if !body.is_block_sealed(&current_block) {
+            body.insert_return(current_block, ret_value);
+        }
+        body.seal();
 
         // in `mir_repr` for the signature, the type layer is pushed.
         // make sure that we pop it here

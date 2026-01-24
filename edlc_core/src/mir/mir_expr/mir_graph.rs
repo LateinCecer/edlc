@@ -1678,7 +1678,13 @@ impl MirFlowGraph {
     /// This implementation uses a simple worklist approach that should converge monotonously.
     fn route_variables(&mut self) {
         // add missing block parameters
-        for block in self.blocks.iter_mut() {
+        let root_block = self.root();
+        for (index_raw, block) in self.blocks.iter_mut().enumerate() {
+            if index_raw == root_block.0 {
+                // we don't want to infer block parameters for the entry block, as this holds
+                // parameters corresponding to function parameters for function bodies
+                continue;
+            }
             block.infer_block_parameters(&self.expressions);
         }
 
@@ -1989,6 +1995,7 @@ impl MirFlowGraph {
         lifeness: &RegionLifenessList,
     ) -> Result<PartialSsaDeconstruction, <DataOrigin as LatticeElement>::Conflict> {
         let mut state: MirGraphState<DataOrigin, PartialSsaDeconstruction> = MirGraphState::default();
+        state.1.insert_root_parameters(self, &mut state.0);
         WorkListFixpointForward.solve(self, &mut state, DataOrigin::upper)?;
 
         println!("result of joined data origin resolution:");
@@ -2000,6 +2007,25 @@ impl MirFlowGraph {
         state.1.consolidate(&mut state.0, lifeness);
         state.1.reduce_further(lifeness, self);
         Ok(state.1)
+    }
+
+    /// Find SESE regions in the call graph.
+    /// SESE regions, or single-entry single-exit regions are groups of CFG nodes that have a
+    /// single entry and single exit point.
+    /// These groups form, for example, around loops in the CFG.
+    /// By detecting CFGs and identifying statements that can be evaluated during compile-time in
+    /// these sub-graphs, whole regions of the CFG can be collapsed into single nodes that pass
+    /// through runtime values in block parameters and populate output values through constant
+    /// [MirData] expressions.
+    ///
+    /// This brings tremendous benefit to runtime execution, as constructs such as loops that can
+    /// be evaluated during compiletime, are actually fully evaluated in compile-time.
+    /// As EDL has a strong emphasis on its `comptime` features, strong constant propagation and
+    /// compiletime-execution on a MIR level is essential to the code-transformation flow of the
+    /// langauge.
+    /// Thus, SESE region analysis forms a vital part of the compilers internals.
+    pub fn sese_analysis() {
+        todo!()
     }
 }
 

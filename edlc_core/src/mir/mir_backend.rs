@@ -62,7 +62,7 @@ pub trait Backend: Sized {
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;
 
     /// Returns a function binding for an intrinsic function based on a MIR function ID.
-    fn intrinsic_binding(&self, func: MirFuncId) -> &FunctionBinding;
+    fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding>;
 }
 
 

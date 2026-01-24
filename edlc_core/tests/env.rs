@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use std::thread::current;
+use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
@@ -99,6 +100,35 @@ impl TestCompiler {
         Ok(hir)
     }
 
+    fn compile_module(
+        &mut self,
+        module: &QualifierName,
+        src: &ModuleSrc,
+    ) -> Result<(), anyhow::Error> {
+        let mut hir = self.compiler.parse_module(src.clone(), module.clone())?;
+        self.compiler.phase.report_mode.print_errors = true;
+        self.compiler.phase.report_mode.print_warnings = true;
+
+        match self.compiler.prepare_mir() {
+            Ok(()) => (),
+            Err(err) => {
+                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
+                return Err(anyhow!(err));
+            }
+        }
+
+        hir.register_function_definitions(&mut self.backend.func_reg_mut());
+
+        // let mut infer_state = InferState::new();
+        // let _errors = hir.transform(&mut self.compiler.phase, &mut infer_state);
+        // let errors = hir.verify(&mut self.compiler.phase, &mut infer_state);
+        //
+        // for error in errors {
+        //     return Err(anyhow!(error));
+        // }
+        Ok(())
+    }
+
     fn compile_expr(
         &mut self,
         module: &QualifierName,
@@ -148,6 +178,31 @@ impl TestCompiler {
         deconstruction.print_ranges();
         deconstruction.print_mapping(&body);
 
+        let mut vm = ExecutorVM::new(1024 * 1024);
+        {
+            let mut mir_pass = {
+                let binding = self.backend.funcs.borrow_mut();
+                binding.collect_mir_pass()
+            };
+            // do MIR transformation and optimization passes
+            for body in mir_pass.iter_mut() {
+                println!("transforming function body...");
+                let lifeness = body.body.lifetimes(&self.compiler.mir_phase.types)?;
+                let deconstruction = body.body.deconstruct(&lifeness)?;
+                let options = StackFrameOptions {
+                    store_plane: true,
+                    .. Default::default()
+                };
+                let stack_frame = StackFrameLayout::new(
+                    &deconstruction, options, &body.body, &self.compiler.mir_phase.types);
+                body.stack_frame_layout = Some(stack_frame);
+            }
+
+            // finish mir pass
+            let mut binding = self.backend.funcs.borrow_mut();
+            binding.finish_mir_pass(mir_pass);
+        }
+
         // create stack frame
         let options = StackFrameOptions {
             store_plane: true,
@@ -155,7 +210,6 @@ impl TestCompiler {
         };
         let mut stack_frame = StackFrameLayout::new(
             &deconstruction, options, &body, &self.compiler.mir_phase.types);
-        let mut vm = ExecutorVM::new(1024 * 1024);
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body
             .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
@@ -466,8 +520,8 @@ impl Backend for TestBackend {
         self.funcs.borrow_mut()
     }
 
-    fn intrinsic_binding(&self, func: MirFuncId) -> &FunctionBinding {
-        self.intrinsics.get(&func).unwrap()
+    fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding> {
+        self.intrinsics.get(&func)
     }
 }
 
@@ -558,9 +612,22 @@ fn test_env() -> Result<(), anyhow::Error> {
     };
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
 
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+fn test_function(val: f32) -> f32 {
+    std::print("Hello, World! from the test function. ");
+    std::print(val as i32);
+    std::print("\n");
+    val * 67.0
+}
+    "#))?;
 
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
+        let return_value = test_function(3.1415);
+        std::print("value returned by test function: ");
+        std::print(return_value as i32);
+        std::print("\n");
+
         let i: i32 = 3 + 2;
         let x = if i == 3 {
             std::print("something is very wrong here!\n");
