@@ -18,6 +18,7 @@ mod acsii_printer;
 mod deconstruction;
 mod const_propagation;
 pub mod lifetime_analysis;
+mod sese;
 
 use std::cmp::Ordering;
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
@@ -1321,6 +1322,21 @@ impl MirFlowGraph {
         MirBlockRef(0)
     }
 
+    fn outgoing(&self, block: &MirBlockRef) -> Vec<MirBlockRef> {
+        self.blocks[block.0].down_link()
+    }
+
+    fn incoming(&self, block: &MirBlockRef) -> &Vec<MirBlockRef> {
+        &self.backlinks[block.0]
+    }
+
+    /// All links for the block, incoming and outgoing.
+    fn all_links(&self, block: &MirBlockRef) -> Vec<MirBlockRef> {
+        let mut links = self.outgoing(block);
+        links.extend_from_slice(self.incoming(block));
+        links
+    }
+
     fn new_scope(&mut self) -> Scope {
         let scope = self.scope_counter;
         self.scope_counter += 1;
@@ -2026,6 +2042,59 @@ impl MirFlowGraph {
     /// Thus, SESE region analysis forms a vital part of the compilers internals.
     pub fn sese_analysis() {
         todo!()
+    }
+
+    /// Iterates over all blocks in the CFG.
+    pub fn blocks(&self) -> BlockIter {
+        BlockIter { range: 0..self.blocks.len(), index: 0 }
+    }
+
+    /// Iterates over the exit blocks in the CFG.
+    pub fn exit_blocks(&self) -> ExitBlockIter<'_> {
+        ExitBlockIter {
+            cfg: self,
+            index: 0,
+        }
+    }
+}
+
+pub struct ExitBlockIter<'cfg> {
+    cfg: &'cfg MirFlowGraph,
+    index: usize,
+}
+
+impl<'cfg> Iterator for ExitBlockIter<'cfg> {
+    type Item = MirBlockRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(e) = self.cfg.blocks.get(self.index) {
+                self.index += 1;
+                if matches!(&e.seal, Seal::Return(_) | Seal::Panic(_)) {
+                    break Some(MirBlockRef(self.index - 1))
+                }
+            } else {
+                break None;
+            }
+        }
+    }
+}
+
+pub struct BlockIter {
+    range: Range<usize>,
+    index: usize,
+}
+
+impl Iterator for BlockIter {
+    type Item = MirBlockRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.range.contains(&self.index) {
+            self.index += 1;
+            Some(MirBlockRef(self.index - 1))
+        } else {
+            None
+        }
     }
 }
 
