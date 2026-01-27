@@ -17,11 +17,12 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 use std::mem;
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +30,6 @@ pub struct MirData {
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub src: ModuleSrc,
-    pub id: MirUid,
     pub ty: MirTypeId,
     pub value: Vec<u8>,
 }
@@ -57,6 +57,14 @@ impl MirData {
         let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
         assert_eq!(target_ty, &self.ty);
         vm.copy_bytes(target_range.start, self.value.as_slice());
+    }
+
+    /// A raw data set is by definition supposed to be constant.
+    #[inline(always)]
+    pub fn is_comptime(
+        &self,
+    ) -> bool {
+        true
     }
 
     pub fn as_usize<B: Backend>(&self, phase: &MirPhase) -> Result<usize, MirError<B>> {

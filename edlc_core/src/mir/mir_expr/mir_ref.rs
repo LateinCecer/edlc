@@ -2,7 +2,9 @@
 
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_backend::Backend;
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
 
@@ -520,6 +522,31 @@ impl MirRef {
             }
         }
     }
+
+    pub(super) fn is_comptime(
+        &self,
+        frame: &ConstFrame,
+    ) -> bool {
+        match &self.offset {
+            RefOffset::Entire => frame.is_avail(&self.value),
+            RefOffset::Const(_) => frame.is_avail(&self.value),
+            RefOffset::ArrayIndex { index, .. } => {
+                frame.is_avail(&self.value) && frame.is_avail(index)
+            }
+            RefOffset::SliceIndex { index, slice_size, .. } => {
+                frame.is_avail(&self.value) && frame.is_avail(index) && frame.is_avail(slice_size)
+            }
+            RefOffset::ArrayRange { start, end, .. } => {
+                frame.is_avail(&self.value) && frame.is_avail(start) && frame.is_avail(end)
+            }
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
+                frame.is_avail(&self.value)
+                    && frame.is_avail(start)
+                    && frame.is_avail(end)
+                    && frame.is_avail(slice_size)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -618,6 +645,13 @@ impl MirDeref {
             target_buf.read_ptr(ptr);
         }
     }
+
+    pub(super) fn is_comptime(
+        &self,
+        frame: &ConstFrame,
+    ) -> bool {
+        frame.is_avail(&self.value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -671,5 +705,12 @@ impl MirDowncastRef {
         let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
         assert_eq!(reg.get_ref_type(target_ty).unwrap(), reg.get_mut_ref_type(value_ty).unwrap());
         vm.memcpy_slice(&[*target], &[self.value], stack_frame);
+    }
+
+    pub(super) fn is_comptime(
+        &self,
+        frame: &ConstFrame,
+    ) -> bool {
+        frame.is_avail(&self.value)
     }
 }

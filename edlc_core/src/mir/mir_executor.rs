@@ -18,10 +18,15 @@ use std::mem::MaybeUninit;
 use std::{mem, ops};
 use std::collections::HashMap;
 use crate::core::EdlVarId;
+use crate::file::ModuleSrc;
+use crate::lexer::SrcPos;
+use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::StackFrameLayout;
 use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::MirUid;
 use crate::prelude::mir_expr::MirValue;
+use crate::resolver::ScopeId;
 
 pub struct AmorphusDataMut<'a> {
     data: &'a mut [u8],
@@ -70,8 +75,13 @@ impl<'a> AmorphusData<'a> {
             ty: self.ty,
         }
     }
+
+    pub fn as_slice(&self) -> &'a [u8] {
+        self.data
+    }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct AmorphusDataCopy {
     align: usize,
     data: Vec<u8>,
@@ -121,6 +131,16 @@ impl AmorphusDataCopy {
 
     pub fn as_data_mut(&mut self) -> AmorphusDataMut<'_> {
         AmorphusDataMut { data: &mut self.data[..], ty: self.ty }
+    }
+
+    pub fn into_mir(self, pos: SrcPos, src: ModuleSrc, scope: ScopeId) -> MirData {
+        MirData {
+            value: self.data,
+            ty: self.ty,
+            pos,
+            src,
+            scope,
+        }
     }
 }
 

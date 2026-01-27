@@ -17,7 +17,9 @@
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
+use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -68,6 +70,22 @@ impl MirArrayInit {
                     let element_range = offset..(offset + layout.element_size);
                     vm.memcpy(&(element_range, src.1), src);
                 }
+            }
+        }
+    }
+
+    /// Array init operator is comptime when all elements in the init list are also known at
+    /// the time of execution
+    pub(super) fn is_comptime(
+        &self,
+        frame: &ConstFrame,
+    ) -> bool {
+        match &self.elements {
+            MirArrayInitVariant::List(els) => {
+                els.iter().all(|value| frame.is_avail(value))
+            }
+            MirArrayInitVariant::Copy { val, len: _ } => {
+                frame.is_avail(val)
             }
         }
     }

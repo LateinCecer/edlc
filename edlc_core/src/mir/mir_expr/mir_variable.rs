@@ -35,10 +35,11 @@ use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
@@ -78,6 +79,14 @@ impl MirGlobalVar {
     ) {
         let global_var_offset = vm.get_global(&self.var);
         vm.write_ptr(*target, global_var_offset, stack_frame, reg);
+    }
+
+    /// For now, we will say that globals are always available at compile time.
+    #[inline(always)]
+    pub fn is_comptime(
+        &self,
+    ) -> bool {
+        true
     }
 
     /// Performs some basic assertion checks on the types of this MIR expression.

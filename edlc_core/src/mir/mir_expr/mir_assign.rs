@@ -16,8 +16,10 @@
 
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
+use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_variable::MirOffset;
-use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -54,6 +56,13 @@ impl MirAssign {
         unsafe {
             std::ptr::copy(value.as_ptr(), dst_ptr, value_range.len());
         }
+    }
+
+    pub(super) fn is_comptime(
+        &self,
+        frame: &ConstFrame,
+    ) -> bool {
+        frame.is_avail(&self.lhs) && frame.is_avail(&self.rhs)
     }
 
     pub fn assert_check(&self, graph: &MirFlowGraph, types: &MirTypeRegistry) {

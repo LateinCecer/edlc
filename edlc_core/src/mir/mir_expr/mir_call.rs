@@ -16,12 +16,14 @@
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use crate::prelude::mir_expr::mir_graph::report_comptime_unknown;
 use crate::resolver::ScopeId;
 
 
@@ -121,6 +123,27 @@ impl MirCall {
         let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
         let [mut target] = vm.get_data_mut([target_range.clone()], &[*target_ty]);
         target.memcpy(&ret_value.as_data());
+    }
+
+    /// A [MirCall] is executable at compile-time of all parameters are available at compile time
+    /// and if the function itself is marked as `comptime` or `?comptime`.
+    pub(super) fn is_comptime(
+        &self,
+        backend: &impl Backend,
+        frame: &ConstFrame,
+    ) -> bool {
+        let funcs = backend.func_reg();
+        if !funcs.is_comptime(self.func).unwrap() {
+            return false;
+        }
+
+        for comp_param in self.comptime_args.iter() {
+            if !frame.is_avail(&comp_param.value_expr) {
+                report_comptime_unknown(comp_param.value_expr);
+                panic!();
+            }
+        }
+        self.args.iter().all(|param| frame.is_avail(param))
     }
 
     fn check_usize<B: Backend>(

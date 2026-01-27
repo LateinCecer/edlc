@@ -670,7 +670,7 @@ impl<B: Backend> MirFuncRegistry<B> {
     /// can be evaluated at compiletime and replaced with a constant value at runtime, which may
     /// greatly improve runtime performance.
     pub fn is_comptime(&self, id: MirFuncId) -> Option<bool> {
-        self.generators.get(id.0).map(|gen| gen.comptime)
+        self.generators.get(id.0).map(|gen| gen.comptime || gen.comptime_only)
     }
 
     /// Returns `true` if this function can **only** be called during comptime.

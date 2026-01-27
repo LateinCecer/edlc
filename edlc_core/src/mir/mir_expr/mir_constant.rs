@@ -17,9 +17,11 @@
 use crate::core::edl_value::EdlLiteralValue;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirUid};
+use crate::mir::mir_backend::Backend;
+use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
@@ -100,6 +102,14 @@ impl MirConstant {
             }
             EdlLiteralValue::Empty() => (),
         }
+    }
+
+    #[inline(always)]
+    /// A constant is always constant (duh)
+    pub fn is_comptime(
+        &self,
+    ) -> bool {
+        true
     }
 }
 

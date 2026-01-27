@@ -19,6 +19,7 @@ mod deconstruction;
 mod const_propagation;
 pub mod lifetime_analysis;
 mod sese;
+mod const_eval;
 
 use std::cmp::Ordering;
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
@@ -51,6 +52,8 @@ use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
+pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{ConstFrame, report_comptime_unknown};
+use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
@@ -518,6 +521,10 @@ struct Block {
     /// block.
     parameters: Vec<MirValue>,
     ctx: Context,
+    // source code context
+    src: ModuleSrc,
+    pos: SrcPos,
+    scope: ScopeId,
 }
 
 impl Block {
@@ -1050,6 +1057,9 @@ pub struct BlockBuilder<'graph> {
     parent: Option<MirBlockRef>,
     create_scope: bool,
     ctx: Context,
+    src: Option<ModuleSrc>,
+    pos: Option<SrcPos>,
+    scope: Option<ScopeId>,
 }
 
 impl<'a> BlockBuilder<'a> {
@@ -1078,12 +1088,27 @@ impl<'a> BlockBuilder<'a> {
         } else {
             vec![self.graph.new_scope()]
         };
+
+        let src_info = if let Some(parent) = self.parent {
+            let parent = &self.graph.blocks[parent.0];
+            (
+                self.src.unwrap_or_else(|| parent.src.clone()),
+                self.pos.unwrap_or_else(|| parent.pos.clone()),
+                self.scope.unwrap_or_else(|| parent.scope),
+            )
+        } else {
+            (self.src.unwrap(), self.pos.unwrap(), self.scope.unwrap())
+        };
+
         self.graph.blocks.push(Block {
             statements: vec![],
             active_scopes,
             parameters: vec![],
             seal: Seal::None,
             ctx: self.ctx,
+            src: src_info.0,
+            pos: src_info.1,
+            scope: src_info.2,
         });
         MirBlockRef(self.graph.blocks.len() - 1)
     }
@@ -1102,7 +1127,14 @@ pub struct ExecutionError {
 }
 
 impl MirFlowGraph {
-    pub fn new<I: Iterator<Item=MirTypeId>>(parameters: I, return_type: MirTypeId, ctx: Context) -> Self {
+    pub fn new<I: Iterator<Item=MirTypeId>>(
+        parameters: I,
+        return_type: MirTypeId,
+        ctx: Context,
+        src: ModuleSrc,
+        pos: SrcPos,
+        scope_id: ScopeId,
+    ) -> Self {
         let mut out = Self {
             blocks: vec![],
             expressions: MirExprContainer::default(),
@@ -1126,6 +1158,9 @@ impl MirFlowGraph {
             parameters,
             seal: Seal::None,
             ctx,
+            src,
+            pos,
+            scope: scope_id,
         });
         out
     }
@@ -1352,6 +1387,9 @@ impl MirFlowGraph {
             create_scope: false,
             parent: None,
             ctx: Context::default(),
+            src: None,
+            pos: None,
+            scope: None,
         }
     }
 
@@ -1951,22 +1989,6 @@ impl MirFlowGraph {
             println!("${:x}: {}", node.0, const_state);
         }
         Ok(())
-    }
-
-    /// Resolves the constants in the flow graph.
-    /// Since constant propagation requires an executor to actually execute constant expressions,
-    /// we need to ship the executor in the parameters of this method.
-    /// To propagate constants in function bodies of hybrid functions, we need to ship the regions
-    /// in the executor VM in which the compile-time parameters reside.
-    pub fn propagate_constants(
-        &mut self,
-        comptime_params: &[(Range<usize>, MirTypeId)],
-        vm: &mut ExecutorVM,
-        mir_types: &MirTypeRegistry,
-        backend: &mut impl Backend,
-    ) -> Result<(), ExecutionError> {
-
-        todo!()
     }
 
     /// Performs a non-lexical lifetime analysis on the call graph.
