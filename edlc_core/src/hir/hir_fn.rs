@@ -654,7 +654,14 @@ impl HirFn {
                 .map(|param| param.ty));
 
         let return_type = signature.ret;
-        let mut body = MirFlowGraph::new(parameters.into_iter(), return_type, ctx);
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            return_type,
+            ctx,
+            self.signature.src.clone(),
+            self.signature.pos,
+            self.signature.scope,
+        );
         let ret_value = body.create_temp_variable(return_type);
 
         // create variable mapper and inset function parameters

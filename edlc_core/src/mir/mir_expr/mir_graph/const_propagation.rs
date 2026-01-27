@@ -369,13 +369,6 @@ mod tests {
         let mut compiler = EdlCompiler::new();
         compiler.prepare_mir().unwrap();
 
-        let mut graph = MirFlowGraph::new(
-            [].into_iter(),
-            compiler.mir_phase.types.empty(),
-            Context::Runtime,
-        );
-        let mut current_block = graph.root();
-
         /*
         Here is the following code that we kind of, sort of, hand translate to MIR:
 

@@ -20,17 +20,8 @@ mod const_propagation;
 pub mod lifetime_analysis;
 mod sese;
 mod const_eval;
+mod borrow;
 
-use std::cmp::Ordering;
-use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
-use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant, MirRef};
-use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, PropagationWorkListForward, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
-use std::collections::{HashMap, HashSet};
-use std::env::current_exe;
-use std::fmt::{Debug, Display};
-use std::ops;
-use std::ops::{Deref, Range};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
@@ -40,10 +31,19 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
+use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
 use crate::mir::mir_expr::mir_ref::MirDowncastRef;
+use crate::mir::mir_expr::{MirDeref, MirExprContainer, MirExprId, MirExprVariant, MirRef};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::{AmorphusDataCopy, ExecutorVM, ModuleSrc};
+use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::fmt::{Debug, Display};
+use std::ops::{Deref, Range};
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext, BorrowState};
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, PartialSsaDeconstruction};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
@@ -51,8 +51,8 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
+pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
-pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{ConstFrame, report_comptime_unknown};
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -2017,6 +2017,18 @@ impl MirFlowGraph {
         Ok(liveness)
     }
 
+    pub fn borrows(
+        &self,
+        mir_types: &MirTypeRegistry,
+    ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
+        let borrow_state = BorrowContext::new(mir_types, self);
+        let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
+        WorkListFixpointForward.solve(self, &mut state, BorrowState::upper)?;
+
+        println!("result of borrow state analysis");
+        todo!()
+    }
+
     /// Deconstructs the SSA variable tree in the call graph.
     /// Since most of the deconstruction is left for the codegen backend, this function only
     /// performs a partial deconstruction.
@@ -2138,6 +2150,12 @@ pub struct MirGraphState<V, State>(HashNodeState<MirValue, V>, State);
 impl<V, State: Default> Default for MirGraphState<V, State> {
     fn default() -> Self {
         Self(HashNodeState::default(), State::default())
+    }
+}
+
+impl<V, State> MirGraphState<V, State> {
+    fn new(state: State) -> Self {
+        Self(HashNodeState::default(), state)
     }
 }
 
