@@ -238,17 +238,41 @@ impl<'reg> BorrowContext<'reg> {
     }
 }
 
+/// The borrow stack is a series of partial borrows that are executed in order to arrive at the
+/// borrow state target.
+#[derive(PartialEq, Eq, Debug, Default, Clone, Hash)]
+struct PartialBorrowStack {
+    stack: Vec<MemberOffset>,
+}
+
+/// A borrow state can be derived for each value that is borrowed in some way.
+/// It effectively encodes the source of the borrow and a series of partial borrows that are
+/// involved in getting to that target.
+/// With this information, a simple depth-first search can be used to traverse the borrow graph and
+/// resolve dependencies between borrowed quantities.
+///
+/// # Usage Outside the Borrow-Checker
+///
+/// This data structure and analysis pattern is useful even outside the Borrow-Checker.
+/// Specifically, it can be used to analyse the transitive states of asynchronous data.
+#[derive(PartialEq, Eq, Debug, Clone, Hash)]
+pub struct BorrowPath {
+    source: BorrowSource,
+    stack: PartialBorrowStack,
+}
+
+/// A borrow state is a collection of borrow paths that can lead to the same target.
 #[derive(PartialEq, Eq, Debug, Default, Clone)]
-pub struct BorrowState(HashSet<Borrow>);
+pub struct BorrowState(HashSet<BorrowPath>);
 
 impl IsDefault for BorrowState {
     fn is_default(&self) -> bool {
-        self.is_empty()
+        self.0.is_empty()
     }
 }
 
 impl Deref for BorrowState {
-    type Target = HashSet<Borrow>;
+    type Target = HashSet<BorrowPath>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -267,6 +291,18 @@ impl Display for BorrowConflict {
 impl std::error::Error for BorrowConflict {}
 
 impl BorrowState {
+    /// Extends the borrow state with the specified partial borrow.
+    /// In the case of a complete borrow, we can just clone the entire borrow state.
+    fn partial_borrow(&self, borrow: MemberOffset) -> Self {
+        let states = self.0.iter().map(|path| {
+            let mut path = path.clone();
+            path.stack.stack.push(borrow);
+            path
+        })
+            .collect();
+        BorrowState(states)
+    }
+
     fn and(&self, other: &Self) -> Self {
         BorrowState(self.union(other).cloned().collect())
     }
@@ -290,7 +326,11 @@ impl LatticeElement for BorrowState {
     type Conflict = BorrowConflict;
 
     fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
-        Ok(BorrowState(self.intersection(&other).cloned().collect::<HashSet<_>>()))
+        if &self.source == &other.source {
+
+        } else {
+            Ok(Self::default())
+        }
     }
 
     fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
