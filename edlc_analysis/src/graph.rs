@@ -871,7 +871,7 @@ pub trait CfgNodeState<V: LatticeElement>: PartialEq + Eq + Sized {
 
 #[derive(Debug)]
 pub struct HashNodeState<I: Hash + PartialEq + Clone, E> {
-    map: HashMap<I, E>,
+    pub map: HashMap<I, E>,
 }
 
 pub trait IsDefault: Default {

@@ -17,7 +17,7 @@ use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -62,8 +62,9 @@ impl MirTypeInit {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
-        self.inits.iter().all(|param| frame.is_avail(&param.val))
+        self.inits.iter().all(|param| frame.is_avail(&param.val, graph))
     }
 }
 

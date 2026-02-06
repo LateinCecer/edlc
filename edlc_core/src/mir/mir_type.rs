@@ -394,6 +394,12 @@ pub struct MemberOffset {
     pub align: usize,
 }
 
+impl Display for MemberOffset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:08x} ({:08x} bytes)", self.offset, self.size)
+    }
+}
+
 pub trait MirAggregateTypeLayout {
     type Index<'a>: ?Sized;
 

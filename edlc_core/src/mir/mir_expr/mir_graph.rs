@@ -43,7 +43,7 @@ use std::fmt::{Debug, Display};
 use std::ops::{Deref, Range};
 
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext, BorrowState};
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext};
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, PartialSsaDeconstruction};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
@@ -52,6 +52,7 @@ use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame};
+pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::resolver::ScopeId;
 
@@ -2017,16 +2018,19 @@ impl MirFlowGraph {
         Ok(liveness)
     }
 
+    /// Analyzes the borrow relations in the CFG.
     pub fn borrows(
         &self,
         mir_types: &MirTypeRegistry,
-    ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
+    ) -> Result<BorrowGraph, <BorrowState as LatticeElement>::Conflict> {
         let borrow_state = BorrowContext::new(mir_types, self);
         let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
         WorkListFixpointForward.solve(self, &mut state, BorrowState::upper)?;
+        let graph = BorrowGraph::new(state.0.map);
 
-        println!("result of borrow state analysis");
-        todo!()
+        println!("result of borrow state analysis:");
+        graph.print();
+        Ok(graph)
     }
 
     /// Deconstructs the SSA variable tree in the call graph.

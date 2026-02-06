@@ -30,6 +30,7 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
+use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -42,6 +43,7 @@ struct CompilerInfo {
 pub struct HirDeref {
     pub pos: SrcPos,
     pub src: ModuleSrc,
+    pub scope: ScopeId,
     pub uid: HirUid,
     pub value: Box<HirExpression>,
     compiler_info: Option<CompilerInfo>,
@@ -52,6 +54,7 @@ impl HirDeref {
         HirDeref {
             pos: value.pos(),
             src: value.src().clone(),
+            scope: *value.scope(),
             uid,
             value,
             compiler_info: None,

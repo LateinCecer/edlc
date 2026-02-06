@@ -149,22 +149,23 @@ impl MirExprContainer {
         expr: MirExprId,
         backend: &impl Backend,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
         match &expr.ty {
-            MirExprVariant::ArrayInit => self.array_inits[expr.id].is_comptime(frame),
-            MirExprVariant::As => self.ases[expr.id].is_comptime(frame),
-            MirExprVariant::Call => self.call[expr.id].is_comptime(backend, frame),
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].is_comptime(frame, graph),
+            MirExprVariant::As => self.ases[expr.id].is_comptime(frame, graph),
+            MirExprVariant::Call => self.call[expr.id].is_comptime(backend, frame, graph),
             MirExprVariant::Literal => self.literals[expr.id].is_comptime(),
             MirExprVariant::Variable => self.variables[expr.id].is_comptime(),
             MirExprVariant::Constant => self.constants[expr.id].is_comptime(),
-            MirExprVariant::Assign => self.assigns[expr.id].is_comptime(frame),
+            MirExprVariant::Assign => self.assigns[expr.id].is_comptime(frame, graph),
             MirExprVariant::Let => { todo!() },
             MirExprVariant::Data => self.data[expr.id].is_comptime(),
             MirExprVariant::Offset => { todo!() },
-            MirExprVariant::Init => self.type_inits[expr.id].is_comptime(frame),
-            MirExprVariant::Ref => self.refs[expr.id].is_comptime(frame),
-            MirExprVariant::Deref => self.derefs[expr.id].is_comptime(frame),
-            MirExprVariant::DowncastRef => self.downcasts[expr.id].is_comptime(frame),
+            MirExprVariant::Init => self.type_inits[expr.id].is_comptime(frame, graph),
+            MirExprVariant::Ref => self.refs[expr.id].is_comptime(frame, graph),
+            MirExprVariant::Deref => self.derefs[expr.id].is_comptime(frame, graph),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].is_comptime(frame, graph),
         }
     }
 

@@ -31,6 +31,7 @@ use crate::mir::mir_expr::{MirDowncastRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::edl_fn::EdlFnArgument;
+use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -43,6 +44,7 @@ struct CompilerInfo {
 pub struct HirRef {
     pub pos: SrcPos,
     pub src: ModuleSrc,
+    pub scope: ScopeId,
     pub uid: HirUid,
     pub mutable: bool,
     value: Box<HirExpression>,
@@ -54,6 +56,7 @@ impl HirRef {
         Self {
             pos: value.pos(),
             src: value.src().clone(),
+            scope: *value.scope(),
             uid,
             mutable,
             value,

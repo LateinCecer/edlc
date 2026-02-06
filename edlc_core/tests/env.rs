@@ -145,7 +145,14 @@ impl TestCompiler {
         let parameters = [];
         let return_type = self.compiler.mir_phase.types.empty();
         let ctx = Context::Runtime;
-        let mut body = MirFlowGraph::new(parameters.into_iter(), return_type, ctx);
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            return_type,
+            ctx,
+            src.clone(),
+            SrcPos::default(),
+            *hir.scope(),
+        );
         let ret_value = body.create_temp_variable(return_type);
 
         let mut var_mapper = VariableMapper::new();
@@ -177,6 +184,7 @@ impl TestCompiler {
         let deconstruction = body.deconstruct(&lifeness)?;
         deconstruction.print_ranges();
         deconstruction.print_mapping(&body);
+        let borrows = body.borrows(&self.compiler.mir_phase.types)?;
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         {
@@ -189,6 +197,8 @@ impl TestCompiler {
                 println!("transforming function body...");
                 let lifeness = body.body.lifetimes(&self.compiler.mir_phase.types)?;
                 let deconstruction = body.body.deconstruct(&lifeness)?;
+                let borrows = body.body.borrows(&self.compiler.mir_phase.types)?;
+
                 let options = StackFrameOptions {
                     store_plane: true,
                     .. Default::default()

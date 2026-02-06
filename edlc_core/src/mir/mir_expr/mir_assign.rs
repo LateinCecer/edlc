@@ -19,7 +19,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_variable::MirOffset;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -61,8 +61,9 @@ impl MirAssign {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
-        frame.is_avail(&self.lhs) && frame.is_avail(&self.rhs)
+        frame.is_avail(&self.lhs, graph) && frame.is_avail(&self.rhs, graph)
     }
 
     pub fn assert_check(&self, graph: &MirFlowGraph, types: &MirTypeRegistry) {

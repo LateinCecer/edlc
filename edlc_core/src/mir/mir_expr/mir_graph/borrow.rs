@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::cmp::Ordering;
 use crate::core::EdlVarId;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -24,7 +25,7 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, Tr
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{MirGlobalVar, MirOffset};
+use crate::mir::mir_expr::mir_variable::{MirGlobalVar};
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
@@ -54,103 +55,125 @@ struct PartialBorrowSequence {
     idx: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FlowState {
+    Fixed,
+    Floating,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReferenceState<V> {
+    states: HashMap<BorrowPath, usize>,
+    values: Vec<V>,
+}
+
+impl<V> Default for ReferenceState<V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<V> ReferenceState<V> {
+    fn new() -> Self {
+        Self { states: HashMap::new(), values: vec![] }
+    }
+
+    fn get_state(&self, b: &BorrowPath) -> Option<&V> {
+        self.states.get(b).and_then(|idx| self.values.get(*idx))
+    }
+
+    fn set_state(&mut self, b: BorrowPath, v: V) {
+        let id = self.values.len();
+        self.values.push(v);
+        self.states.insert(b, id);
+    }
+
+    pub fn set_value(&mut self, value: MirValue, v: V, graph: &BorrowGraph) {
+        let Some(state) = graph.get_paths(&value) else {
+            return;
+        };
+        let idx = self.values.len();
+        self.values.push(v);
+        state.set.iter().for_each(|path| {
+            self.states.insert(path.clone(), idx);
+        });
+    }
+
+    /// Gets the maximum state for the specified value.
+    pub fn get_value(
+        &self,
+        value: &MirValue,
+        graph: &BorrowGraph,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    ) -> Option<&V> {
+        let Some(state) = graph.get_paths(value) else {
+            return None;
+        };
+
+        let mut out = None;
+        for path in state.iter() {
+            let Some(path_state) = self.get_state(path) else {
+                continue;
+            };
+            if let Some(out) = out.as_mut() {
+                if op(path_state, *out).is_gt() {
+                    *out = path_state;
+                }
+            } else {
+                out = Some(path_state);
+            }
+        }
+        out
+    }
+}
+
+/// A borrow graph is a directed graph that encodes the relationships between the different
+/// variables that are borrowed in some way.
 pub struct BorrowGraph {
     graph: HashMap<MirValue, BorrowState>,
-    reverse_graph: HashMap<BorrowSource, HashSet<Borrowee>>,
 }
 
 impl BorrowGraph {
     pub fn new(graph: HashMap<MirValue, BorrowState>) -> Self {
-        let mut reverse_graph: HashMap<BorrowSource, HashSet<Borrowee>> = HashMap::new();
-        for (value, state) in graph.iter() {
-            state.iter().for_each(|src| {
-                reverse_graph.entry(src.from.clone())
-                    .or_insert_with(HashSet::new)
-                    .insert(Borrowee {
-                        to: *value,
-                        ty: src.ty.clone(),
-                        mutable: src.mutable,
-                    });
-            });
-        }
         BorrowGraph {
             graph,
-            reverse_graph,
         }
     }
 
-    /// Finds crossroad waypoints by backtracking the borrow graph.
-    /// Each waypoint comes with a recording of the partial borrow sequence that way traversed to
-    /// reach that point.
-    fn waypoints(&self, value: MirValue) -> Vec<(BorrowSource, Vec<MemberOffset>)> {
-        let mut waypoints: Vec<(BorrowSource, Vec<MemberOffset>)> = Vec::new();
-        let mut worklist: Vec<(BorrowSource, Vec<MemberOffset>)> = vec![(value.into(), Vec::new())];
-
-        while let Some((value, borrow_stack)) = worklist.pop() {
-            match value {
-                BorrowSource::Local(value) => {
-                    // get obligations of local value
-                    if let Some(state) = self.graph.get(&value) {
-                        for obligation in state.iter() {
-                            let mut borrow_stack = borrow_stack.clone();
-                            match &obligation.ty {
-                                BorrowType::Partial(partial_offset) => {
-                                    borrow_stack.push(*partial_offset);
-                                }
-                                BorrowType::Complete => (),
-                            }
-                            worklist.push((obligation.from, borrow_stack));
-                        }
-                    }
-                },
-                BorrowSource::Global(_) => (),
-            }
-            waypoints.push((value, borrow_stack));
-        }
-        waypoints
+    /// Checks if `value` borrows from the borrow path `path`.
+    /// This is the case if any of the borrow paths of `value` is not fully divergent from `path`.
+    pub fn borrows_from(&self, value: &MirValue, path: &BorrowPath) -> bool {
+        let Some(state) = self.graph.get(value) else {
+            return false;
+        };
+        state.iter().any(|value_path| !BorrowPath::is_divergent(value_path, path))
     }
 
-    /// Tracks all relations in the borrow graph by doing a forward traversal from the specified
-    /// waypoints.
-    /// For each waypoint, a specific sequence of partial borrows must be matched for the variable
-    /// to be considered related to the waypoints.
-    /// If a branch reaches the point at which the borrow sequence is exhausted, every successive
-    /// partial borrow will automatically be seen as related to the originating waypoint.
-    fn relations(&self, mut waypoints: Vec<(MirValue, Vec<MemberOffset>)>) -> HashSet<MirValue> {
-        let mut output_set = HashSet::<MirValue>::new();
-        while let Some((waypoint, borrow_stack)) = waypoints.pop() {
-            if output_set.insert(waypoint) {
-                continue; // waypoint already recorded
-            }
+    pub fn borrows_state(&self, value: &MirValue, state: &BorrowState) -> bool {
+        state.set.iter().any(|path| self.borrows_from(value, path))
+    }
 
-            // look at reverse obligation graph to find all values that borrow `paypoint`
-            let Some(forward_links) = self.reverse_graph.get(&BorrowSource::Local(waypoint)) else {
-                continue; // there is no forward links
-            };
+    pub fn get_paths(&self, value: &MirValue) -> Option<&BorrowState> {
+        self.graph.get(value)
+    }
 
-            for b in forward_links.iter() {
-                // add borrowee to worklist
-                let stack = match &b.ty {
-                    BorrowType::Partial(off) => {
-                        if let Some(last) = borrow_stack.last() {
-                            if last != off {
-                                continue; // borrowee is not affected
-                            }
-                            let mut stack = borrow_stack.clone();
-                            stack.pop();
-                            stack
-                        } else {
-                            vec![]
-                        }
-                    },
-                    BorrowType::Complete => {
-                        borrow_stack.clone()
-                    },
-                };
-                waypoints.push((b.to, stack));
+    pub fn print(&self) {
+        for (value, state) in self.graph.iter() {
+            if state.is_default() {
+                continue;
             }
+            print!(" - ${} borrows {{", value.0);
+            let mut first = true;
+            for path in state.set.iter() {
+                if first {
+                    first = false;
+                } else {
+                    print!(", ");
+                }
+                print!("{}", path);
+            }
+            println!("}}");
         }
-        output_set
     }
 }
 
@@ -236,6 +259,11 @@ impl<'reg> BorrowContext<'reg> {
         let ty = self.cfg.get_var_type(value);
         self.reg.is_mut_ref(ty)
     }
+
+    #[inline(always)]
+    fn is_borrow_type(&self, value: &MirValue) -> bool {
+        self.is_ref(value)
+    }
 }
 
 /// The borrow stack is a series of partial borrows that are executed in order to arrive at the
@@ -243,6 +271,41 @@ impl<'reg> BorrowContext<'reg> {
 #[derive(PartialEq, Eq, Debug, Default, Clone, Hash)]
 struct PartialBorrowStack {
     stack: Vec<MemberOffset>,
+}
+
+impl PartialBorrowStack {
+    pub fn is_subset(&self, other: &Self) -> bool {
+        if self.stack.len() > other.stack.len() {
+            return false;
+        }
+        for (lhs, rhs) in self.stack.iter()
+            .zip(other.stack[..self.stack.len()].iter()) {
+            if lhs != rhs {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Two partial borrow stacks are divergent if neither is a subset of the other.
+    /// In other words,
+    ///
+    /// ```
+    /// # let a = PartialBorrowStack::default();
+    /// # let b = PartialBorrowStack::default();
+    /// assert_eq!(a.is_divergent(&b), !a.is_subset(&b) && !b.is_subset(&a))
+    /// ```
+    pub fn is_divergent(&self, other: &Self) -> bool {
+        let len = usize::min(self.stack.len(), other.stack.len());
+        for (lhs, rhs) in self.stack[..len]
+            .iter()
+            .zip(other.stack[..len].iter()) {
+            if lhs != rhs {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// A borrow state can be derived for each value that is borrowed in some way.
@@ -259,15 +322,77 @@ struct PartialBorrowStack {
 pub struct BorrowPath {
     source: BorrowSource,
     stack: PartialBorrowStack,
+    path: Vec<MirValue>,
+}
+
+impl BorrowPath {
+    fn new(source: BorrowSource, ref_value: MirValue, offset: Option<MemberOffset>) -> Self {
+        if let Some(offset) = offset {
+            Self { source, stack: PartialBorrowStack { stack: vec![offset] }, path: vec![ref_value] }
+        } else {
+            Self { source, stack: PartialBorrowStack::default(), path: vec![ref_value] }
+        }
+    }
+
+    /// Extends the borrow path with another borrow.
+    /// The borrow records the exact [MirValue] that is used as a node in the path through the
+    /// data flow graph, as well as an optional offset into the parent borrow, in case of a partial
+    /// borrow.
+    /// If `offset` is `None`, the borrow is considered to be a full borrow of the entire value.
+    fn extend(&mut self, value: MirValue, offset: Option<MemberOffset>) {
+        if !self.path.contains(&value) {
+            // if the value has already been visited, we don't need to record it again, as at this
+            // point, the path must form a closed loop
+            self.path.push(value);
+        }
+        if let Some(offset) = offset {
+            self.stack.stack.push(offset);
+        }
+    }
+
+    /// If a borrow path is a subset of another borrow path, then changing the subset must also
+    /// affect the over arching path.
+    /// This method ignores the specific path of SSA values through which the borrow is channeled
+    /// and only takes into account if the sources match and if the [PartialBorrowStack] of the
+    /// LHS is a subset of the RHS [PartialBorrowStack].
+    fn is_subset(&self, other: &Self) -> bool {
+        if self.source != other.source {
+            return false;
+        }
+        self.stack.is_subset(&other.stack)
+    }
+
+    fn is_divergent(&self, other: &Self) -> bool {
+        if self.source != other.source {
+            return true;
+        }
+        self.stack.is_divergent(&other.stack)
+    }
+}
+
+impl Display for BorrowPath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}[", self.source)?;
+        for (i, offset) in self.stack.stack.iter().enumerate() {
+            if i > 0 {
+                write!(f, " -> ")?;
+            }
+            write!(f, "{}", offset)?;
+        }
+        write!(f, "]")
+    }
 }
 
 /// A borrow state is a collection of borrow paths that can lead to the same target.
 #[derive(PartialEq, Eq, Debug, Default, Clone)]
-pub struct BorrowState(HashSet<BorrowPath>);
+pub struct BorrowState {
+    set: HashSet<BorrowPath>,
+    mutable: bool,
+}
 
 impl IsDefault for BorrowState {
     fn is_default(&self) -> bool {
-        self.0.is_empty()
+        self.set.is_empty()
     }
 }
 
@@ -275,7 +400,7 @@ impl Deref for BorrowState {
     type Target = HashSet<BorrowPath>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.set
     }
 }
 
@@ -291,34 +416,62 @@ impl Display for BorrowConflict {
 impl std::error::Error for BorrowConflict {}
 
 impl BorrowState {
+    /// Creates a new borrow state from a single partial borrow.
+    /// The borrow state mut contain the source of the borrow, which can be an SSA value or a global
+    /// variable, a mutability modifier and an optional offset or a partial borrow.
+    fn new(
+        src: BorrowSource,
+        ref_value: MirValue,
+        offset: Option<MemberOffset>,
+        mutable: bool,
+    ) -> Self {
+        BorrowState {
+            set: HashSet::from([BorrowPath::new(src, ref_value, offset)]),
+            mutable,
+        }
+    }
+
+    #[inline(always)]
     /// Extends the borrow state with the specified partial borrow.
     /// In the case of a complete borrow, we can just clone the entire borrow state.
-    fn partial_borrow(&self, borrow: MemberOffset) -> Self {
-        let states = self.0.iter().map(|path| {
+    fn extend(
+        &self,
+        value: MirValue,
+        offset: Option<MemberOffset>,
+        mutable: bool,
+    ) -> Result<Self, BorrowConflict> {
+        let states = self.set.iter().map(|path| {
             let mut path = path.clone();
-            path.stack.stack.push(borrow);
+            path.extend(value, offset);
             path
         })
             .collect();
-        BorrowState(states)
+        // if mutable && !self.mutable {
+        //     return Err(BorrowConflict);
+        // }
+        Ok(BorrowState {
+            set: states,
+            mutable: self.mutable,
+        })
+    }
+
+    fn copy_reference(&self, value: MirValue) -> Self {
+        self.extend(value, None, self.mutable).unwrap()
     }
 
     fn and(&self, other: &Self) -> Self {
-        BorrowState(self.union(other).cloned().collect())
+        BorrowState {
+            set: self.union(other).cloned().collect(),
+            mutable: self.mutable & other.mutable,
+        }
     }
 
     fn and_assign(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for el in other.iter() {
-            changed |= !self.0.insert(el.clone());
+            changed |= !self.set.insert(el.clone());
         }
         changed
-    }
-
-    fn downcast(&self) -> Self {
-        BorrowState(self.iter().map(|s| {
-            s.downcast()
-        }).collect())
     }
 }
 
@@ -326,15 +479,17 @@ impl LatticeElement for BorrowState {
     type Conflict = BorrowConflict;
 
     fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
-        if &self.source == &other.source {
-
-        } else {
-            Ok(Self::default())
-        }
+        Ok(BorrowState {
+            set: self.intersection(&other).cloned().collect::<HashSet<_>>(),
+            mutable: self.mutable | other.mutable,
+        })
     }
 
     fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
-        Ok(BorrowState(self.union(&other).cloned().collect::<HashSet<_>>()))
+        Ok(BorrowState {
+            set: self.union(&other).cloned().collect::<HashSet<_>>(),
+            mutable: self.mutable & other.mutable,
+        })
     }
 
     fn is_lower_bound(&self, other: &Self) -> bool {
@@ -346,7 +501,10 @@ impl LatticeElement for BorrowState {
     }
 
     fn bottom() -> Self {
-        BorrowState(HashSet::new())
+        BorrowState {
+            set: HashSet::new(),
+            mutable: true,
+        }
     }
 
     fn top() -> Self {
@@ -394,17 +552,11 @@ impl<'reg> TransferCopy<BorrowContext<'reg>> for BorrowState {
     fn transfer_copy(
         value: &MirValue,
         input: &mut HashNodeState<MirValue, Self>,
-        ctx: &mut BorrowContext<'reg>,
+        _ctx: &mut BorrowContext<'reg>,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, Self::Conflict> {
-        Ok(input.replace(target, BorrowState(HashSet::from([
-            Borrow {
-                from: (*value).into(),
-                ty: BorrowType::Complete,
-                mutable: ctx.is_mut_ref(value),
-            }
-        ]))))
+        Ok(input.replace(target, input.element_value(value).copy_reference(*target)))
     }
 }
 
@@ -418,7 +570,7 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirArrayInit {
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        let mut out = BorrowState(HashSet::new());
+        let mut out = BorrowState::default();
         match &self.elements {
             MirArrayInitVariant::List(els) => {
                 els.iter().for_each(|element| {
@@ -535,22 +687,14 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirRef {
     ) -> Result<bool, BorrowConflict> {
         match &self.offset {
             RefOffset::Const(offset) => {
-                Ok(input.replace(target, BorrowState(HashSet::from([
-                    Borrow {
-                        from: self.value.into(),
-                        ty: BorrowType::Partial(offset.clone()),
-                        mutable: self.mutable,
-                    }
-                ]))))
+                Ok(input
+                    .replace(target, input
+                        .element_value(&self.value)
+                        .extend(*target, Some(offset.clone()), self.mutable)?))
             },
             _ => {
-                Ok(input.replace(target, BorrowState(HashSet::from([
-                    Borrow {
-                        from: self.value.into(),
-                        ty: BorrowType::Complete,
-                        mutable: self.mutable,
-                    }
-                ]))))
+                // offset is zero, so we actually create a new reference
+                Ok(input.replace(target, BorrowState::new(BorrowSource::Local(self.value), *target, None, self.mutable)))
             },
         }
     }
@@ -581,7 +725,7 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirDeref {
         let parent_borrows = input.element_value(&self.value);
         for borrow in parent_borrows.iter() {
             // get borrow obligations of this borrow obligation
-            if let BorrowSource::Local(from) = borrow.from {
+            if let BorrowSource::Local(from) = borrow.source {
                 let borrow_of_borrow = input.element_value(&from);
                 out.and_assign(&borrow_of_borrow);
             }
@@ -607,13 +751,9 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirDowncastRef {
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(input.replace(target, BorrowState(HashSet::from([
-            Borrow {
-                from: self.value.into(),
-                ty: BorrowType::Complete,
-                mutable: false,
-            }
-        ]))))
+        Ok(input.replace(target, input
+            .element_value(&self.value)
+            .extend(*target, None, false)?))
     }
 }
 
@@ -641,12 +781,7 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirGlobalVar {
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(input.replace(target, BorrowState(HashSet::from([
-            Borrow {
-                from: self.var.into(),
-                ty: BorrowType::Complete,
-                mutable: ctx.is_mut_ref(target),
-            }
-        ]))))
+        Ok(input.replace(target, BorrowState::new(BorrowSource::Global(
+            self.var.clone()), *target, None, ctx.is_mut_ref(target))))
     }
 }

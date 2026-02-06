@@ -19,9 +19,10 @@ use std::ops::Range;
 use crate::core::index_map::IndexMap;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, FlowState, ReferenceState};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
@@ -36,12 +37,13 @@ enum ConstEvalState {
 pub struct ConstEval {
     consts: IndexMap<ConstEvalState>,
     block_frame: ConstFrame,
+    borrow_graph: BorrowGraph,
 }
 
 /// Records with values are available in a const evaluation stack frame.
-#[derive(Default)]
 pub(crate) struct ConstFrame {
     avail: HashSet<MirValue>,
+    references: ReferenceState<FlowState>,
 }
 
 struct CallParameterCopy {
@@ -132,8 +134,8 @@ impl CallParameterCopy {
 }
 
 impl ConstFrame {
-    fn transfer_block_call(&self, call: &BlockCall, cfg: &MirFlowGraph) -> ConstFrame {
-        let mut block_frame = ConstFrame { avail: HashSet::new() };
+    fn transfer_block_call(&self, call: &BlockCall, cfg: &MirFlowGraph, parent: &ConstFrame) -> ConstFrame {
+        let mut block_frame = ConstFrame { avail: HashSet::new(), references: parent.references.clone() };
         for (caller_value, callee_value) in call.params
             .iter()
             .zip(cfg.blocks[call.target.0].parameters.iter()) {
@@ -145,16 +147,27 @@ impl ConstFrame {
         block_frame
     }
 
-    pub fn is_avail(&self, value: &MirValue) -> bool {
-        self.avail.contains(value)
+    pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
+        self.avail.contains(value) && self.references.get_value(value, graph, FlowState::cmp)
+            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
+    }
+
+    pub fn assign(&mut self, target: &MirValue, src: &MirValue, graph: &BorrowGraph) {
+        let state = if self.is_avail(src, graph) {
+            FlowState::Fixed
+        } else {
+            FlowState::Floating
+        };
+        self.references.set_value(*target, state, graph);
     }
 }
 
 impl ConstEval {
-    pub fn new() -> Self {
+    pub fn new(borrow_graph: BorrowGraph) -> Self {
         ConstEval {
             consts: IndexMap::default(),
-            block_frame: ConstFrame { avail: HashSet::new() },
+            block_frame: ConstFrame { avail: HashSet::new(), references: ReferenceState::default() },
+            borrow_graph,
         }
     }
 
@@ -170,14 +183,17 @@ impl ConstEval {
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
     ) {
-        let mut block_frame = ConstFrame::default();
+        let mut block_frame = ConstFrame {
+            avail: HashSet::new(),
+            references: self.block_frame.references.clone(),
+        };
         mem::swap(&mut block_frame, &mut self.block_frame);
 
         for (caller_value, callee_value) in call.params
             .iter()
             .zip(cfg.blocks[call.target.0].parameters.iter()) {
             // check if caller value is known at comptime
-            if block_frame.avail.contains(caller_value) {
+            if block_frame.is_avail(caller_value, &self.borrow_graph) {
                 let src = stack_frame.get_offset(caller_value).unwrap();
                 let dst = stack_frame.get_offset(callee_value).unwrap();
                 vm.memcpy(dst, src);
@@ -309,7 +325,8 @@ impl MirFlowGraph {
         reg: &MirTypeRegistry,
         backend: &mut impl Backend,
     ) -> Result<ConstEval, ExecutionError> {
-        let mut const_eval = ConstEval::new();
+        let bg = self.borrows(reg).expect("failed to build borrow graph for const evaluation");
+        let mut const_eval = ConstEval::new(bg);
         let mut current_block = self.root();
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
@@ -337,7 +354,7 @@ impl MirFlowGraph {
                         current_block = target.target;
                     }
                     Seal::Cond { cond, then_target, else_target } => {
-                        if const_eval.block_frame.avail.contains(cond) {
+                        if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
                             // condition of conditional jump is known at compile time
                             let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
                             if cond_value {
@@ -363,14 +380,14 @@ impl MirFlowGraph {
                     }
                     Seal::Switch { cond, targets, default } => {
                         // if the condition is known at compile time, we can execute the jump directly
-                        if const_eval.block_frame.avail.contains(cond) {
+                        if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
                             // condition is known at comptime
                             let (cond_range, cond_ty) = stack_frame.get_offset(cond).unwrap();
                             let cond_data = vm.get_data(cond_range.clone(), *cond_ty);
 
                             for target in targets.iter() {
                                 // value **must** be known
-                                if !const_eval.block_frame.avail.contains(&target.match_value) {
+                                if !const_eval.block_frame.is_avail(&target.match_value, &const_eval.borrow_graph) {
                                     report_comptime_unknown(target.match_value);
                                     break 'outer;
                                 }
@@ -454,9 +471,16 @@ impl Statement {
             }
             Self::VarDef { var, value, uid: _ } => {
                 // check if the expression can be executed in comptime
-                if cfg.expressions.is_comptime(*value, backend, &const_eval.block_frame) {
+                if cfg.expressions.is_comptime(*value, backend, &const_eval.block_frame, &const_eval.borrow_graph) {
                     cfg.expressions.execute(vm, stack_frame, *value, var, reg, backend);
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+                }
+
+                // deal with assigns separately
+                if value.ty == MirExprVariant::Assign {
+                    let assign_expr = &cfg.expressions.assigns[value.id];
+                    const_eval.block_frame.assign(
+                        &assign_expr.lhs, &assign_expr.rhs, &const_eval.borrow_graph);
                 }
             }
         }

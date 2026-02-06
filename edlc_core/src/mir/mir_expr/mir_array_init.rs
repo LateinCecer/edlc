@@ -19,7 +19,7 @@ use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -79,13 +79,14 @@ impl MirArrayInit {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
         match &self.elements {
             MirArrayInitVariant::List(els) => {
-                els.iter().all(|value| frame.is_avail(value))
+                els.iter().all(|value| frame.is_avail(value, graph))
             }
             MirArrayInitVariant::Copy { val, len: _ } => {
-                frame.is_avail(val)
+                frame.is_avail(val, graph)
             }
         }
     }

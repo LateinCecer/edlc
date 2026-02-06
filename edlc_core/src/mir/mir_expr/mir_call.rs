@@ -20,7 +20,7 @@ use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayou
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use crate::prelude::mir_expr::mir_graph::report_comptime_unknown;
@@ -131,6 +131,7 @@ impl MirCall {
         &self,
         backend: &impl Backend,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
         let funcs = backend.func_reg();
         if !funcs.is_comptime(self.func).unwrap() {
@@ -138,12 +139,12 @@ impl MirCall {
         }
 
         for comp_param in self.comptime_args.iter() {
-            if !frame.is_avail(&comp_param.value_expr) {
+            if !frame.is_avail(&comp_param.value_expr, graph) {
                 report_comptime_unknown(comp_param.value_expr);
                 panic!();
             }
         }
-        self.args.iter().all(|param| frame.is_avail(param))
+        self.args.iter().all(|param| frame.is_avail(param, graph))
     }
 
     fn check_usize<B: Backend>(

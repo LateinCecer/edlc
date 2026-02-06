@@ -50,6 +50,7 @@ use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_vars::VariableMapper;
+use crate::resolver::ScopeId;
 
 pub mod hir_array_init;
 pub mod hir_array_index;
@@ -167,6 +168,29 @@ impl HirExpression {
             HirExpression::TypeInit(val) => val.pos,
             HirExpression::Ref(val) => val.pos,
             HirExpression::Deref(val) => val.pos,
+        }
+    }
+
+    pub fn scope(&self) -> &ScopeId {
+        match self {
+            HirExpression::ArrayInit(val) => &val.scope,
+            HirExpression::ArrayIndex(val) => &val.scope,
+            HirExpression::As(val) => &val.scope,
+            HirExpression::Block(val) => &val.scope,
+            HirExpression::Call(val) => &val.scope,
+            HirExpression::Field(val) => &val.scope,
+            HirExpression::Literal(val) => &val.scope,
+            HirExpression::Name(val) => &val.scope,
+            HirExpression::Assign(val) => &val.scope,
+            HirExpression::Let(val) => &val.scope,
+            HirExpression::If(val) => &val.scope,
+            HirExpression::Loop(val) => &val.scope,
+            HirExpression::Break(val) => &val.scope,
+            HirExpression::Continue(val) => &val.scope,
+            HirExpression::Return(val) => &val.scope,
+            HirExpression::TypeInit(val) => &val.scope,
+            HirExpression::Ref(val) => &val.scope,
+            HirExpression::Deref(val) => &val.scope,
         }
     }
 

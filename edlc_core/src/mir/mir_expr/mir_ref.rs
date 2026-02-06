@@ -4,7 +4,7 @@ use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
 
@@ -526,24 +526,25 @@ impl MirRef {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
         match &self.offset {
-            RefOffset::Entire => frame.is_avail(&self.value),
-            RefOffset::Const(_) => frame.is_avail(&self.value),
+            RefOffset::Entire => frame.is_avail(&self.value, graph),
+            RefOffset::Const(_) => frame.is_avail(&self.value, graph),
             RefOffset::ArrayIndex { index, .. } => {
-                frame.is_avail(&self.value) && frame.is_avail(index)
+                frame.is_avail(&self.value, graph) && frame.is_avail(index, graph)
             }
             RefOffset::SliceIndex { index, slice_size, .. } => {
-                frame.is_avail(&self.value) && frame.is_avail(index) && frame.is_avail(slice_size)
+                frame.is_avail(&self.value, graph) && frame.is_avail(index, graph) && frame.is_avail(slice_size, graph)
             }
             RefOffset::ArrayRange { start, end, .. } => {
-                frame.is_avail(&self.value) && frame.is_avail(start) && frame.is_avail(end)
+                frame.is_avail(&self.value, graph) && frame.is_avail(start, graph) && frame.is_avail(end, graph)
             }
             RefOffset::SliceRange { start, end, slice_size, .. } => {
-                frame.is_avail(&self.value)
-                    && frame.is_avail(start)
-                    && frame.is_avail(end)
-                    && frame.is_avail(slice_size)
+                frame.is_avail(&self.value, graph)
+                    && frame.is_avail(start, graph)
+                    && frame.is_avail(end, graph)
+                    && frame.is_avail(slice_size, graph)
             }
         }
     }
@@ -649,8 +650,9 @@ impl MirDeref {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
-        frame.is_avail(&self.value)
+        frame.is_avail(&self.value, graph)
     }
 }
 
@@ -710,7 +712,8 @@ impl MirDowncastRef {
     pub(super) fn is_comptime(
         &self,
         frame: &ConstFrame,
+        graph: &BorrowGraph,
     ) -> bool {
-        frame.is_avail(&self.value)
+        frame.is_avail(&self.value, graph)
     }
 }
