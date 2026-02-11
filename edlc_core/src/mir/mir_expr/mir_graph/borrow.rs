@@ -13,7 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::cmp::Ordering;
+use crate::core::index_map::IndexMap;
 use crate::core::EdlVarId;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -25,10 +25,11 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, Tr
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{MirGlobalVar};
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
@@ -44,9 +45,12 @@ enum BorrowType {
     Partial(MemberOffset),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct OwnerData(usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BorrowSource {
-    Local(MirValue),
+    Local(OwnerData),
     Global(EdlVarId),
 }
 
@@ -106,9 +110,7 @@ impl<V> ReferenceState<V> {
         graph: &BorrowGraph,
         op: fn(lhs: &V, rhs: &V) -> Ordering,
     ) -> Option<&V> {
-        let Some(state) = graph.get_paths(value) else {
-            return None;
-        };
+        let state = graph.get_paths(value)?;
 
         let mut out = None;
         for path in state.iter() {
@@ -190,8 +192,8 @@ impl Display for BorrowSource {
     }
 }
 
-impl From<MirValue> for BorrowSource {
-    fn from(value: MirValue) -> Self {
+impl From<OwnerData> for BorrowSource {
+    fn from(value: OwnerData) -> Self {
         BorrowSource::Local(value)
     }
 }
@@ -243,11 +245,30 @@ impl Display for Borrow {
 pub struct BorrowContext<'reg> {
     reg: &'reg MirTypeRegistry,
     cfg: &'reg MirFlowGraph,
+    owner_counter: usize,
+    owner_references: IndexMap<OwnerData>,
+    owner_reverse: IndexMap<MirValue>,
 }
 
 impl<'reg> BorrowContext<'reg> {
     pub fn new(reg: &'reg MirTypeRegistry, cfg: &'reg MirFlowGraph) -> Self {
-        Self { reg, cfg }
+        Self { reg, cfg, owner_counter: 0, owner_references: IndexMap::default(), owner_reverse: IndexMap::default() }
+    }
+
+    fn get_owner_data(&mut self, target: &MirValue) -> OwnerData {
+        if let Some(data) = self.owner_references.get(target.0) {
+            return *data;
+        }
+
+        let id = OwnerData(self.owner_counter);
+        self.owner_counter += 1;
+        self.owner_references.view_mut(target.0).set(id);
+        self.owner_reverse.view_mut(id.0).set(*target);
+        id
+    }
+
+    fn mir_target_from_data(&self, owner: &OwnerData) -> Option<&MirValue> {
+        self.owner_reverse.get(owner.0)
     }
 
     fn is_ref(&self, value: &MirValue) -> bool {
@@ -387,6 +408,7 @@ impl Display for BorrowPath {
 #[derive(PartialEq, Eq, Debug, Default, Clone)]
 pub struct BorrowState {
     set: HashSet<BorrowPath>,
+    owners: HashSet<OwnerData>,
     mutable: bool,
 }
 
@@ -422,11 +444,24 @@ impl BorrowState {
     fn new(
         src: BorrowSource,
         ref_value: MirValue,
+        owner: OwnerData,
         offset: Option<MemberOffset>,
         mutable: bool,
     ) -> Self {
         BorrowState {
             set: HashSet::from([BorrowPath::new(src, ref_value, offset)]),
+            owners: HashSet::from([owner]),
+            mutable,
+        }
+    }
+
+    fn raw_data(
+        owner: OwnerData,
+        mutable: bool,
+    ) -> Self {
+        BorrowState {
+            set: HashSet::new(),
+            owners: HashSet::from([owner]),
             mutable,
         }
     }
@@ -437,8 +472,9 @@ impl BorrowState {
     fn extend(
         &self,
         value: MirValue,
+        owner: OwnerData,
         offset: Option<MemberOffset>,
-        mutable: bool,
+        _mutable: bool,
     ) -> Result<Self, BorrowConflict> {
         let states = self.set.iter().map(|path| {
             let mut path = path.clone();
@@ -451,17 +487,19 @@ impl BorrowState {
         // }
         Ok(BorrowState {
             set: states,
+            owners: HashSet::from([owner]),
             mutable: self.mutable,
         })
     }
 
-    fn copy_reference(&self, value: MirValue) -> Self {
-        self.extend(value, None, self.mutable).unwrap()
+    fn copy_reference(&self, value: MirValue, owner: OwnerData) -> Self {
+        self.extend(value, owner, None, self.mutable).unwrap()
     }
 
     fn and(&self, other: &Self) -> Self {
         BorrowState {
-            set: self.union(other).cloned().collect(),
+            set: self.set.union(&other.set).cloned().collect(),
+            owners: self.owners.union(&other.owners).cloned().collect(),
             mutable: self.mutable & other.mutable,
         }
     }
@@ -480,14 +518,16 @@ impl LatticeElement for BorrowState {
 
     fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
         Ok(BorrowState {
-            set: self.intersection(&other).cloned().collect::<HashSet<_>>(),
+            set: self.set.intersection(&other.set).cloned().collect::<HashSet<_>>(),
+            owners: self.owners.intersection(&other.owners).cloned().collect::<HashSet<_>>(),
             mutable: self.mutable | other.mutable,
         })
     }
 
     fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
         Ok(BorrowState {
-            set: self.union(&other).cloned().collect::<HashSet<_>>(),
+            set: self.set.union(&other.set).cloned().collect::<HashSet<_>>(),
+            owners: self.owners.union(&other.owners).cloned().collect::<HashSet<_>>(),
             mutable: self.mutable & other.mutable,
         })
     }
@@ -503,6 +543,7 @@ impl LatticeElement for BorrowState {
     fn bottom() -> Self {
         BorrowState {
             set: HashSet::new(),
+            owners: HashSet::new(),
             mutable: true,
         }
     }
@@ -552,11 +593,13 @@ impl<'reg> TransferCopy<BorrowContext<'reg>> for BorrowState {
     fn transfer_copy(
         value: &MirValue,
         input: &mut HashNodeState<MirValue, Self>,
-        _ctx: &mut BorrowContext<'reg>,
+        ctx: &mut BorrowContext<'reg>,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, Self::Conflict> {
-        Ok(input.replace(target, input.element_value(value).copy_reference(*target)))
+        Ok(input.replace(target, input
+            .element_value(value)
+            .copy_reference(*target, ctx.get_owner_data(target))))
     }
 }
 
@@ -566,11 +609,11 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirArrayInit {
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        let mut out = BorrowState::default();
+        let mut out = BorrowState::raw_data(ctx.get_owner_data(target), true);
         match &self.elements {
             MirArrayInitVariant::List(els) => {
                 els.iter().for_each(|element| {
@@ -588,12 +631,12 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirArrayInit {
 impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirAs {
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        input: &mut HashNodeState<MirValue, BorrowState>,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
-        _target: &MirValue,
+        target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(false)
+        Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
     }
 }
 
@@ -603,12 +646,12 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirAssign {
     /// We can therefore safely assume that this operation does *not* modify the borrow state.
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        input: &mut HashNodeState<MirValue, BorrowState>,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
-        _target: &MirValue,
+        target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(false)
+        Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
     }
 }
 
@@ -626,13 +669,13 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirCall {
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
         if ctx.is_ref(target) {
-            let mut out = BorrowState::default();
+            let mut out = BorrowState::raw_data(ctx.get_owner_data(target), true);
             self.args.iter().for_each(|val| {
                 out.and_assign(&input.element_value(val));
             });
             Ok(input.replace(target, out))
         } else {
-            Ok(false)
+            Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
         }
     }
 }
@@ -642,12 +685,12 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirConstant {
     /// As this is the default setting, we do not need to do anything here.
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        input: &mut HashNodeState<MirValue, BorrowState>,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
-        _target: &MirValue,
+        target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(false)
+        Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
     }
 }
 
@@ -656,24 +699,24 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirData {
     /// As this is the default setting, we do not need to do anything here.
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        input: &mut HashNodeState<MirValue, BorrowState>,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
-        _target: &MirValue,
+        target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(false)
+        Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
     }
 }
 
 impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirLiteral {
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        input: &mut HashNodeState<MirValue, BorrowState>,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
-        _target: &MirValue,
+        target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(false)
+        Ok(input.replace(target, BorrowState::raw_data(ctx.get_owner_data(target), true)))
     }
 }
 
@@ -681,7 +724,7 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirRef {
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
@@ -690,11 +733,20 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirRef {
                 Ok(input
                     .replace(target, input
                         .element_value(&self.value)
-                        .extend(*target, Some(offset.clone()), self.mutable)?))
+                        .extend(*target, ctx.get_owner_data(target), Some(*offset), self.mutable)?))
             },
             _ => {
                 // offset is zero, so we actually create a new reference
-                Ok(input.replace(target, BorrowState::new(BorrowSource::Local(self.value), *target, None, self.mutable)))
+                let mut state = BorrowState::raw_data(ctx.get_owner_data(target), self.mutable);
+                let lhs_state = input.element_value(&self.value);
+                for owner in lhs_state.owners.iter() {
+                    state.set.insert(BorrowPath {
+                        path: vec![*target],
+                        stack: PartialBorrowStack::default(),
+                        source: BorrowSource::Local(*owner),
+                    });
+                }
+                Ok(input.replace(target, state))
             },
         }
     }
@@ -717,16 +769,17 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirDeref {
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        let mut out = BorrowState::default();
+        let mut out = BorrowState::raw_data(ctx.get_owner_data(target), true);
         let parent_borrows = input.element_value(&self.value);
         for borrow in parent_borrows.iter() {
             // get borrow obligations of this borrow obligation
             if let BorrowSource::Local(from) = borrow.source {
-                let borrow_of_borrow = input.element_value(&from);
+                let owner_target = ctx.mir_target_from_data(&from).unwrap();
+                let borrow_of_borrow = input.element_value(owner_target);
                 out.and_assign(&borrow_of_borrow);
             }
         }
@@ -747,13 +800,13 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirDowncastRef {
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
         Ok(input.replace(target, input
             .element_value(&self.value)
-            .extend(*target, None, false)?))
+            .extend(*target, ctx.get_owner_data(target), None, false)?))
     }
 }
 
@@ -781,7 +834,12 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirGlobalVar {
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        Ok(input.replace(target, BorrowState::new(BorrowSource::Global(
-            self.var.clone()), *target, None, ctx.is_mut_ref(target))))
+        Ok(input.replace(target, BorrowState::new(
+            BorrowSource::Global(self.var),
+            *target,
+            ctx.get_owner_data(target),
+            None,
+            ctx.is_mut_ref(target)
+        )))
     }
 }
