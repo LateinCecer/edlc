@@ -30,9 +30,10 @@ use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, 
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::ops::Deref;
+use std::ops;
+use std::ops::{Deref, Index};
 use std::sync::Arc;
 
 /// The type of borrow.
@@ -127,6 +128,102 @@ impl<V> ReferenceState<V> {
         }
         out
     }
+}
+
+struct BorrowTreeBranch {
+    children: ops::Range<usize>,
+    leaves: ops::Range<usize>,
+    partial: MemberOffset,
+}
+
+struct BorrowTree {
+    /// Number of root children
+    root_children: usize,
+    /// Number of root leaves
+    root_leaves: usize,
+    leaves: Vec<MirValue>,
+    node: Vec<BorrowTreeBranch>,
+}
+
+impl BorrowTree {
+    fn build(source: &BorrowSource, data: &HashMap<MirValue, BorrowState>) -> Self {
+        let mut paths = HashMap::<BorrowPath, HashSet<MirValue>>::new();
+        for (var, state) in data.iter() {
+            for path in state.set.iter() {
+                if &path.source == source {
+                    // this path needs to be part of this tree
+                    paths.entry(path.clone()).or_insert_with(HashSet::new).insert(*var);
+                }
+            }
+        }
+
+        todo!()
+    }
+
+    fn traverse(&self, path: &[MemberOffset]) -> Option<TreeIter<'_>> {
+        let mut children_range = 0..self.root_children;
+        let mut leaves_range = 0..self.root_leaves;
+        for segment in path {
+            if let Some(branch_id) = children_range
+                .find(|s| &self.node[*s].partial == segment) {
+
+                leaves_range = self.node[branch_id].leaves.clone();
+                children_range = self.node[branch_id].children.clone();
+            } else {
+                return None;
+            }
+        }
+        Some(TreeIter {
+            stack: VecDeque::from_iter(children_range),
+            leave_id: leaves_range.start,
+            leave_end: leaves_range.end,
+            tree: self,
+        })
+    }
+
+    /// For the record, this effectively does the same thing as
+    /// `BorrowTree::traverse(&[]).unwrap()`.
+    fn iter(&self) -> TreeIter<'_> {
+        TreeIter {
+            stack: VecDeque::from_iter(0..self.root_children),
+            leave_id: 0,
+            leave_end: self.root_leaves,
+            tree: self,
+        }
+    }
+}
+
+struct TreeIter<'a> {
+    tree: &'a BorrowTree,
+    stack: VecDeque<usize>,
+    leave_id: usize,
+    leave_end: usize,
+}
+
+impl<'a> Iterator for TreeIter<'a> {
+    type Item = &'a MirValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.leave_id < self.leave_end {
+                let id = self.leave_id;
+                self.leave_id += 1;
+                break Some(&self.tree.leaves[id]);
+            }
+            // leave is exhausted
+            let Some(next_branch) = self.stack.pop_front() else {
+                break None;
+            };
+            let node = &self.tree.node[next_branch];
+            self.leave_id = node.leaves.start;
+            self.leave_end = node.leaves.end;
+            node.children.clone().for_each(|idx| self.stack.push_back(idx));
+        }
+    }
+}
+
+struct BorrowForest {
+    forest: HashMap<BorrowSource, BorrowTree>,
 }
 
 /// A borrow graph is a directed graph that encodes the relationships between the different
