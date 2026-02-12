@@ -147,19 +147,69 @@ struct BorrowTree {
 
 impl BorrowTree {
     fn build(source: &BorrowSource, data: &HashMap<MirValue, BorrowState>) -> Self {
-        let mut paths = HashMap::<BorrowPath, HashSet<MirValue>>::new();
+        let mut paths = HashMap::<PartialBorrowStack, HashSet<MirValue>>::new();
         for (var, state) in data.iter() {
             for path in state.set.iter() {
                 if &path.source == source {
                     // this path needs to be part of this tree
-                    paths.entry(path.clone()).or_insert_with(HashSet::new).insert(*var);
+                    paths.entry(path.stack.clone()).or_insert_with(HashSet::new).insert(*var);
                 }
             }
         }
 
-        todo!()
+        let mut leaves: Vec<MirValue> = Vec::new();
+        let mut nodes: Vec<BorrowTreeBranch> = Vec::new();
+        let mut root_children = 0;
+        let mut root_leaves = 0;
+
+        let mut worklist = vec![(PartialBorrowStack::default(), None)];
+        while let Some((item, node_index)) = worklist.pop() {
+            // insert leave nodes
+            let vars = &paths[&item];
+            let leaves_range = leaves.len()..(leaves.len() + vars.len());
+            leaves.extend(vars.into_iter());
+            // find all children
+            let children = paths.iter().filter(|(path, _)| {
+                if !path.stack.is_empty() {
+                    &path.stack[..(path.stack.len() - 1)] == &item.stack
+                } else {
+                    false
+                }
+            });
+            // writing the children with the worklist like this ensures that all children of a node
+            // are in a contiguous region in the `nodes` pool
+            let mut children_range = nodes.len()..nodes.len();
+            for (child_stack, _) in children {
+                let node_id = nodes.len();
+                nodes.push(BorrowTreeBranch {
+                    leaves: 0..0,
+                    children: 0..0,
+                    partial: child_stack.stack.last().unwrap().clone(),
+                });
+                worklist.push((child_stack.clone(), Some(node_id)));
+                children_range.end += 1;
+            }
+            // set values in this node
+            if let Some(node_id) = node_index {
+                let node = &mut nodes[node_id];
+                node.leaves = leaves_range;
+                node.children = children_range;
+            } else {
+                root_leaves = leaves_range.end;
+                root_children = children_range.end;
+            }
+        }
+
+        BorrowTree {
+            root_children,
+            root_leaves,
+            node: nodes,
+            leaves,
+        }
     }
 
+    /// Performs a breath-first search on all leave nodes of the tree that are reachable from after
+    /// the specified sequence of partial borrows.
     fn traverse(&self, path: &[MemberOffset]) -> Option<TreeIter<'_>> {
         let mut children_range = 0..self.root_children;
         let mut leaves_range = 0..self.root_leaves;
@@ -189,6 +239,17 @@ impl BorrowTree {
             leave_id: 0,
             leave_end: self.root_leaves,
             tree: self,
+        }
+    }
+
+    /// Iterates over all paths that are non-divergent from the specified partial borrowing path.
+    fn iter_non_diverging<'path>(&self, path: &'path [MemberOffset]) -> NonDivergentTreeIter<'_, 'path> {
+        NonDivergentTreeIter {
+            stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
+            leave_id: 0,
+            leave_end: self.root_leaves,
+            tree: self,
+            partial: path,
         }
     }
 }
@@ -222,21 +283,140 @@ impl<'a> Iterator for TreeIter<'a> {
     }
 }
 
+struct NonDivergentTreeIter<'a, 'b> {
+    tree: &'a BorrowTree,
+    stack: VecDeque<(usize, usize)>,
+    leave_id: usize,
+    leave_end: usize,
+    partial: &'b [MemberOffset],
+}
+
+impl<'a, 'b> Iterator for NonDivergentTreeIter<'a, 'b> {
+    type Item = &'a MirValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.leave_id < self.leave_end {
+                let id = self.leave_id;
+                self.leave_id += 1;
+                break Some(&self.tree.leaves[id]);
+            }
+            // leave is exhausted
+            let Some((next_branch, next_depth)) = self.stack.pop_front() else {
+                break None;
+            };
+            let node = &self.tree.node[next_branch];
+            self.leave_id = node.leaves.start;
+            self.leave_end = node.leaves.end;
+
+            if let Some(next_offset) = self.partial.get(next_depth) {
+                // there is more of the partial borrowing path to explore
+                for child_id in node.children.clone() {
+                    let child = &self.tree.node[child_id];
+                    if &child.partial == next_offset {
+                        self.stack.push_back((child_id, next_depth + 1));
+                    }
+                }
+            } else {
+                // we have reached the end of the partial borrowing path; everything from here on
+                // out can be considered to be non-divergent from the path
+                node.children.clone().for_each(|idx| self.stack.push_back((idx, next_depth + 1)));
+            }
+        }
+    }
+}
+
 struct BorrowForest {
-    forest: HashMap<BorrowSource, BorrowTree>,
+    trees: HashMap<BorrowSource, BorrowTree>,
+}
+
+impl BorrowForest {
+    fn new(graph: &HashMap<MirValue, BorrowState>) -> Self {
+        // collect all sources
+        let mut sources = HashSet::new();
+        graph.iter().for_each(|(_, state)| {
+            state.set.iter().for_each(|path| { sources.insert(path.source); });
+        });
+        let mut trees = HashMap::new();
+        for source in sources.iter() {
+            let tree = BorrowTree::build(source, graph);
+            trees.insert(*source, tree);
+        }
+        BorrowForest { trees }
+    }
+
+    /// Iterate over all leaves that have a path that is not fully divergent from the specified
+    /// borrow path.
+    fn iter_non_diverging<'path>(&self, path: &'path BorrowPath) -> Option<NonDivergentTreeIter<'_, 'path>> {
+        self.trees
+            .get(&path.source)
+            .map(|tree| tree.iter_non_diverging(&path.stack.stack[..]))
+    }
 }
 
 /// A borrow graph is a directed graph that encodes the relationships between the different
 /// variables that are borrowed in some way.
 pub struct BorrowGraph {
     graph: HashMap<MirValue, BorrowState>,
+    forest: BorrowForest,
 }
 
 impl BorrowGraph {
     pub fn new(graph: HashMap<MirValue, BorrowState>) -> Self {
         BorrowGraph {
+            forest: BorrowForest::new(&graph),
             graph,
         }
+    }
+
+    /// Executes the operator `f` for all [MirValue]s that are not fully divergent in the borrow
+    /// tree from `value`.
+    ///
+    /// # Understanding What This Does
+    ///
+    /// To understand how this is useful, we can look towards static program analysis, specifically
+    /// constant propagation.
+    /// If we have a program that contains values of aggregate types, then individual members of the
+    /// original value can either be known, or unknown at any location in the code during compile
+    /// time.
+    ///
+    /// Let's consider a simple program like this:
+    ///
+    /// ```
+    /// # fn input() -> i32 { todo!() }
+    ///
+    /// struct Point { x: i32, y: i32 }
+    ///
+    /// let a = Point { x: 0, y: 1 };
+    /// a.x = input();
+    /// ```
+    ///
+    /// Here we have an aggregate value `a` that is composed of two members `a.x` and `a.y`.
+    /// When `a` is created, it is known at compile time, since all members are known at compile
+    /// time.
+    /// When we assign a value to `a.x` that is not known at compile time, then the entirety of `a`
+    /// is also not known at compile time.
+    /// However, `a.y` is set behind a sequence of partial borrows that is not affected by setting
+    /// `a.x`, so `a.y` is still known at compile time.
+    /// This can get arbitrarily complex if we have deeper nesting of aggregate types.
+    ///
+    /// In this specific case, running this method with `value` = `a.x`, the operator is called with
+    /// `a` and `a.x`, but not with `a.y`.
+    ///
+    /// # Notice
+    ///
+    /// This method has no mechanism to check whether a value has already been passed to `f`.
+    /// It is guaranteed that all values passed to `f` are on a non-diverging path from the borrow
+    /// path of `value`, but it is not guaranteed that a value is only passed a single time.
+    fn for_non_divergent<F: Fn(&MirValue)>(&self, value: &MirValue, f: F) {
+        let Some(paths) = self.graph.get(value) else {
+            return;
+        };
+        paths.set.iter().for_each(|path| {
+            if let Some(iter) = self.forest.iter_non_diverging(path) {
+                iter.for_each(|v| f(v));
+            }
+        })
     }
 
     /// Checks if `value` borrows from the borrow path `path`.
