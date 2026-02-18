@@ -370,6 +370,7 @@ impl StackFrameLayout {
                 let size = reg.byte_size(*ty).unwrap();
 
                 offset = offset.div_ceil(align) * align;
+                members.view_mut(first.0).set((offset..(offset + size), *ty));
                 range.iter().for_each(|val| {
                     members.view_mut(val.0).set((offset..(offset + size), *ty));
                 });

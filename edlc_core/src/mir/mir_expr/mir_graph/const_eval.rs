@@ -22,7 +22,7 @@ use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, FlowState, ReferenceState};
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
@@ -43,7 +43,7 @@ pub struct ConstEval {
 /// Records with values are available in a const evaluation stack frame.
 pub(crate) struct ConstFrame {
     avail: HashSet<MirValue>,
-    references: ReferenceState<FlowState>,
+    references: ReferenceStateForest<FlowState>,
 }
 
 struct CallParameterCopy {
@@ -148,7 +148,7 @@ impl ConstFrame {
     }
 
     pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
-        self.avail.contains(value) && self.references.get_value(value, graph, FlowState::cmp)
+        self.avail.contains(value) && self.references.get_max(value, graph, FlowState::cmp)
             .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
     }
 
@@ -158,7 +158,7 @@ impl ConstFrame {
         } else {
             FlowState::Floating
         };
-        self.references.set_value(*target, state, graph);
+        self.references.set_value(*target, state, graph, FlowState::cmp);
     }
 }
 
@@ -166,7 +166,10 @@ impl ConstEval {
     pub fn new(borrow_graph: BorrowGraph) -> Self {
         ConstEval {
             consts: IndexMap::default(),
-            block_frame: ConstFrame { avail: HashSet::new(), references: ReferenceState::default() },
+            block_frame: ConstFrame {
+                avail: HashSet::new(),
+                references: ReferenceStateForest::new(&borrow_graph.forest, FlowState::Fixed),
+            },
             borrow_graph,
         }
     }

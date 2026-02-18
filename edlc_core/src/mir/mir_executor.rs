@@ -399,7 +399,12 @@ impl ExecutorVM {
         dst.memcpy(&src.into());
     }
 
-    pub fn write_ptr(
+    /// # Safety
+    ///
+    /// Since we are writing into data behind a raw pointer, this function is unsafe.
+    /// Make sure that `dst` actually points to a valid memory region in the VM and this function
+    /// should be safe to call.
+    pub unsafe fn write_ptr(
         &mut self,
         dst: MirValue,
         value: *const u8,
@@ -408,7 +413,7 @@ impl ExecutorVM {
     ) {
         let (range, ty) = layout.get_offset(&dst).unwrap();
         assert!(reg.is_ref(ty) || reg.is_mut_ref(ty));
-        unsafe { std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut *const u8, value) };
+        std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut *const u8, value);
     }
 
     pub fn write_fat_ptr(

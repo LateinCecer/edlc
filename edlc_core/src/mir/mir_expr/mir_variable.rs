@@ -78,7 +78,7 @@ impl MirGlobalVar {
         reg: &MirTypeRegistry,
     ) {
         let global_var_offset = vm.get_global(&self.var);
-        vm.write_ptr(*target, global_var_offset, stack_frame, reg);
+        unsafe { vm.write_ptr(*target, global_var_offset, stack_frame, reg) };
     }
 
     /// For now, we will say that globals are always available at compile time.

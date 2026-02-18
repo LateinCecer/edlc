@@ -480,11 +480,11 @@ impl MirRef {
                 // in either case, we create a reference to the base value and do not just repeat
                 // the reference
                 let data = vm.get_data(range.clone(), base_ty);
-                vm.write_ptr(*target, data.as_ptr(), stack_frame, reg);
+                unsafe { vm.write_ptr(*target, data.as_ptr(), stack_frame, reg) };
             }
             RefOffset::Const(const_offset) => {
                 let data = unsafe { ptr.add(const_offset.offset) };
-                vm.write_ptr(*target, data, stack_frame, reg);
+                unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
             }
             RefOffset::ArrayIndex { index, array_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
@@ -492,7 +492,7 @@ impl MirRef {
                 let offset = element_size * index;
                 assert!(index < *array_size);
                 let data = unsafe { ptr.add(offset) };
-                vm.write_ptr(*target, data, stack_frame, reg);
+                unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
             }
             RefOffset::SliceIndex { index, slice_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
@@ -501,7 +501,7 @@ impl MirRef {
                 let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
                 assert!(index < slice_size);
                 let data = unsafe { ptr.add(offset) };
-                vm.write_ptr(*target, data, stack_frame, reg);
+                unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
             }
             RefOffset::ArrayRange { start, end, array_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();

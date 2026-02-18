@@ -32,8 +32,8 @@ use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElemen
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::ops;
-use std::ops::{Deref, Index};
+use std::{mem, ops};
+use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
 
 /// The type of borrow.
@@ -68,70 +68,112 @@ pub enum FlowState {
 
 #[derive(Clone, Debug)]
 pub struct ReferenceState<V> {
-    states: HashMap<BorrowPath, usize>,
+    /// Each state corresponds to a node in a borrow tree
+    states: Vec<usize>,
     values: Vec<V>,
 }
 
-impl<V> Default for ReferenceState<V> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<V> ReferenceState<V> {
-    fn new() -> Self {
-        Self { states: HashMap::new(), values: vec![] }
+    fn new(tree: &BorrowTree, base_value: V) -> Self {
+        Self { states: vec![0; tree.num_nodes()], values: vec![base_value] }
     }
 
-    fn get_state(&self, b: &BorrowPath) -> Option<&V> {
-        self.states.get(b).and_then(|idx| self.values.get(*idx))
+    pub fn get_state(&self, b: NodeId) -> Option<&V> {
+        self.states.get(b.0).and_then(|idx| self.values.get(*idx))
     }
 
-    fn set_state(&mut self, b: BorrowPath, v: V) {
+    pub fn set_state(&mut self, b: NodeId, v: V) {
         let id = self.values.len();
         self.values.push(v);
-        self.states.insert(b, id);
+        self.states[b.0] = id;
     }
 
-    pub fn set_value(&mut self, value: MirValue, v: V, graph: &BorrowGraph) {
-        let Some(state) = graph.get_paths(&value) else {
-            return;
-        };
-        let idx = self.values.len();
+    pub fn clear_unused_states(&mut self) {
+        let mut value_uses = vec![0u32; self.states.len()];
+        self.states.iter().for_each(|idx| value_uses[*idx] += 1);
+
+        let mut old_values = vec![];
+        mem::swap(&mut self.values, &mut old_values);
+        let mut transfer_map = vec![];
+        for (uses, value) in value_uses.iter().zip(old_values.into_iter()) {
+            if *uses > 0 {
+                transfer_map.push(self.values.len());
+                self.values.push(value);
+            }
+        }
+
+        // adapt all indices
+        self.states.iter_mut().for_each(|idx| *idx = transfer_map[*idx]);
+    }
+
+    /// Sets the value in a borrow graph.
+    /// All nodes dominated by the node holding `value` inherit the exact value from that node.
+    /// Parent nodes are traversed in reverse ordering their value is calculated as the maximum
+    /// value from **all** of their direct children.
+    pub fn set_value(
+        &mut self,
+        value: MirValue,
+        v: V,
+        graph: &BorrowTree,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    ) {
+        let node = graph.node_from_value(&value).unwrap();
+        let value_id = self.values.len();
         self.values.push(v);
-        state.set.iter().for_each(|path| {
-            self.states.insert(path.clone(), idx);
-        });
+
+        // set the value of all child nodes directly, as the children definitely need to change
+        // if the parent is overwritten
+        for child_id in graph.iter_nodes_after(node, &[]) {
+            self.states[child_id.0] = value_id;
+        }
+
+        // iterate over the parents in reverse.
+        let mut parent_iter = graph.iter_rev(node);
+        parent_iter.next(); // pop `node`
+        for parent in parent_iter {
+            // the parents value is formed from the maximum value of its children
+            let mut max_value: Option<usize> = None;
+            for child in graph.get_child_branch_range(parent).unwrap() {
+                let child_node = NodeId(child + 1);
+                if let Some(max_value) = max_value.as_mut() {
+                    if op(&self.values[self.states[child_node.0]], &self.values[*max_value]).is_gt() {
+                        *max_value = self.states[child_node.0];
+                    }
+                } else {
+                    max_value = Some(self.states[child_node.0]);
+                }
+            }
+            // if the children have a collective max value, then set that as the parents value
+            if let Some(max_value) = max_value {
+                self.states[parent.0] = max_value;
+            }
+        }
     }
 
-    /// Gets the maximum state for the specified value.
     pub fn get_value(
         &self,
         value: &MirValue,
-        graph: &BorrowGraph,
-        op: fn(lhs: &V, rhs: &V) -> Ordering,
+        graph: &BorrowTree,
     ) -> Option<&V> {
-        let state = graph.get_paths(value)?;
+        graph
+            .node_from_value(value)
+            .and_then(|node| self.states.get(node.0))
+            .and_then(|idx| self.values.get(*idx))
+    }
+}
 
-        let mut out = None;
-        for path in state.iter() {
-            let Some(path_state) = self.get_state(path) else {
-                continue;
-            };
-            if let Some(out) = out.as_mut() {
-                if op(path_state, *out).is_gt() {
-                    *out = path_state;
-                }
-            } else {
-                out = Some(path_state);
-            }
-        }
-        out
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
+struct NodeId(usize);
+
+impl Display for NodeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:0>8x}", self.0)
     }
 }
 
 struct BorrowTreeBranch {
     children: ops::Range<usize>,
+    parent: Option<usize>,
     leaves: ops::Range<usize>,
     partial: MemberOffset,
 }
@@ -184,6 +226,7 @@ impl BorrowTree {
                 nodes.push(BorrowTreeBranch {
                     leaves: 0..0,
                     children: 0..0,
+                    parent: node_index,
                     partial: child_stack.stack.last().unwrap().clone(),
                 });
                 worklist.push((child_stack.clone(), Some(node_id)));
@@ -205,6 +248,37 @@ impl BorrowTree {
             root_leaves,
             node: nodes,
             leaves,
+        }
+    }
+
+    /// Gets the partial offset sequence that yields the specified node.
+    fn path_from_node(&self, node: &NodeId) -> Vec<MemberOffset> {
+        let mut offset = vec![];
+        if node == &Self::root_node() {
+            offset
+        } else {
+            let mut branch_id = node.0 - 1;
+            loop {
+                offset.push(self.node[branch_id].partial.clone());
+                if let Some(parent) = self.node[branch_id].parent.as_ref() {
+                    branch_id = *parent;
+                } else {
+                    break offset;
+                }
+            }
+        }
+    }
+
+    /// Gets the node that contains `value` in its leaves.
+    fn node_from_value(&self, value: &MirValue) -> Option<NodeId> {
+        let idx = self.leaves.iter().position(|s| MirValue::eq(s, value))?;
+        if let Some(branch_id) = self.node.iter().position(|branch| {
+            branch.leaves.contains(&idx)
+        }) {
+            Some(NodeId(branch_id + 1))
+        } else {
+            assert!(idx < self.root_leaves);
+            Some(Self::root_node())
         }
     }
 
@@ -251,6 +325,101 @@ impl BorrowTree {
             tree: self,
             partial: path,
         }
+    }
+
+    fn iter_nodes<'path>(&self, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+        IterNonDivergentNodes {
+            stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
+            tree: self,
+            node_id: Some(Self::root_node()),
+            partial: path,
+        }
+    }
+
+    /// Performs a breadth-first traversal through the nodes of the tree starting from `starting`
+    /// while limiting the traversal to nodes that can be reached within `path`.
+    fn iter_nodes_after<'path>(&self, starting: NodeId, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+        if starting == Self::root_node() {
+            return self.iter_nodes(path);
+        }
+
+        IterNonDivergentNodes {
+            stack: VecDeque::from_iter(self.node[starting.0 - 1].children.clone().map(|idx| (idx, 0))),
+            tree: self,
+            node_id: Some(starting),
+            partial: path,
+        }
+    }
+
+    /// Traverses the tree in reverse, starting from the `start` node and ending in the root node
+    /// of the tree.
+    fn iter_rev(&self, start: NodeId) -> IterParents<'_> {
+        IterParents {
+            node: Some(start),
+            tree: self,
+        }
+    }
+
+    const fn root_node() -> NodeId {
+        NodeId(0)
+    }
+
+    fn get_node(&self, node_id: NodeId) -> Option<&[MirValue]> {
+        if node_id == Self::root_node() {
+            Some(&self.leaves[0..self.root_leaves])
+        } else {
+            self.node
+                .get(node_id.0 - 1)
+                .map(|branch| &self.leaves[branch.leaves.clone()])
+        }
+    }
+
+    fn get_children(&self, node_id: NodeId) -> Option<&[BorrowTreeBranch]> {
+        if node_id == Self::root_node() {
+            Some(&self.node[0..self.root_children])
+        } else {
+            self.node
+                .get(node_id.0 - 1)
+                .map(|branch| &self.node[branch.children.clone()])
+        }
+    }
+
+    fn get_child_branch_range(&self, node_id: NodeId) -> Option<ops::Range<usize>> {
+        if node_id == Self::root_node() {
+            Some(0..self.root_children)
+        } else {
+            self.node
+                .get(node_id.0 - 1)
+                .map(|branch| branch.children.clone())
+        }
+    }
+
+    fn get_parent(&self, node_id: NodeId) -> Option<NodeId> {
+        if node_id == Self::root_node() {
+            None
+        } else {
+            self.node.get(node_id.0 - 1)
+                .map(|branch| {
+                    if let Some(parent_branch) = branch.parent.as_ref() {
+                        NodeId(*parent_branch + 1)
+                    } else {
+                        Self::root_node()
+                    }
+                })
+        }
+    }
+
+    fn num_nodes(&self) -> usize {
+        // +1 for the root node
+        self.node.len() + 1
+    }
+}
+
+impl Index<NodeId> for BorrowTree {
+    type Output = [MirValue];
+
+    fn index(&self, index: NodeId) -> &Self::Output {
+        self.get_node(index).unwrap()
     }
 }
 
@@ -326,7 +495,59 @@ impl<'a, 'b> Iterator for NonDivergentTreeIter<'a, 'b> {
     }
 }
 
-struct BorrowForest {
+struct IterNonDivergentNodes<'tree, 'members> {
+    tree: &'tree BorrowTree,
+    stack: VecDeque<(usize, usize)>,
+    node_id: Option<NodeId>,
+    partial: &'members [MemberOffset],
+}
+
+impl<'tree, 'members> Iterator for IterNonDivergentNodes<'tree, 'members> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // leave is exhausted
+        let Some((next_branch, next_depth)) = self.stack.pop_front() else {
+            let out = self.node_id;
+            self.node_id = None;
+            return out;
+        };
+        let node = &self.tree.node[next_branch];
+        if let Some(next_offset) = self.partial.get(next_depth) {
+            for child_id in node.children.clone() {
+                let child = &self.tree.node[child_id];
+                if &child.partial == next_offset {
+                    self.stack.push_back((child_id, next_depth + 1));
+                }
+            }
+        } else {
+            node.children.clone().for_each(|idx| self.stack.push_back((idx, next_depth + 1)));
+        }
+        let out = self.node_id;
+        self.node_id = Some(NodeId(next_branch + 1));
+        out
+    }
+}
+
+struct IterParents<'tree> {
+    tree: &'tree BorrowTree,
+    node: Option<NodeId>,
+}
+
+impl<'tree> Iterator for IterParents<'tree> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut out = None;
+        mem::swap(&mut out, &mut self.node);
+        if let Some(node) = out.as_ref() {
+            self.node = self.tree.get_parent(*node);
+        }
+        out
+    }
+}
+
+pub struct BorrowForest {
     trees: HashMap<BorrowSource, BorrowTree>,
 }
 
@@ -354,11 +575,85 @@ impl BorrowForest {
     }
 }
 
+impl Index<BorrowSource> for BorrowForest {
+    type Output = BorrowTree;
+
+    fn index(&self, index: BorrowSource) -> &Self::Output {
+        self.trees.get(&index).unwrap()
+    }
+}
+
+impl IndexMut<BorrowSource> for BorrowForest {
+    fn index_mut(&mut self, index: BorrowSource) -> &mut Self::Output {
+        self.trees.get_mut(&index).unwrap()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReferenceStateForest<V> {
+    forest: HashMap<BorrowSource, ReferenceState<V>>,
+}
+
+impl<V> ReferenceStateForest<V> {
+    pub fn new(forest: &BorrowForest, base_value: V) -> Self
+    where V: Clone {
+        let mut forest_state = HashMap::new();
+        for (src, tree) in forest.trees.iter() {
+            forest_state.insert(src.clone(), ReferenceState::new(tree, base_value.clone()));
+        }
+        ReferenceStateForest { forest: forest_state }
+    }
+
+    pub fn get_max(
+        &self,
+        value: &MirValue,
+        graph: &BorrowGraph,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    ) -> Option<&V> {
+        let mut out: Option<&V> = None;
+        let state = graph.graph.get(value)?;
+        for path in state.set.iter() {
+            // resolve that path
+            let tree = graph.forest.trees.get(&path.source).unwrap();
+            let state = self.forest.get(&path.source).unwrap();
+
+            let v = state.get_value(value, tree).unwrap();
+            if let Some(out) = out.as_mut() {
+                if op(v, out).is_gt() {
+                    *out = v;
+                }
+            } else {
+                out = Some(v);
+            }
+        }
+        out
+    }
+
+    pub fn set_value(
+        &mut self,
+        value: MirValue,
+        v: V,
+        graph: &BorrowGraph,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    )
+    where V: Clone {
+        let Some(state) = graph.graph.get(&value) else {
+            return;
+        };
+        for path in state.set.iter() {
+            let tree = graph.forest.trees.get(&path.source).unwrap();
+            let state = self.forest.get_mut(&path.source).unwrap();
+
+            state.set_value(value, v.clone(), tree, op);
+        }
+    }
+}
+
 /// A borrow graph is a directed graph that encodes the relationships between the different
 /// variables that are borrowed in some way.
 pub struct BorrowGraph {
     graph: HashMap<MirValue, BorrowState>,
-    forest: BorrowForest,
+    pub forest: BorrowForest,
 }
 
 impl BorrowGraph {
