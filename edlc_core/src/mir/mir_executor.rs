@@ -125,6 +125,18 @@ impl AmorphusDataCopy {
         Some(out)
     }
 
+    /// # Safety
+    ///
+    /// This method has no way to ensure that the data contained in this amorphus data copy is
+    /// actually in a valid representation of `T`.
+    /// All that this method does is compare size and alignment of the data.
+    /// Please note that this in itself is not sufficient to guarantee safety.
+    pub unsafe fn into<T>(self) -> T {
+        assert_eq!(size_of::<T>(), self.data.len());
+        assert_eq!(align_of::<T>(), self.align);
+        std::ptr::read(self.data.as_ptr() as *const T)
+    }
+
     pub fn as_data(&self) -> AmorphusData<'_> {
         AmorphusData { data: &self.data[..], ty: self.ty }
     }

@@ -17,16 +17,19 @@ use std::collections::HashSet;
 use std::mem;
 use std::ops::Range;
 use crate::core::index_map::IndexMap;
+use crate::inline_code;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
+use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use crate::prelude::mir_expr::MirFlowGraph;
+use crate::resolver::ScopeId;
 
 enum ConstEvalState {
     Runtime,
@@ -267,7 +270,32 @@ impl MirFlowGraph {
     }
 
     fn replace_constant_statements(&mut self, consts: &ConstEval) {
-        todo!()
+        for block in self.blocks.iter_mut() {
+            // iterate through the statements in the block and replace all statements that write
+            // to a target that is known at compile time with a raw data packet
+            for statement in block.statements.iter_mut() {
+                let (target, uid) = match statement {
+                    Statement::VarCopy { var, uid, .. } => {
+                        (var, *uid)
+                    }
+                    Statement::VarMove { var, uid, .. } => {
+                        (var, *uid)
+                    }
+                    Statement::VarDef { var, uid, .. } => {
+                        (var, *uid)
+                    }
+                };
+                if let Some(item) = consts.get_constant_value(target) {
+                    // insert data blob
+                    let pos = SrcPos::default();
+                    let src = inline_code!("todo");
+                    let scope = ScopeId::rand();
+
+                    let expr_id = self.expressions.insert_data(item.clone().into_mir(pos, src, scope));
+                    *statement = Statement::VarDef { var: *target, value: expr_id, uid };
+                }
+            }
+        }
     }
 
     /// Replaces all block parameters with constant evaluation data expressions in the entire flow
@@ -275,8 +303,10 @@ impl MirFlowGraph {
     /// To keep the CFG consistent, this includes updating *all* block calls within the flow_graph.
     fn replace_constant_parameters(&mut self, consts: &ConstEval) {
         for block in self.blocks.iter_mut() {
+            let mut params = Vec::new();
+            mem::swap(&mut params, &mut block.parameters);
             // check parameters
-            let mut statements = block.parameters
+            let mut statements = params
                 .iter()
                 .filter_map(|val| consts.get_constant_value(val)
                     .map(|data| (*val, data)))
@@ -294,17 +324,32 @@ impl MirFlowGraph {
                 .collect::<Vec<_>>();
             statements.append(&mut block.statements);
             block.statements = statements;
+            // filter parameters to input into block again
+            params.into_iter().for_each(|param| {
+                if consts.get_constant_value(&param).is_none() {
+                    block.parameters.push(param);
+                }
+            });
+
+            // transfer parameters
+            fn transfer_params(call: &mut BlockCall, consts: &ConstEval) {
+                call.params.retain(|val| consts.get_constant_value(val).is_none())
+            }
 
             // update block calls in sealing statement of this graph
             match &mut block.seal {
                 Seal::Jump(call) => {
-
+                    transfer_params(call, consts);
                 },
                 Seal::Cond { then_target, else_target, .. } => {
-
+                    transfer_params(then_target, consts);
+                    transfer_params(else_target, consts);
                 },
                 Seal::Switch { targets, default, .. } => {
-
+                    for target in targets.iter_mut() {
+                        transfer_params(&mut target.block_call, consts);
+                    }
+                    transfer_params(default, consts);
                 },
                 _ => (),
             }
@@ -312,6 +357,38 @@ impl MirFlowGraph {
     }
 
     fn reduce_const_branching(&mut self, consts: &ConstEval) {
+        'outer: for block in self.blocks.iter_mut() {
+            match &block.seal {
+                Seal::Cond { cond, then_target, else_target } => {
+                    if let Some(c) = consts.get_constant_value(cond) {
+                        if unsafe { c.clone().into::<bool>() } {
+                            block.seal = Seal::Jump(then_target.clone());
+                        } else {
+                            block.seal = Seal::Jump(else_target.clone());
+                        }
+                    }
+                }
+                Seal::Switch { cond, targets, default } => {
+                    if let Some(c) = consts.get_constant_value(cond) {
+                        for target in targets.iter() {
+                            let match_value = consts.get_constant_value(&target.match_value).unwrap();
+                            if match_value == c {
+                                block.seal = Seal::Jump(target.block_call.clone());
+                                break 'outer;
+                            }
+                        }
+                        block.seal = Seal::Jump(default.clone());
+                    }
+                }
+                _ => ()
+            }
+        }
+    }
+
+    /// Resolves the comptime call parameters in all function calls.
+    /// As these parameters must be known at compile time, this should be executed after const
+    /// propagation.
+    pub fn insert_comptime_call_parameters<B: Backend>(&self, func_reg: &mut MirFuncRegistry<B>) {
         todo!()
     }
 
