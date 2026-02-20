@@ -226,6 +226,10 @@ impl<'a, T> Deref for IndexMapView<'a, T> {
 }
 
 impl<'a, T> IndexMapViewMut<'a, T> {
+    pub fn update<F: FnOnce(&mut T), D: FnOnce() -> T>(&mut self, op: F, default: D) {
+        op(self.get_or_insert_with(default));
+    }
+
     pub fn get(&self) -> Option<&T> {
         self.map.get(self.index)
     }

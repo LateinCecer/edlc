@@ -179,8 +179,11 @@ impl TestCompiler {
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&body)?;
 
-        body.constant_analysis()?;
+        // body.constant_analysis()?;
+        println!("doing lifetime analysis");
         let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        println!("done with lifetime analysis");
+
         let deconstruction = body.deconstruct(&lifeness)?;
         deconstruction.print_ranges();
         deconstruction.print_mapping(&body);
@@ -197,7 +200,7 @@ impl TestCompiler {
                 println!("transforming function body...");
                 let lifeness = body.body.lifetimes(&self.compiler.mir_phase.types)?;
                 let deconstruction = body.body.deconstruct(&lifeness)?;
-                let borrows = body.body.borrows(&self.compiler.mir_phase.types)?;
+                // let borrows = body.body.borrows(&self.compiler.mir_phase.types)?;
 
                 let options = StackFrameOptions {
                     store_plane: true,
@@ -220,6 +223,26 @@ impl TestCompiler {
         };
         let mut stack_frame = StackFrameLayout::new(
             &deconstruction, options, &body, &self.compiler.mir_phase.types);
+        vm.alloc_stack_frame(&mut stack_frame);
+        let res = body.propagate_constants(
+            &[],
+            &mut vm,
+            &stack_frame,
+            &self.compiler.mir_phase.types,
+            &mut self.backend,
+        );
+        vm.pop_frame(&mut stack_frame);
+        match res {
+            Ok(val) => {
+                println!("success!");
+                val.print();
+            },
+            Err(err) => {
+                println!("constant propagation failed!");
+            }
+        }
+
+
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body
             .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
@@ -664,6 +687,109 @@ fn test_function(val: f32) -> f32 {
         }
         std::print(y);
         std::print("\n");
+    }
+    "#))?;
+    Ok(())
+}
+
+#[test]
+fn test_simple() -> Result<(), anyhow::Error> {
+    let mut comp = TestCompiler::new();
+    comp.init()?;
+
+    comp.compiler.prepare_module(&vec!["std"].into())?;
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
+    extern "C" fn input_binding() -> i32 {
+        10
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+    comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
+    {
+        let mut y = 0i32;
+        let mut z = 1i32;
+        loop {
+            if y == std::input() { break; }
+            z *= 2;
+            y += 1;
+        }
+        std::print("the number is ");
+        std::print(z);
+        std::print("!\n");
     }
     "#))?;
     Ok(())

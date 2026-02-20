@@ -224,10 +224,16 @@ impl RegionLifenessList {
     }
 
     pub fn overlaps(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
+        if lhs.0 >= self.regions.len() || rhs.0 >= self.regions.len() {
+            return false;
+        }
         self.regions[lhs.0].overlaps(&self.regions[rhs.0], &self.scopes)
     }
 
     pub fn overlaps_non_equal(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
+        if lhs.0 >= self.regions.len() || rhs.0 >= self.regions.len() {
+            return false;
+        }
         self.regions[lhs.0].overlaps_non_equal(&self.regions[rhs.0], &self.scopes)
     }
 

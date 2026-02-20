@@ -99,6 +99,10 @@ impl AmorphusDataCopy {
         })
     }
 
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Creates a new data copy from the specified data value.
     /// For this function to succeed the specified MIR Type ID must match the Rust type id of `val`.
     /// If this is not the case, the program panics.

@@ -14,6 +14,7 @@
  *    limitations under the License.
  */
 use std::collections::HashSet;
+use std::io::Write;
 use std::mem;
 use std::ops::Range;
 use crate::core::index_map::IndexMap;
@@ -31,6 +32,8 @@ use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use crate::prelude::mir_expr::MirFlowGraph;
 use crate::resolver::ScopeId;
 
+
+#[derive(Debug)]
 enum ConstEvalState {
     Runtime,
     Known(AmorphusDataCopy),
@@ -43,12 +46,29 @@ pub struct ConstEval {
     borrow_graph: BorrowGraph,
 }
 
+impl ConstEval {
+    pub fn print(&self) {
+        println!("Result of constant evaluation:");
+        for (raw_id, state) in self.consts.iter() {
+            let value = MirValue(raw_id);
+            match state {
+                ConstEvalState::Known(data) if data.len() != 0 => {
+                    println!("  - ${:x}  =  {:?}", value.0, data);
+                },
+                _ => (),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 /// Records with values are available in a const evaluation stack frame.
 pub(crate) struct ConstFrame {
     avail: HashSet<MirValue>,
     references: ReferenceStateForest<FlowState>,
 }
 
+#[derive(PartialEq, Eq, Clone, Debug)]
 struct CallParameterCopy {
     params: Vec<Option<AmorphusDataCopy>>,
     block: MirBlockRef,
@@ -262,6 +282,42 @@ impl ConstEval {
     }
 }
 
+struct CallParameterWorklist {
+    list: Vec<usize>,
+    state: IndexMap<CallParameterCopy>,
+}
+
+impl CallParameterWorklist {
+    fn new(root: CallParameterCopy) -> Self {
+        let mut state: IndexMap<CallParameterCopy> = IndexMap::default();
+        state.view_mut(0).set(root);
+        CallParameterWorklist {
+            list: vec![0],
+            state,
+        }
+    }
+
+    fn push(&mut self, call: CallParameterCopy) {
+        let index = call.block.0;
+        let mut prev_state = self.state.view_mut(index);
+        if let Some(prev_state) = prev_state.get() {
+            if prev_state == &call {
+                return; // state did not change since last call
+            }
+        }
+        dbg!(&call);
+        prev_state.set(call);
+        if !self.list.contains(&index) {
+            self.list.push(index);
+        }
+    }
+
+    fn pop(&mut self) -> Option<CallParameterCopy> {
+        let index = self.list.pop()?;
+        self.state.get(index).cloned()
+    }
+}
+
 impl MirFlowGraph {
     pub fn include_constants(&mut self, consts: &ConstEval) {
         self.reduce_const_branching(consts);
@@ -410,14 +466,23 @@ impl MirFlowGraph {
         let mut current_block = self.root();
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
-        let mut work_list: Vec<CallParameterCopy> = vec![root_call_params];
+        let mut work_list = CallParameterWorklist::new(root_call_params);
+        let mut visit_count = IndexMap::<usize>::default();
         // work through work-list
         while let Some(params) = work_list.pop() {
             params.set_vm_values(self, vm, stack_frame, &mut const_eval, reg);
+            current_block = params.block;
 
             // if we can continue on just one branch, don't actually divert to work-list to keep
             // overhead low.
             'outer: loop {
+                // limit execution of a single block to a set amount of times
+                let mut visit = visit_count.view_mut(current_block.0);
+                if visit.get().cloned().unwrap_or(0) > 10 {
+                    break;
+                }
+                visit.update(|val| *val += 1, || 0);
+
                 self.blocks[current_block.0].eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
                 // jump to other block using sealing statement
                 match &self.blocks[current_block.0].seal {
