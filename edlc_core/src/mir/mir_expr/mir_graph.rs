@@ -1123,6 +1123,7 @@ impl Block {
     }
 }
 
+#[derive(Debug)]
 pub struct ExecutionError {
     value: AmorphusDataCopy,
 }

@@ -187,7 +187,6 @@ impl TestCompiler {
         let deconstruction = body.deconstruct(&lifeness)?;
         deconstruction.print_ranges();
         deconstruction.print_mapping(&body);
-        let borrows = body.borrows(&self.compiler.mir_phase.types)?;
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         {
@@ -200,14 +199,31 @@ impl TestCompiler {
                 println!("transforming function body...");
                 let lifeness = body.body.lifetimes(&self.compiler.mir_phase.types)?;
                 let deconstruction = body.body.deconstruct(&lifeness)?;
-                // let borrows = body.body.borrows(&self.compiler.mir_phase.types)?;
 
                 let options = StackFrameOptions {
                     store_plane: true,
                     .. Default::default()
                 };
-                let stack_frame = StackFrameLayout::new(
+                let mut stack_frame = StackFrameLayout::new(
                     &deconstruction, options, &body.body, &self.compiler.mir_phase.types);
+
+                // propagate constants
+                vm.alloc_stack_frame(&mut stack_frame);
+                let const_eval = body.body.propagate_constants(
+                    &[],
+                    &mut vm,
+                    &stack_frame,
+                    &self.compiler.mir_phase.types,
+                    &mut self.backend,
+                ).unwrap();
+                vm.pop_frame(&mut stack_frame);
+                {
+                    let mut func_reg = self.backend.func_reg_mut();
+                    body.body.insert_comptime_call_parameters(&mut func_reg, &const_eval)?;
+                }
+
+                // TODO validate
+
                 body.stack_frame_layout = Some(stack_frame);
             }
 
@@ -230,18 +246,14 @@ impl TestCompiler {
             &stack_frame,
             &self.compiler.mir_phase.types,
             &mut self.backend,
-        );
+        ).unwrap();
         vm.pop_frame(&mut stack_frame);
-        match res {
-            Ok(val) => {
-                println!("success!");
-                val.print();
-            },
-            Err(err) => {
-                println!("constant propagation failed!");
-            }
-        }
+        res.print();
 
+        {
+            let mut func_reg = self.backend.func_reg_mut();
+            body.insert_comptime_call_parameters(&mut func_reg, &res)?;
+        }
 
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body

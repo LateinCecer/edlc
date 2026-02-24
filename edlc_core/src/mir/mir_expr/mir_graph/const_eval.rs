@@ -14,6 +14,8 @@
  *    limitations under the License.
  */
 use std::collections::HashSet;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::mem;
 use std::ops::Range;
@@ -283,38 +285,47 @@ impl ConstEval {
 }
 
 struct CallParameterWorklist {
-    list: Vec<usize>,
-    state: IndexMap<CallParameterCopy>,
+    list: Vec<CallParameterCopy>,
+    entry_list: IndexMap<HashSet<MirBlockRef>>,
 }
+
+#[derive(Debug)]
+pub enum ConstError {
+    /// A value is not known at compile-time, but it must be known doe to one reason or another
+    UnresolvedAtComptime(MirValue, String),
+}
+
+impl Display for ConstError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConstError::UnresolvedAtComptime(value, context) => {
+                write!(f, "Value ${:x} is not resolvable at compile-time. Context: {context}", value.0)
+            }
+        }
+    }
+}
+
+impl Error for ConstError {}
 
 impl CallParameterWorklist {
     fn new(root: CallParameterCopy) -> Self {
-        let mut state: IndexMap<CallParameterCopy> = IndexMap::default();
-        state.view_mut(0).set(root);
         CallParameterWorklist {
-            list: vec![0],
-            state,
+            list: vec![root],
+            entry_list: IndexMap::default(),
         }
     }
 
-    fn push(&mut self, call: CallParameterCopy) {
+    fn push(&mut self, call: CallParameterCopy, caller: MirBlockRef) {
         let index = call.block.0;
-        let mut prev_state = self.state.view_mut(index);
-        if let Some(prev_state) = prev_state.get() {
-            if prev_state == &call {
-                return; // state did not change since last call
-            }
-        }
-        dbg!(&call);
-        prev_state.set(call);
-        if !self.list.contains(&index) {
-            self.list.push(index);
+        let mut view = self.entry_list.view_mut(index);
+        let entries = view.get_or_insert_with(HashSet::new);
+        if entries.insert(caller) {
+            self.list.push(call);
         }
     }
 
     fn pop(&mut self) -> Option<CallParameterCopy> {
-        let index = self.list.pop()?;
-        self.state.get(index).cloned()
+        self.list.pop()
     }
 }
 
@@ -444,8 +455,31 @@ impl MirFlowGraph {
     /// Resolves the comptime call parameters in all function calls.
     /// As these parameters must be known at compile time, this should be executed after const
     /// propagation.
-    pub fn insert_comptime_call_parameters<B: Backend>(&self, func_reg: &mut MirFuncRegistry<B>) {
-        todo!()
+    pub fn insert_comptime_call_parameters<B: Backend>(
+        &self,
+        func_reg: &mut MirFuncRegistry<B>,
+        eval: &ConstEval,
+    ) -> Result<(), ConstError> {
+        for block in self.blocks.iter() {
+            for statement in block.statements.iter() {
+                let Statement::VarDef { value, .. } = statement else {
+                    continue;
+                };
+                if value.ty != MirExprVariant::Call {
+                    continue;
+                }
+                let call = &self.expressions.call[value.id];
+                for arg in call.comptime_args.iter() {
+                    let Some(ConstEvalState::Known(const_value)) = eval.consts.get(arg.value_expr.0) else {
+                        return Err(ConstError::UnresolvedAtComptime(
+                            arg.value_expr, "value is passed as a function call parameter value \
+                            marked as `comptime` in the function signature".to_string()));
+                    };
+                    func_reg.comptime_mapper.set(arg.value_id, const_value.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolves the constants in the flow graph.
@@ -467,7 +501,7 @@ impl MirFlowGraph {
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
         let mut work_list = CallParameterWorklist::new(root_call_params);
-        let mut visit_count = IndexMap::<usize>::default();
+        // let mut visit_count = IndexMap::<usize>::default();
         // work through work-list
         while let Some(params) = work_list.pop() {
             params.set_vm_values(self, vm, stack_frame, &mut const_eval, reg);
@@ -477,11 +511,11 @@ impl MirFlowGraph {
             // overhead low.
             'outer: loop {
                 // limit execution of a single block to a set amount of times
-                let mut visit = visit_count.view_mut(current_block.0);
-                if visit.get().cloned().unwrap_or(0) > 10 {
-                    break;
-                }
-                visit.update(|val| *val += 1, || 0);
+                // let mut visit = visit_count.view_mut(current_block.0);
+                // if visit.get().cloned().unwrap_or(0) > 10 {
+                //     break;
+                // }
+                // visit.update(|val| *val += 1, || 0);
 
                 self.blocks[current_block.0].eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
                 // jump to other block using sealing statement
@@ -516,11 +550,12 @@ impl MirFlowGraph {
                             // -> we need to continue on both blocks
                             let then_frame = CallParameterCopy::new(
                                 then_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(then_frame);
+                            work_list.push(then_frame, current_block);
                             let else_frame = CallParameterCopy::new(
                                 else_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(else_frame);
+                            work_list.push(else_frame, current_block);
                             // continue traversing the worklist
+                            break;
                         }
                     }
                     Seal::Switch { cond, targets, default } => {
@@ -558,11 +593,12 @@ impl MirFlowGraph {
                             for target in targets.iter() {
                                 let call_param = CallParameterCopy::new(
                                     &target.block_call, &const_eval.block_frame, vm, stack_frame, reg);
-                                work_list.push(call_param);
+                                work_list.push(call_param, current_block);
                             }
                             let call_param = CallParameterCopy::new(
                                 default, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(call_param);
+                            work_list.push(call_param, current_block);
+                            break;
                         }
                     }
                     Seal::None => panic!("block is not sealed!"),

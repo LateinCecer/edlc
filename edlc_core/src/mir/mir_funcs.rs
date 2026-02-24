@@ -544,7 +544,28 @@ impl<B: Backend> MirFuncRegistry<B> {
         self.generators
             .iter()
             .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
-                Some(body.as_ref().clone())
+                if body.comptime_params.is_empty() {
+                    Some(body.as_ref().clone())
+                } else {
+                    // hybrid functions are ignored in this first pass
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    pub fn collect_hybrid_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                if body.comptime_params.is_empty() {
+                    // we only pass hybrid functions here
+                    None
+                } else {
+                    Some(body.as_ref().clone())
+                }
             } else {
                 None
             })
@@ -562,6 +583,20 @@ impl<B: Backend> MirFuncRegistry<B> {
                 .unwrap()
                 .code_gen = CodeGenState::Ready { call_gen: call_generator, body: Box::new(func) };
         }
+    }
+
+    /// Collects function body copies for an optimization pass.
+    /// In essence, this method captures all functions that are marked as `Ready` in the code gen
+    /// state.
+    pub fn collect_opt_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                Some(body.as_ref().clone())
+            } else {
+                None
+            })
+            .collect()
     }
 
     /// Registers a function definition.
@@ -992,9 +1027,13 @@ impl MirFn {
             vm.memcpy(param_dst, param_src);
         }
         // get comptime parameters
-        for (_index, param) in self.comptime_params.iter().enumerate() {
-            let _value = backend.func_reg().comptime_mapper.get(param.value).unwrap();
-            todo!("value should be raw data instead of an obscure value")
+        let root_param_offset = params.len();
+        for (index, param) in self.comptime_params.iter().enumerate() {
+            let func_ref = backend.func_reg();
+            let value = func_ref.comptime_mapper.get(param.value).unwrap();
+            let param_dst = stack_frame_layout
+                .get_offset(&root_parameters[root_param_offset + index]).unwrap();
+            vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
         }
 
         // execute body
