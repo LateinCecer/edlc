@@ -540,11 +540,25 @@ impl<B: Backend> MirFuncRegistry<B> {
     ///
     /// After transformation, the results are reinserted into the registry with
     /// [Self::finish_mir_pass].
+    ///
+    /// # On Hybrid Functions
+    ///
+    /// Hybrid functions, that is all functions that have a runtime context but contain `comptime`
+    /// function parameters, can only be processed once the function call that belongs to the
+    /// hybrid function instance is fully resolved and the values of the constant parameters are
+    /// registered in the function registry.
+    /// This method collects hybrid functions, but only under the condition that all comptime
+    /// parameters for that hybrid function are present.
     pub fn collect_mir_pass(&self) -> Vec<MirFn> {
         self.generators
             .iter()
             .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
-                if body.comptime_params.is_empty() {
+                // comptime functions are always collected by this pass
+                if body.signature.comptime || body.signature.comptime_only || body.comptime_params
+                    .iter()
+                    .all(|p| self.comptime_mapper.get(p.value).is_some()) {
+                    // since `all` returns ture if `comptime_params` is empty, this arm includes
+                    // all non-hybrid functions
                     Some(body.as_ref().clone())
                 } else {
                     // hybrid functions are ignored in this first pass
@@ -556,15 +570,19 @@ impl<B: Backend> MirFuncRegistry<B> {
             .collect()
     }
 
-    pub fn collect_hybrid_pass(&self) -> Vec<MirFn> {
+    /// Collects all `comptime` and `?comptime` functions for processing.
+    /// Since these functions cannot call runtime functions, they _cannot_ depend on hybrid
+    /// functions.
+    /// At the same time, this call of functions is necessary to resolve comptime time constants
+    /// and must thus be processed before runtime context functions are processed.
+    pub fn collect_comptime_pass(&self) -> Vec<MirFn> {
         self.generators
             .iter()
             .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
-                if body.comptime_params.is_empty() {
-                    // we only pass hybrid functions here
-                    None
-                } else {
+                if body.signature.comptime || body.signature.comptime_only {
                     Some(body.as_ref().clone())
+                } else {
+                    None
                 }
             } else {
                 None

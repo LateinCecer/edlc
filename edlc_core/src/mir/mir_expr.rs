@@ -44,7 +44,7 @@ mod mir_graph;
 mod mir_ref;
 
 pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
-pub use mir_graph::*;
+pub use crate::mir::mir_expr::mir_graph::*;
 use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]

@@ -19,15 +19,18 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::mem;
 use std::ops::Range;
+use crate::compiler::EdlCompiler;
 use crate::core::index_map::IndexMap;
 use crate::inline_code;
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout};
+use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
@@ -666,4 +669,139 @@ impl Statement {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum OptimizationError {
+    ConstPropagation(ConstError),
+    Execution(ExecutionError),
+    Lifetime(RegionError),
+    Deconstruction(DeconstructionConflict),
+    Other(String),
+}
+
+impl From<ConstError> for OptimizationError {
+    fn from(err: ConstError) -> Self {
+        Self::ConstPropagation(err)
+    }
+}
+
+impl From<ExecutionError> for OptimizationError {
+    fn from(err: ExecutionError) -> Self {
+        Self::Execution(err)
+    }
+}
+
+impl From<RegionError> for OptimizationError {
+    fn from(err: RegionError) -> Self {
+        Self::Lifetime(err)
+    }
+}
+
+impl From<DeconstructionConflict> for OptimizationError {
+    fn from(err: DeconstructionConflict) -> Self {
+        Self::Deconstruction(err)
+    }
+}
+
+impl Display for OptimizationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConstPropagation(err) => write!(f, "const propagation failed: {}", err),
+            Self::Execution(err) => write!(f, "execution failed: {}", err),
+            Self::Lifetime(err) => write!(f, "lifetime error: {}", err),
+            Self::Deconstruction(err) => write!(f, "deconstruction conflict: {}", err),
+            Self::Other(err) => write!(f, "{}", err),
+        }
+    }
+}
+
+impl Error for OptimizationError {}
+
+fn process_function(
+    body: &mut MirFn,
+    vm: &mut ExecutorVM,
+    compiler: &mut EdlCompiler,
+    backend: &mut impl Backend,
+) -> Result<(), OptimizationError> {
+    let lifeness = body.body.lifetimes(&mut compiler.mir_phase.types)?;
+    let deconstruction = body.body.deconstruct(&lifeness)?;
+
+    let options = StackFrameOptions {
+        store_plane: true,
+        .. Default::default()
+    };
+    let mut stack_frame = StackFrameLayout::new(
+        &deconstruction,
+        options,
+        &body.body,
+        &compiler.mir_phase.types,
+    );
+    vm.alloc_stack_frame(&mut stack_frame);
+    let const_eval = body.body.propagate_constants(
+        &[],
+        vm,
+        &stack_frame,
+        &compiler.mir_phase.types,
+        backend,
+    )?;
+    vm.pop_frame(&mut stack_frame);
+
+    // insert constant parameters for hybrid function calls
+    {
+        let mut func_reg = backend.func_reg_mut();
+        body.body.insert_comptime_call_parameters(&mut func_reg, &const_eval)?;
+    }
+
+    // insert constant eval results where possible
+    body.body.include_constants(&const_eval);
+    // TODO validate
+    body.stack_frame_layout = Some(stack_frame); // save stack frame for future reference
+    Ok(())
+}
+
+/// Processes all functions, including runtime and hybrid functions.
+pub fn process_function_mir_pass<B: Backend>(
+    vm: &mut ExecutorVM,
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    loop {
+        let mut funcs = {
+            let binding = backend.func_reg_mut();
+            binding.collect_mir_pass()
+        };
+        if funcs.is_empty() {
+            break; // all functions have been processed
+        }
+        for func in funcs.iter_mut() {
+            process_function(func, vm, compiler, backend)?;
+        }
+
+        let mut func_reg = backend.func_reg_mut();
+        func_reg.finish_mir_pass(funcs);
+    }
+    Ok(())
+}
+
+/// Processes all `comptime` and `?comptime` functions.
+pub fn process_comptime_functions<B: Backend>(
+    vm: &mut ExecutorVM,
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    let mut funcs = {
+        let binding = backend.func_reg_mut();
+        binding.collect_comptime_pass()
+    };
+
+    for func in funcs.iter_mut() {
+        process_function(func, vm, compiler, backend)?;
+    }
+
+    let mut func_reg = backend.func_reg_mut();
+    func_reg.finish_mir_pass(funcs);
+    Ok(())
 }

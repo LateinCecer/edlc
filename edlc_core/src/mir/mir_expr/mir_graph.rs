@@ -53,6 +53,7 @@ use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame};
 pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
+pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::resolver::ScopeId;
 
@@ -1126,6 +1127,12 @@ impl Block {
 #[derive(Debug)]
 pub struct ExecutionError {
     value: AmorphusDataCopy,
+}
+
+impl Display for ExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Execution error; error data is {} bytes in size", self.value.len())
+    }
 }
 
 impl MirFlowGraph {

@@ -13,7 +13,7 @@ use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
-use edlc_core::prelude::mir_expr::{AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_expr::{process_comptime_functions, process_function_mir_pass, AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
@@ -189,48 +189,7 @@ impl TestCompiler {
         deconstruction.print_mapping(&body);
 
         let mut vm = ExecutorVM::new(1024 * 1024);
-        {
-            let mut mir_pass = {
-                let binding = self.backend.funcs.borrow_mut();
-                binding.collect_mir_pass()
-            };
-            // do MIR transformation and optimization passes
-            for body in mir_pass.iter_mut() {
-                println!("transforming function body...");
-                let lifeness = body.body.lifetimes(&self.compiler.mir_phase.types)?;
-                let deconstruction = body.body.deconstruct(&lifeness)?;
-
-                let options = StackFrameOptions {
-                    store_plane: true,
-                    .. Default::default()
-                };
-                let mut stack_frame = StackFrameLayout::new(
-                    &deconstruction, options, &body.body, &self.compiler.mir_phase.types);
-
-                // propagate constants
-                vm.alloc_stack_frame(&mut stack_frame);
-                let const_eval = body.body.propagate_constants(
-                    &[],
-                    &mut vm,
-                    &stack_frame,
-                    &self.compiler.mir_phase.types,
-                    &mut self.backend,
-                ).unwrap();
-                vm.pop_frame(&mut stack_frame);
-                {
-                    let mut func_reg = self.backend.func_reg_mut();
-                    body.body.insert_comptime_call_parameters(&mut func_reg, &const_eval)?;
-                }
-
-                // TODO validate
-
-                body.stack_frame_layout = Some(stack_frame);
-            }
-
-            // finish mir pass
-            let mut binding = self.backend.funcs.borrow_mut();
-            binding.finish_mir_pass(mir_pass);
-        }
+        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
 
         // create stack frame
         let options = StackFrameOptions {
@@ -254,6 +213,7 @@ impl TestCompiler {
             let mut func_reg = self.backend.func_reg_mut();
             body.insert_comptime_call_parameters(&mut func_reg, &res)?;
         }
+        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
 
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body

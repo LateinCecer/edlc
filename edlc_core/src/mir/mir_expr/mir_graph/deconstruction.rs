@@ -123,6 +123,10 @@ impl PartialSsaDeconstruction {
     }
 
     fn transition_value(&mut self, old: DataSource, new: DataSource) {
+        if old == new {
+            return;
+        }
+
         // copy over the ranges from the old source to the new source
         let old_ranges = self.ranges
             .get(old.0)
@@ -227,6 +231,12 @@ impl PartialSsaDeconstruction {
                 self.transition_value(*el, els[0]);
             }
         }
+
+        #[cfg(debug_assertions)]
+        assert!(
+            self.ranges.view_mut(els[0].0).contains(&value),
+            "transitioning deconstructed data source ranges failed sanity check",
+        );
         els[0]
     }
 
@@ -370,7 +380,6 @@ impl StackFrameLayout {
                 let size = reg.byte_size(*ty).unwrap();
 
                 offset = offset.div_ceil(align) * align;
-                members.view_mut(first.0).set((offset..(offset + size), *ty));
                 range.iter().for_each(|val| {
                     members.view_mut(val.0).set((offset..(offset + size), *ty));
                 });
@@ -388,7 +397,12 @@ impl StackFrameLayout {
     }
 
     pub fn get_offset(&self, val: &MirValue) -> Option<&(ops::Range<usize>, MirTypeId)> {
-        self.members.get(val.0)
+        if let Some(val) = self.members.get(val.0) {
+            Some(val)
+        } else {
+            eprintln!("warning: value ${:x} does not have a mapping in the current stack frame!", val.0);
+            None
+        }
     }
 }
 
