@@ -7,6 +7,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use std::thread::current;
 use anyhow::anyhow;
@@ -174,19 +175,14 @@ impl TestCompiler {
         body.insert_return(current_block, ret_value);
         body.seal();
 
-        // print result
-        let mut out = std::io::stdout();
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&body)?;
-
         // body.constant_analysis()?;
-        println!("doing lifetime analysis");
+        // println!("doing lifetime analysis");
         let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
-        println!("done with lifetime analysis");
+        // println!("done with lifetime analysis");
 
         let deconstruction = body.deconstruct(&lifeness)?;
-        deconstruction.print_ranges();
-        deconstruction.print_mapping(&body);
+        // deconstruction.print_ranges();
+        // deconstruction.print_mapping(&body);
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
@@ -207,13 +203,22 @@ impl TestCompiler {
             &mut self.backend,
         ).unwrap();
         vm.pop_frame(&mut stack_frame);
-        res.print();
+        // res.print();
 
         {
             let mut func_reg = self.backend.func_reg_mut();
             body.insert_comptime_call_parameters(&mut func_reg, &res)?;
         }
+        body.include_constants(&res); // includes the compile-time analysis results into the
+        // CFG for optimization
+
         process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
+
+        // print result
+        let mut out = std::io::stdout();
+        out.write_all(b"MIR CFG for expression eval:\n")?;
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(&body)?;
 
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body

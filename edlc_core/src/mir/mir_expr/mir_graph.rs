@@ -1193,13 +1193,13 @@ impl MirFlowGraph {
             // jump to other block using sealing statement
             match &self.blocks[current_block.0].seal {
                 Seal::Return(value) => {
-                    println!("returning from execution");
+                    // println!("returning from execution");
                     let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
                     let data = vm.get_data(range.clone(), ty);
                     break Ok(data.get_copy(reg));
                 }
                 Seal::Panic(value) => {
-                    println!("panic in execution");
+                    // println!("panic in execution");
                     let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
                     let data = vm.get_data(range.clone(), ty);
                     break Err(ExecutionError { value: data.get_copy(reg) });
@@ -1993,10 +1993,10 @@ impl MirFlowGraph {
         let mut state = MirGraphState::default();
         WorkListFixpointForward.solve(self, &mut state, ConstState::upper)?;
 
-        println!("result of const analysis:");
-        for (node, const_state) in state.0.iter() {
-            println!("${:x}: {}", node.0, const_state);
-        }
+        // println!("result of const analysis:");
+        // for (node, const_state) in state.0.iter() {
+        //     println!("${:x}: {}", node.0, const_state);
+        // }
         Ok(())
     }
 
@@ -2017,10 +2017,10 @@ impl MirFlowGraph {
         state.1.insert_references(self, mir_types);
         WorkListFixpointBackward.solve(self, &mut state, LifetimeSpan::upper)?;
 
-        println!("result of lifetime analysis:");
-        for (node, const_state) in state.0.iter() {
-            println!("${:x} is alive in {const_state}", node.0);
-        }
+        // println!("result of lifetime analysis:");
+        // for (node, const_state) in state.0.iter() {
+        //     println!("${:x} is alive in {const_state}", node.0);
+        // }
 
         let liveness = RegionLifenessList::new(&state.0, self);
         Ok(liveness)
@@ -2036,8 +2036,8 @@ impl MirFlowGraph {
         WorkListFixpointForward.solve(self, &mut state, BorrowState::upper)?;
         let graph = BorrowGraph::new(state.0.map);
 
-        println!("result of borrow state analysis:");
-        graph.print();
+        // println!("result of borrow state analysis:");
+        // graph.print();
         Ok(graph)
     }
 
@@ -2060,12 +2060,12 @@ impl MirFlowGraph {
         state.1.insert_root_parameters(self, &mut state.0);
         WorkListFixpointForward.solve(self, &mut state, DataOrigin::upper)?;
 
-        println!("result of joined data origin resolution:");
-        for (node, state) in state.0.iter() {
-            println!("${:x} is saved in {state}", node.0);
-        }
-
-        println!("trying to consolidate data sources...");
+        // println!("result of joined data origin resolution:");
+        // for (node, state) in state.0.iter() {
+        //     println!("${:x} is saved in {state}", node.0);
+        // }
+        //
+        // println!("trying to consolidate data sources...");
         state.1.consolidate(&mut state.0, lifeness);
         state.1.reduce_further(lifeness, self);
         Ok(state.1)

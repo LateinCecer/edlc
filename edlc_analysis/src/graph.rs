@@ -1218,7 +1218,7 @@ where
                 }
             }
         }
-        println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
+        // println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1254,8 +1254,8 @@ where
             }
         }
 
-        #[cfg(debug_assertions)]
-        println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
+        // #[cfg(debug_assertions)]
+        // println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1309,7 +1309,7 @@ where
             }
         }
 
-        println!("[debug] propagation-work-list-algorithm finished with {num_iters} iterations!");
+        // println!("[debug] propagation-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1351,7 +1351,7 @@ where
             }
         }
 
-        println!("[debug] propagation-work-list-algorithm finished with {num_iters} iterations!");
+        // println!("[debug] propagation-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }

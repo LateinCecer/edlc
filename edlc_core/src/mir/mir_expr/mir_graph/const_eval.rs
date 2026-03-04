@@ -149,9 +149,11 @@ impl CallParameterCopy {
             .zip(self.params.iter()) {
 
             let Some(param_value) = param_value else {
+                // if the parameter is not available as a constant in one call, it is definitely
+                // not available as a constant in general.
+                consts.mark_runtime(param);
                 continue;
             };
-            consts.block_frame.avail.insert(*param);
             let (dst_range, dst_ty) = stack_frame.get_offset(param, vm).unwrap();
             let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
             dst.memcpy(&param_value.as_data());
@@ -162,19 +164,6 @@ impl CallParameterCopy {
 }
 
 impl ConstFrame {
-    fn transfer_block_call(&self, call: &BlockCall, cfg: &MirFlowGraph, parent: &ConstFrame) -> ConstFrame {
-        let mut block_frame = ConstFrame { avail: HashSet::new(), references: parent.references.clone() };
-        for (caller_value, callee_value) in call.params
-            .iter()
-            .zip(cfg.blocks[call.target.0].parameters.iter()) {
-            // check if caller value is known at comptime
-            if self.avail.contains(caller_value) {
-                block_frame.avail.insert(*callee_value);
-            }
-        }
-        block_frame
-    }
-
     pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
         self.avail.contains(value) && self.references.get_max(value, graph, FlowState::cmp)
             .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
@@ -228,8 +217,9 @@ impl ConstEval {
                 let src = stack_frame.get_offset(caller_value, vm).unwrap();
                 let dst = stack_frame.get_offset(callee_value, vm).unwrap();
                 vm.memcpy(&dst, &src);
-                self.insert_const_value(cfg, callee_value, vm, stack_frame, reg);
+                self.block_frame.avail.insert(*callee_value);
             }
+            self.merge_parameter_const_state(cfg, caller_value, callee_value, reg, Some(&block_frame));
         }
     }
 
@@ -263,7 +253,7 @@ impl ConstEval {
             match prev {
                 ConstEvalState::Known(prev) => {
                     let range = stack_frame.get_offset(value, vm).unwrap();
-                    let value = vm.get_data(range.0.clone(), range.1);
+                    let value = vm.get_data(range.0, range.1);
                     if value != prev.as_data() {
                         // value is not eval (direct byte comparison)
                         // assume that the value can only be known at runtime
@@ -274,9 +264,92 @@ impl ConstEval {
             }
         } else {
             let range = stack_frame.get_offset(value, vm).unwrap();
-            let value = vm.get_data(range.0.clone(), range.1).get_copy(reg);
+            let value = vm.get_data(range.0, range.1).get_copy(reg);
             view.set(ConstEvalState::Known(value))
         }
+    }
+
+    /// Merges the states of the block call parameter values into the target block parameters.
+    /// If any of the target block parameters changed as a result of this operation, `true` is
+    /// returned.
+    /// Otherwise, this method returns `false`.
+    /// Should the block call not contain any parameters, this method returns `false`.
+    fn merge_call_parameters(
+        &mut self,
+        call: &BlockCall,
+        cfg: &MirFlowGraph,
+        reg: &MirTypeRegistry,
+    ) -> bool {
+        let mut changed = false;
+        for (caller_value, callee_value) in call.params.iter()
+            .zip(cfg.blocks[call.target.0].parameters.iter()) {
+            // merge the parameters using the internal stack frame reference
+            changed |= self.merge_parameter_const_state(cfg, caller_value, callee_value, reg, None);
+        }
+        changed
+    }
+
+    /// Merges the constant evaluation states of the source and the destination parameter
+    /// and writes the result into the destination state.
+    /// If the destination state changed, this method returns `true`, otherwise it returns `false`.
+    fn merge_parameter_const_state(
+        &mut self,
+        cfg: &MirFlowGraph,
+        src: &MirValue,
+        dst: &MirValue,
+        reg: &MirTypeRegistry,
+        src_frame: Option<&ConstFrame>,
+    ) -> bool {
+        // if the source is not constant, dst can also not be constant
+        let Some(ConstEvalState::Known(src_data)) = self.consts.get(src.0) else {
+            // if source does not have a constant value registered, the callee parameter can also
+            // definitely not be constant
+            return self.mark_runtime(dst);
+        };
+
+        let is_avail = if let Some(src_frame) = src_frame {
+            src_frame
+        } else {
+            &self.block_frame
+        }.is_avail(src, &self.borrow_graph);
+
+        if is_avail {
+            // get value from vm
+            let view = self.consts.view(dst.0);
+            let ty = cfg.get_var_type(dst);
+            if reg.is_ref(ty) || reg.is_mut_ref(ty) {
+                return self.mark_runtime(dst);
+            }
+
+            // the value is not a reference
+            if let Some(prev) = view.get() {
+                match prev {
+                    ConstEvalState::Known(prev) => {
+                        if src_data.as_data() != prev.as_data() {
+                            self.mark_runtime(dst)
+                        } else {
+                            false
+                        }
+                    }
+                    ConstEvalState::Runtime => false, // do nothing in this case
+                }
+            } else {
+                let data = src_data.clone();
+                self.consts.view_mut(dst.0).set(ConstEvalState::Known(data));
+                true
+            }
+        } else {
+            // if the value is not available now, mark it as unavailable permanently
+            self.mark_runtime(dst)
+        }
+    }
+
+    /// Marks the [MirValue] as only being available at runtime and returns if the value changed.
+    fn mark_runtime(&mut self, value: &MirValue) -> bool {
+        let mut view = self.consts.view_mut(value.0);
+        let changed = !matches!(view.get(), Some(ConstEvalState::Runtime));
+        view.set(ConstEvalState::Runtime);
+        changed
     }
 
     fn get_constant_value(&self, value: &MirValue) -> Option<&AmorphusDataCopy> {
@@ -318,11 +391,11 @@ impl CallParameterWorklist {
         }
     }
 
-    fn push(&mut self, call: CallParameterCopy, caller: MirBlockRef) {
+    fn push(&mut self, call: CallParameterCopy, caller: MirBlockRef, force: bool) {
         let index = call.block.0;
         let mut view = self.entry_list.view_mut(index);
         let entries = view.get_or_insert_with(HashSet::new);
-        if entries.insert(caller) {
+        if entries.insert(caller) || force {
             self.list.push(call);
         }
     }
@@ -372,6 +445,8 @@ impl MirFlowGraph {
     /// graph.
     /// To keep the CFG consistent, this includes updating *all* block calls within the flow_graph.
     fn replace_constant_parameters(&mut self, consts: &ConstEval) {
+        let mut retain_list = vec![]; // for each block, maintaine a list of block parameter
+        // indices that we *want to keep*
         for block in self.blocks.iter_mut() {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
@@ -395,31 +470,43 @@ impl MirFlowGraph {
             statements.append(&mut block.statements);
             block.statements = statements;
             // filter parameters to input into block again
-            params.into_iter().for_each(|param| {
+            let mut retain_indices = vec![];
+            params.into_iter().enumerate().for_each(|(idx, param)| {
                 if consts.get_constant_value(&param).is_none() {
+                    retain_indices.push(idx);
                     block.parameters.push(param);
                 }
             });
+            retain_list.push(retain_indices);
+        }
 
-            // transfer parameters
-            fn transfer_params(call: &mut BlockCall, consts: &ConstEval) {
-                call.params.retain(|val| consts.get_constant_value(val).is_none())
+        // update block calls in all sealing statements based on the constructed retain list
+        for block in self.blocks.iter_mut() {
+            fn transfer_parameters(call: &mut BlockCall, retain_list: &[Vec<usize>]) {
+                let target_retain = &retain_list[call.target.0];
+                let to_retain = call.params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, val)| {
+                        if target_retain.contains(&idx) { Some(*val) } else { None }
+                    })
+                    .collect();
+                call.params = to_retain;
             }
 
-            // update block calls in sealing statement of this graph
             match &mut block.seal {
                 Seal::Jump(call) => {
-                    transfer_params(call, consts);
+                    transfer_parameters(call, &retain_list);
                 },
-                Seal::Cond { then_target, else_target, .. } => {
-                    transfer_params(then_target, consts);
-                    transfer_params(else_target, consts);
+                Seal::Cond { cond: _, then_target, else_target } => {
+                    transfer_parameters(then_target, &retain_list);
+                    transfer_parameters(else_target, &retain_list);
                 },
-                Seal::Switch { targets, default, .. } => {
-                    for target in targets.iter_mut() {
-                        transfer_params(&mut target.block_call, consts);
-                    }
-                    transfer_params(default, consts);
+                Seal::Switch { cond: _, targets, default } => {
+                    targets.iter_mut().for_each(|target| {
+                        transfer_parameters(&mut target.block_call, &retain_list);
+                    });
+                    transfer_parameters(default, &retain_list);
                 },
                 _ => (),
             }
@@ -524,11 +611,11 @@ impl MirFlowGraph {
                 // jump to other block using sealing statement
                 match &self.blocks[current_block.0].seal {
                     Seal::Return(_value) => {
-                        println!("returning from execution in a branch of const evaluation");
+                        // println!("returning from execution in a branch of const evaluation");
                         break;
                     }
                     Seal::Panic(_value) => {
-                        println!("panic possible in const evaluation");
+                        // println!("panic possible in const evaluation");
                         break;
                     }
                     Seal::Jump(target) => {
@@ -553,10 +640,18 @@ impl MirFlowGraph {
                             // -> we need to continue on both blocks
                             let then_frame = CallParameterCopy::new(
                                 then_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(then_frame, current_block);
+                            work_list.push(
+                                then_frame,
+                                current_block,
+                                const_eval.merge_call_parameters(then_target, self, reg),
+                            );
                             let else_frame = CallParameterCopy::new(
                                 else_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(else_frame, current_block);
+                            work_list.push(
+                                else_frame,
+                                current_block,
+                                const_eval.merge_call_parameters(else_target, self, reg),
+                            );
                             // continue traversing the worklist
                             break;
                         }
@@ -596,11 +691,19 @@ impl MirFlowGraph {
                             for target in targets.iter() {
                                 let call_param = CallParameterCopy::new(
                                     &target.block_call, &const_eval.block_frame, vm, stack_frame, reg);
-                                work_list.push(call_param, current_block);
+                                work_list.push(
+                                    call_param,
+                                    current_block,
+                                    const_eval.merge_call_parameters(&target.block_call, self, reg),
+                                );
                             }
                             let call_param = CallParameterCopy::new(
                                 default, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(call_param, current_block);
+                            work_list.push(
+                                call_param,
+                                current_block,
+                                const_eval.merge_call_parameters(default, self, reg),
+                            );
                             break;
                         }
                     }
@@ -726,8 +829,8 @@ fn process_function(
 ) -> Result<(), OptimizationError> {
     let lifeness = body.body.lifetimes(&mut compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
-    deconstruction.print_ranges();
-    deconstruction.print_mapping(&body.body);
+    // deconstruction.print_ranges();
+    // deconstruction.print_mapping(&body.body);
 
     let options = StackFrameOptions {
         store_plane: true,
@@ -814,7 +917,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         writer.print(&func.body).unwrap();
         std_out.flush().unwrap();
     }
-    println!("processed {} comptime functions", funcs.len());
+    // println!("processed {} comptime functions", funcs.len());
 
     let mut func_reg = backend.func_reg_mut();
     func_reg.finish_mir_pass(funcs);
