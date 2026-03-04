@@ -623,15 +623,16 @@ fn test_env() -> Result<(), anyhow::Error> {
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
 
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+comptime fn transform(val: f32) -> f32 {
+    let out: f32 = f32::mul(val, 2.0_f32);
+    out
+}
+
 fn test_function(val: f32) -> f32 {
     std::print("Hello, World! from the test function. ");
     std::print(val as i32);
     std::print("\n");
-    val * 67.0
-}
-
-comptime fn transform(val: f32) -> f32 {
-    val
+    val * 67.0_f32
 }
 
 fn some_hybrid(y: f32, comptime x: f32) -> i32 {

@@ -1921,8 +1921,12 @@ impl MakeGraph for HirFunctionCall {
             graph.hir_phase,
             graph.mir_phase,
             comptime_params,
-            comptime_call,
+            comptime_call && edl_sig.is_hybrid(),
         )?;
+
+        // println!("function call to `{}` compiled to {func:?}", format_type_args!(&edl_func_instance as &dyn FmtType)
+        //     .printable(&graph.hir_phase.types, &graph.hir_phase.vars));
+        // println!("  - comptime: {comptime_call}");
 
         // get call context from function signature
         // how the function is actually called is ultimately up to the MIR compiler

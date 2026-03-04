@@ -109,8 +109,9 @@ impl MirCall {
             ret_value
         } else {
             let func_reg = backend.func_reg();
-            let inline_body = func_reg.get_inline_body(self.func).unwrap()
-                .expect("no function body found!");
+            let Some(inline_body) = func_reg.get_inline_body(self.func).unwrap() else {
+                panic!("function body not found for function {:?}", self.func);
+            };
 
             let params = self.args.iter()
                 .map(|par| {
