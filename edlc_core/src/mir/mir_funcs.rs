@@ -1041,18 +1041,31 @@ impl MirFn {
         let root_parameters = self.body.get_root_parameters();
         for (index, param_src) in params.iter().enumerate() {
             let param_dst = stack_frame_layout
-                .get_offset(&root_parameters[index]).unwrap();
-            vm.memcpy(param_dst, param_src);
+                .get_offset(&root_parameters[index], vm).unwrap();
+            vm.memcpy(&param_dst, param_src);
         }
         // get comptime parameters
         let root_param_offset = params.len();
         for (index, param) in self.comptime_params.iter().enumerate() {
             let func_ref = backend.func_reg();
             let value = func_ref.comptime_mapper.get(param.value).unwrap();
+            // println!("MAPPER VALUES: {:?}", value);
+            // let mut bytes = [0u8; 4];
+            // bytes.copy_from_slice(&value.as_data().as_slice()[0..4]);
+            // let test = f32::from_ne_bytes(bytes);
+            // println!("AS FLOAT: {test}");
+
             let param_dst = stack_frame_layout
-                .get_offset(&root_parameters[root_param_offset + index]).unwrap();
+                .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
             vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
         }
+
+        // println!("Block parameter values:");
+        // for (index, param) in self.body.get_root_parameters().iter().enumerate() {
+        //     let loc = stack_frame_layout.get_offset(&param, vm).unwrap();
+        //     let data = vm.get_data(loc.0.clone(), loc.1);
+        //     println!("  {index} - ${:x}: {:?}", param.0, data);
+        // }
 
         // execute body
         let res = self.body

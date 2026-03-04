@@ -13,10 +13,6 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::any::TypeId;
-use std::mem::MaybeUninit;
-use std::{mem, ops};
-use std::collections::HashMap;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
@@ -24,9 +20,12 @@ use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::StackFrameLayout;
 use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::MirUid;
 use crate::prelude::mir_expr::MirValue;
 use crate::resolver::ScopeId;
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::mem::MaybeUninit;
+use std::ops;
 
 pub struct AmorphusDataMut<'a> {
     data: &'a mut [u8],
@@ -303,6 +302,7 @@ pub struct ExecutorVM {
     const_region_size: usize,
     stack_region: usize,
     stack_region_size: usize,
+    pub frame_pointer: usize,
 }
 
 impl ExecutorVM {
@@ -317,6 +317,7 @@ impl ExecutorVM {
             const_region_size: const_size,
             memory,
             global_vars: HashMap::new(),
+            frame_pointer: 0,
         }
     }
 
@@ -330,7 +331,7 @@ impl ExecutorVM {
         self.global_vars.insert(*id, range);
     }
 
-    pub fn alloc_stack_frame(&mut self, stack: &mut StackFrameLayout) {
+    pub fn alloc_stack_frame(&mut self, stack: &StackFrameLayout) {
         let mut start = self.stack_region;
         start = (start + stack.red_zone).div_ceil(stack.alignment) * stack.alignment;
         if start + stack.size > self.stack_region_size {
@@ -338,11 +339,26 @@ impl ExecutorVM {
         }
 
         self.stack_region = start + stack.size;
-        stack.frame_offset = start;
+        // save return frame pointer
+        let data = usize::to_ne_bytes(self.frame_pointer);
+        self.memory[(start - stack.ret_fp)..(start - stack.ret_fp + size_of::<usize>())]
+            .copy_from_slice(&data);
+        self.frame_pointer = start;
     }
 
-    pub fn pop_frame(&mut self, stack_frame: &mut StackFrameLayout) {
-        self.stack_region = stack_frame.frame_offset - stack_frame.red_zone;
+    /// # Note
+    ///
+    /// After popping the stack frame, the allocated stack memory _may_ be slightly larger than
+    /// before the stack frame was pushed.
+    /// This is because the stack frame regions are aligned to certain memory boundaries, usually
+    /// 16 byte.
+    /// This does however not mean that there is a memory leak in the stack frame, as the red-zone
+    /// size is also always aligned to the base alignment of the frame.
+    pub fn pop_frame(&mut self, stack_frame: &StackFrameLayout) {
+        let mut data = [0u8; size_of::<usize>()];
+        data.copy_from_slice(&self.memory[(self.frame_pointer - stack_frame.ret_fp)..(self.frame_pointer - stack_frame.ret_fp + size_of::<usize>())]);
+        self.stack_region = self.frame_pointer - stack_frame.red_zone; // reset stack size
+        self.frame_pointer = usize::from_ne_bytes(data);
     }
 
     /// Allocates const memory in the VM.
@@ -392,10 +408,9 @@ impl ExecutorVM {
         stack_frame: &StackFrameLayout,
     ) {
         dst.iter().zip(src.iter()).for_each(|(dst, src)| {
-            self.memcpy(
-                stack_frame.get_offset(dst).unwrap(),
-                stack_frame.get_offset(src).unwrap(),
-            );
+            let dst_off = stack_frame.get_offset(dst, self).unwrap();
+            let src_off = stack_frame.get_offset(src, self).unwrap();
+            self.memcpy(&dst_off, &src_off);
         })
     }
 
@@ -427,8 +442,8 @@ impl ExecutorVM {
         layout: &StackFrameLayout,
         reg: &MirTypeRegistry,
     ) {
-        let (range, ty) = layout.get_offset(&dst).unwrap();
-        assert!(reg.is_ref(ty) || reg.is_mut_ref(ty));
+        let (range, ty) = layout.get_offset(&dst, self).unwrap();
+        assert!(reg.is_ref(&ty) || reg.is_mut_ref(&ty));
         std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut *const u8, value);
     }
 
@@ -440,7 +455,7 @@ impl ExecutorVM {
         layout: &StackFrameLayout,
         _reg: &MirTypeRegistry,
     ) {
-        let (range, _ty) = layout.get_offset(&dst).unwrap();
+        let (range, _ty) = layout.get_offset(&dst, self).unwrap();
         assert_eq!(range.len(), size_of::<*const u8>() * 2);
         unsafe { std::ptr::write(
             self.memory[range.clone()].as_mut_ptr() as *mut FatPtr,
@@ -455,8 +470,8 @@ impl ExecutorVM {
         layout: &StackFrameLayout,
         reg: &MirTypeRegistry,
     ) {
-        let (range, ty) = layout.get_offset(&dst).unwrap();
-        if let Some(lhs) = reg.get_rust_from_type(*ty) {
+        let (range, ty) = layout.get_offset(&dst, self).unwrap();
+        if let Some(lhs) = reg.get_rust_from_type(ty) {
             assert_eq!(TypeId::of::<T>(), lhs);
         }
         unsafe { std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut T, value) };
@@ -468,8 +483,8 @@ impl ExecutorVM {
         layout: &StackFrameLayout,
         reg: &MirTypeRegistry,
     ) -> Option<T> {
-        let (range, ty) = layout.get_offset(&value)?;
-        if let Some(lhs) = reg.get_rust_from_type(*ty) {
+        let (range, ty) = layout.get_offset(&value, self)?;
+        if let Some(lhs) = reg.get_rust_from_type(ty) {
             assert_eq!(TypeId::of::<T>(), lhs);
         }
         Some(unsafe { std::ptr::read(self.memory[range.clone()].as_ptr() as *const T) })
@@ -481,8 +496,8 @@ impl ExecutorVM {
         layout: &StackFrameLayout,
         reg: &MirTypeRegistry,
     ) -> Option<T> {
-        let (range, ty) = layout.get_offset(&value)?;
-        let lhs = reg.get_rust_from_type(*ty)?;
+        let (range, ty) = layout.get_offset(&value, &self)?;
+        let lhs = reg.get_rust_from_type(ty)?;
         assert_eq!(TypeId::of::<T>(), lhs);
         Some(unsafe { std::ptr::read(self.memory[range.clone()].as_ptr() as *const T) })
     }

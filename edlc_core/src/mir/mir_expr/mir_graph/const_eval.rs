@@ -24,7 +24,7 @@ use crate::core::index_map::IndexMap;
 use crate::inline_code;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirValue, StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
@@ -94,7 +94,7 @@ impl CallParameterCopy {
             .zip(call.params.iter()) {
 
             if block_frame.avail.contains(param_value) {
-                let range = stack_frame.get_offset(param_value).unwrap();
+                let range = stack_frame.get_offset(param_value, vm).unwrap();
                 let value = vm.get_data(range.0.clone(), range.1).get_copy(reg);
                 *const_target = Some(value);
             }
@@ -152,8 +152,8 @@ impl CallParameterCopy {
                 continue;
             };
             consts.block_frame.avail.insert(*param);
-            let (dst_range, dst_ty) = stack_frame.get_offset(param).unwrap();
-            let [mut dst] = vm.get_data_mut([dst_range.clone()], &[*dst_ty]);
+            let (dst_range, dst_ty) = stack_frame.get_offset(param, vm).unwrap();
+            let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
             dst.memcpy(&param_value.as_data());
             // record const value in eval records
             consts.insert_const_value(cfg, param, vm, stack_frame, reg);
@@ -225,9 +225,9 @@ impl ConstEval {
             .zip(cfg.blocks[call.target.0].parameters.iter()) {
             // check if caller value is known at comptime
             if block_frame.is_avail(caller_value, &self.borrow_graph) {
-                let src = stack_frame.get_offset(caller_value).unwrap();
-                let dst = stack_frame.get_offset(callee_value).unwrap();
-                vm.memcpy(dst, src);
+                let src = stack_frame.get_offset(caller_value, vm).unwrap();
+                let dst = stack_frame.get_offset(callee_value, vm).unwrap();
+                vm.memcpy(&dst, &src);
                 self.insert_const_value(cfg, callee_value, vm, stack_frame, reg);
             }
         }
@@ -262,7 +262,7 @@ impl ConstEval {
         if let Some(prev) = view.get() {
             match prev {
                 ConstEvalState::Known(prev) => {
-                    let range = stack_frame.get_offset(value).unwrap();
+                    let range = stack_frame.get_offset(value, vm).unwrap();
                     let value = vm.get_data(range.0.clone(), range.1);
                     if value != prev.as_data() {
                         // value is not eval (direct byte comparison)
@@ -273,7 +273,7 @@ impl ConstEval {
                 ConstEvalState::Runtime => (), // do nothing in this case
             }
         } else {
-            let range = stack_frame.get_offset(value).unwrap();
+            let range = stack_frame.get_offset(value, vm).unwrap();
             let value = vm.get_data(range.0.clone(), range.1).get_copy(reg);
             view.set(ConstEvalState::Known(value))
         }
@@ -565,8 +565,8 @@ impl MirFlowGraph {
                         // if the condition is known at compile time, we can execute the jump directly
                         if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
                             // condition is known at comptime
-                            let (cond_range, cond_ty) = stack_frame.get_offset(cond).unwrap();
-                            let cond_data = vm.get_data(cond_range.clone(), *cond_ty);
+                            let (cond_range, cond_ty) = stack_frame.get_offset(cond, vm).unwrap();
+                            let cond_data = vm.get_data(cond_range.clone(), cond_ty);
 
                             for target in targets.iter() {
                                 // value **must** be known
@@ -577,8 +577,8 @@ impl MirFlowGraph {
 
                                 // get match value and compare to constant input condition
                                 let (target_range, target_ty) = stack_frame
-                                    .get_offset(&target.match_value).unwrap();
-                                if vm.get_data(target_range.clone(), *target_ty) == cond_data {
+                                    .get_offset(&target.match_value, vm).unwrap();
+                                if vm.get_data(target_range.clone(), target_ty) == cond_data {
                                     // data matches!
                                     const_eval.transfer_block_call(&target.block_call, self, vm, stack_frame, reg);
                                     current_block = target.block_call.target;
@@ -647,9 +647,9 @@ impl Statement {
                 | Self::VarCopy { var, value, uid: _ } => {
                 // check if value exists
                 if const_eval.block_frame.avail.contains(value) {
-                    let dst = stack_frame.get_offset(var).unwrap();
-                    let src = stack_frame.get_offset(value).unwrap();
-                    vm.memcpy(dst, src);
+                    let dst = stack_frame.get_offset(var, vm).unwrap();
+                    let src = stack_frame.get_offset(value, vm).unwrap();
+                    vm.memcpy(&dst, &src);
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
                 }
             }
@@ -726,6 +726,8 @@ fn process_function(
 ) -> Result<(), OptimizationError> {
     let lifeness = body.body.lifetimes(&mut compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
+    deconstruction.print_ranges();
+    deconstruction.print_mapping(&body.body);
 
     let options = StackFrameOptions {
         store_plane: true,
@@ -777,6 +779,12 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         }
         for func in funcs.iter_mut() {
             process_function(func, vm, compiler, backend)?;
+
+            let mut std_out = std::io::stdout();
+            writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
+            let mut writer = AsciPrinter::new(&mut std_out);
+            writer.print(&func.body).unwrap();
+            std_out.flush().unwrap();
         }
 
         let mut func_reg = backend.func_reg_mut();
@@ -799,9 +807,17 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     for func in funcs.iter_mut() {
         process_function(func, vm, compiler, backend)?;
+
+        let mut std_out = std::io::stdout();
+        writeln!(&mut std_out, "comptime function {:?} body:", func.mir_id).unwrap();
+        let mut writer = AsciPrinter::new(&mut std_out);
+        writer.print(&func.body).unwrap();
+        std_out.flush().unwrap();
     }
+    println!("processed {} comptime functions", funcs.len());
 
     let mut func_reg = backend.func_reg_mut();
     func_reg.finish_mir_pass(funcs);
     Ok(())
 }
+

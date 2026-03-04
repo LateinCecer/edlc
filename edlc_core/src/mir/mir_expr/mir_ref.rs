@@ -456,13 +456,13 @@ impl MirRef {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        let (range, ty) = stack_frame.get_offset(&self.value).unwrap();
+        let (range, ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         let base_ty = reg
             .get_ref_type(&self.ty)
             .or_else(|| reg.get_mut_ref_type(&self.ty))
             .unwrap();
 
-        let ptr = if reg.is_ref(ty) || reg.is_mut_ref(ty) {
+        let ptr = if reg.is_ref(&ty) || reg.is_mut_ref(&ty) {
             // the base value is already a reference.
             // for all offset calculations, we read `value` as a pointer and then add the offset to
             // that
@@ -472,7 +472,7 @@ impl MirRef {
         } else {
             // the base value is not a reference, which means that we have to create a new reference
             // to the memory region in which the base value resides.
-            vm.get_data(range.clone(), *ty).as_ptr()
+            vm.get_data(range.clone(), ty).as_ptr()
         };
 
         match &self.offset {
@@ -635,13 +635,13 @@ impl MirDeref {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
+        let (_, value_ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         let ptr: *const u8 = vm.read(self.value, stack_frame, reg).unwrap();
 
-        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
-        assert_eq!(reg.get_ref_type(value_ty).or_else(|| reg.get_mut_ref_type(value_ty)).unwrap(), *target_ty);
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(reg.get_ref_type(&value_ty).or_else(|| reg.get_mut_ref_type(&value_ty)).unwrap(), target_ty);
 
-        let [mut target_buf] = vm.get_data_mut([target_range.clone()], &[*target_ty]);
+        let [mut target_buf] = vm.get_data_mut([target_range.clone()], &[target_ty]);
         unsafe {
             target_buf.read_ptr(ptr);
         }
@@ -703,9 +703,9 @@ impl MirDowncastRef {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        let (_, target_ty) = stack_frame.get_offset(target).unwrap();
-        let (_, value_ty) = stack_frame.get_offset(&self.value).unwrap();
-        assert_eq!(reg.get_ref_type(target_ty).unwrap(), reg.get_mut_ref_type(value_ty).unwrap());
+        let (_, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        let (_, value_ty) = stack_frame.get_offset(&self.value, vm).unwrap();
+        assert_eq!(reg.get_ref_type(&target_ty).unwrap(), reg.get_mut_ref_type(&value_ty).unwrap());
         vm.memcpy_slice(&[*target], &[self.value], stack_frame);
     }
 

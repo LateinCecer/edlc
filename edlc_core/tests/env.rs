@@ -624,6 +624,14 @@ fn test_function(val: f32) -> f32 {
     std::print("\n");
     val * 67.0
 }
+
+comptime fn transform(val: f32) -> f32 {
+    val
+}
+
+fn some_hybrid(y: f32, comptime x: f32) -> i32 {
+    (transform(x) + y) as i32
+}
     "#))?;
 
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
@@ -631,6 +639,10 @@ fn test_function(val: f32) -> f32 {
         let return_value = test_function(3.1415);
         std::print("value returned by test function: ");
         std::print(return_value as i32);
+        std::print("\n");
+
+        std::print("executing some hybrid function:");
+        std::print(some_hybrid(3.1415, 0.0 - 12.71828));
         std::print("\n");
 
         let i: i32 = 3 + 2;

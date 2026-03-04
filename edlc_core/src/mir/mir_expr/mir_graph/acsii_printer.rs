@@ -334,6 +334,11 @@ impl<'writer, W: Write> MirPrinter for AsciPrinter<'writer, W> {
     type Error = std::io::Error;
 
     fn print(&mut self, graph: &MirFlowGraph) -> Result<(), std::io::Error> {
+        if graph.blocks.is_empty() {
+            panic!("comptime function does not have any body!!!");
+        }
+
+
         for (block_id, block) in graph.blocks.iter().enumerate() {
             let block_ref = MirBlockRef(block_id);
             self.write_block(block, &block_ref, graph)?;

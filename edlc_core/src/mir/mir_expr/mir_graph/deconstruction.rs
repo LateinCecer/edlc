@@ -18,6 +18,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::prelude::ExecutorVM;
 
 pub struct PartialSsaDeconstruction {
     source_count: usize,
@@ -336,15 +337,21 @@ pub struct StackFrameLayout {
     pub(crate) alignment: usize,
     pub(crate) size: usize,
     members: IndexMap<(ops::Range<usize>, MirTypeId)>,
-    pub(crate) frame_offset: usize,
     pub(crate) red_zone: usize,
+    /// The location of the return frame pointer in the current stack frame.
+    /// This pointer is always located in the red-zone in front of the current frame pointer.
+    /// This member variable encodes how many bytes this pointer is away from the start of the
+    /// current stack frame region.
+    /// This value must be **at least** the size of a pointer so that the return frame pointer may
+    /// be saved without spilling into the current stack frame region.
+    pub(crate) ret_fp: usize,
 }
 
 pub struct StackFrameOptions {
     pub store_plane: bool,
     pub alignment: usize,
-    pub frame_offset: usize,
     pub red_zone: usize,
+    pub ret_fp: usize,
 }
 
 impl Default for StackFrameOptions {
@@ -352,8 +359,8 @@ impl Default for StackFrameOptions {
         StackFrameOptions {
             store_plane: false,
             alignment: 16,
-            frame_offset: 0,
             red_zone: 128,
+            ret_fp: size_of::<usize>(),
         }
     }
 }
@@ -366,7 +373,6 @@ impl StackFrameLayout {
         reg: &MirTypeRegistry,
     ) -> Self {
         let mut members: IndexMap<(ops::Range<usize>, MirTypeId)> = IndexMap::default();
-        assert_eq!(options.frame_offset % options.alignment, 0);
 
         let mut offset: usize = 0;
         for (_source, range) in partial.ranges.iter() {
@@ -391,14 +397,28 @@ impl StackFrameLayout {
             alignment: options.alignment,
             size: offset,
             members,
-            frame_offset: options.frame_offset,
             red_zone: options.red_zone,
+            ret_fp: size_of::<usize>(),
         }
     }
 
-    pub fn get_offset(&self, val: &MirValue) -> Option<&(ops::Range<usize>, MirTypeId)> {
+    /// Returns the local offset of the specified [MirValue] in the current stack frame layout.
+    /// It does not take into account the offset of the stack frame in its allocated memory segment;
+    /// Thus this method should only be used for static compiling, not for compile time evaluation
+    /// in the executor VM.
+    /// For pretty much all use cases in the executor VM, please refer to [Self::get_offset]
+    /// instead, as that method queries the current stack frames memory position directly from the
+    /// VM.
+    pub fn local_offset(&self, val: &MirValue) -> Option<&(ops::Range<usize>, MirTypeId)> {
+        self.members.get(val.0)
+    }
+
+    pub fn get_offset(&self, val: &MirValue, vm: &ExecutorVM) -> Option<(ops::Range<usize>, MirTypeId)> {
         if let Some(val) = self.members.get(val.0) {
-            Some(val)
+            let mut range = val.0.clone();
+            range.start += vm.frame_pointer;
+            range.end += vm.frame_pointer;
+            Some((range, val.1))
         } else {
             eprintln!("warning: value ${:x} does not have a mapping in the current stack frame!", val.0);
             None

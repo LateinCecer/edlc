@@ -94,10 +94,16 @@ impl MirCall {
             let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
             let params = self.args.iter()
                 .map(|par| {
-                    let (par_range, par_ty) = stack_frame.get_offset(par).unwrap();
-                    vm.get_data(par_range.clone(), *par_ty)
+                    let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
+                    vm.get_data(par_range.clone(), par_ty)
                 })
                 .collect::<Vec<_>>();
+
+            // println!("intrinsic function parameters:");
+            // for (i, par) in params.iter().enumerate() {
+            //     let (par_range, _par_ty) = stack_frame.get_offset(&self.args[i], vm).unwrap();
+            //     println!("{:x} - ${:x}: {:?}    VM({:?})", i, self.args[i].0, par, par_range);
+            // }
 
             func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
             ret_value
@@ -108,9 +114,16 @@ impl MirCall {
 
             let params = self.args.iter()
                 .map(|par| {
-                    stack_frame.get_offset(par).unwrap().clone()
+                    stack_frame.get_offset(par, vm).unwrap().clone()
                 })
                 .collect::<Vec<_>>();
+
+            // print debug info if comptime function
+            // println!("function parameters:");
+            // for (i, par) in params.iter().enumerate() {
+            //     let data = vm.get_data(par.0.clone(), par.1);
+            //     println!("  {:x}: {:?}", i, data);
+            // }
 
             match inline_body.execute_in_vm(params.as_slice(), vm, reg, backend) {
                 Ok(s) => s,
@@ -120,8 +133,10 @@ impl MirCall {
             }
         };
 
-        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
-        let [mut target] = vm.get_data_mut([target_range.clone()], &[*target_ty]);
+        // println!("function eval result: {:?}", ret_value);
+
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        let [mut target] = vm.get_data_mut([target_range.clone()], &[target_ty]);
         target.memcpy(&ret_value.as_data());
     }
 

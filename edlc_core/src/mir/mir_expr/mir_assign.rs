@@ -51,8 +51,8 @@ impl MirAssign {
         reg: &MirTypeRegistry,
     ) {
         let dst_ptr: *mut u8 = vm.read(self.lhs, stack_frame, reg).unwrap();
-        let (value_range, value_ty) = stack_frame.get_offset(&self.rhs).unwrap();
-        let value = vm.get_data(value_range.clone(), *value_ty);
+        let (value_range, value_ty) = stack_frame.get_offset(&self.rhs, vm).unwrap();
+        let value = vm.get_data(value_range.clone(), value_ty);
         unsafe {
             std::ptr::copy(value.as_ptr(), dst_ptr, value_range.len());
         }

@@ -669,14 +669,14 @@ impl HirFn {
         signature
             .params
             .iter()
-            .zip(body.get_root_parameters()[..self.signature.params.len()].iter())
+            .zip(body.get_root_parameters()[..signature.params.len()].iter())
             .for_each(|(param, value)| {
                 var_mapper.insert_mapping(param.var_id, *value)
             });
         signature
             .comptime_params
             .iter()
-            .zip(body.get_root_parameters()[self.signature.params.len()..].iter())
+            .zip(body.get_root_parameters()[signature.params.len()..].iter())
             .for_each(|(param, value)| {
                 var_mapper.insert_mapping(param.var_id, *value)
             });

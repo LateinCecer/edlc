@@ -15,9 +15,8 @@
  */
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -47,14 +46,14 @@ impl MirTypeInit {
         target: &MirValue,
         _reg: &MirTypeRegistry,
     ) {
-        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
-        assert_eq!(target_ty, &self.ty);
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(target_ty, self.ty);
         for MirInitAssign { off, val } in self.inits.iter() {
-            let source = stack_frame.get_offset(val).unwrap();
+            let source = stack_frame.get_offset(val, vm).unwrap();
             let dst_offset = target_range.start + *off;
             vm.memcpy(
                 &(dst_offset..(dst_offset + source.0.len()), source.1),
-                source,
+                &source,
             );
         }
     }

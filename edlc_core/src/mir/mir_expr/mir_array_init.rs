@@ -17,9 +17,8 @@
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -50,8 +49,8 @@ impl MirArrayInit {
             return;
         };
 
-        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
-        assert_eq!(target_ty, &self.ty);
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(target_ty, self.ty);
 
         // write element values into offset of the base array
         match &self.elements {
@@ -59,16 +58,16 @@ impl MirArrayInit {
                 for (index, value) in els.iter().enumerate() {
                     let offset = layout.element_offset(alignment, index) + target_range.start;
                     let element_range = offset..(offset + layout.element_size);
-                    let src = stack_frame.get_offset(value).unwrap();
-                    vm.memcpy(&(element_range, src.1), src);
+                    let src = stack_frame.get_offset(value, vm).unwrap();
+                    vm.memcpy(&(element_range, src.1), &src);
                 }
             }
             MirArrayInitVariant::Copy { val, len } => {
-                let src = stack_frame.get_offset(val).unwrap();
+                let src = stack_frame.get_offset(val, vm).unwrap();
                 for index in 0..reg.get_const_value(len).unwrap().into_usize().unwrap() {
                     let offset = layout.element_offset(alignment, index) + target_range.start;
                     let element_range = offset..(offset + layout.element_size);
-                    vm.memcpy(&(element_range, src.1), src);
+                    vm.memcpy(&(element_range, src.1), &src);
                 }
             }
         }

@@ -70,7 +70,7 @@ struct Scope(usize);
 /// NOTE: most of these temporary variables can only be read once, as they are not actually
 ///       variables and are moved on use, instead of copied!
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirValue(pub(super) usize);
+pub struct MirValue(pub(crate) usize);
 
 /// Indicates a specific position in the MIR flow graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -378,9 +378,9 @@ impl Statement {
         match self {
             Self::VarMove { var, value, uid: _ }
                 | Self::VarCopy { var, value, uid: _ } => {
-                let dst = stack_frame.get_offset(var).unwrap();
-                let src = stack_frame.get_offset(value).unwrap();
-                vm.memcpy(dst, src);
+                let dst = stack_frame.get_offset(var, vm).unwrap();
+                let src = stack_frame.get_offset(value, vm).unwrap();
+                vm.memcpy(&dst, &src);
             }
             Self::VarDef { var, value, uid: _ } => {
                 expr.execute(vm,  stack_frame, *value, var, reg, backend);
@@ -1194,14 +1194,14 @@ impl MirFlowGraph {
             match &self.blocks[current_block.0].seal {
                 Seal::Return(value) => {
                     println!("returning from execution");
-                    let (range, ty) = stack_frame.get_offset(value).unwrap();
-                    let data = vm.get_data(range.clone(), *ty);
+                    let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
+                    let data = vm.get_data(range.clone(), ty);
                     break Ok(data.get_copy(reg));
                 }
                 Seal::Panic(value) => {
                     println!("panic in execution");
-                    let (range, ty) = stack_frame.get_offset(value).unwrap();
-                    let data = vm.get_data(range.clone(), *ty);
+                    let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
+                    let data = vm.get_data(range.clone(), ty);
                     break Err(ExecutionError { value: data.get_copy(reg) });
                 }
                 Seal::Jump(target) => {
@@ -1231,12 +1231,12 @@ impl MirFlowGraph {
                     }
                 }
                 Seal::Switch { cond, targets, default } => {
-                    let (cond_range, cond_ty) = stack_frame.get_offset(cond).unwrap();
-                    let cond_data = vm.get_data(cond_range.clone(), *cond_ty);
+                    let (cond_range, cond_ty) = stack_frame.get_offset(cond, vm).unwrap();
+                    let cond_data = vm.get_data(cond_range.clone(), cond_ty);
 
                     for target in targets.iter() {
-                        let (target_range, target_ty) = stack_frame.get_offset(&target.match_value).unwrap();
-                        if vm.get_data(target_range.clone(), *target_ty) == cond_data {
+                        let (target_range, target_ty) = stack_frame.get_offset(&target.match_value, vm).unwrap();
+                        if vm.get_data(target_range.clone(), target_ty) == cond_data {
                             vm.memcpy_slice(
                                 self.blocks[target.block_call.target.0].parameters.as_slice(),
                                 target.block_call.params.as_slice(),

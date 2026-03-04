@@ -37,7 +37,7 @@ pub struct MirAs {
 
 macro_rules! cast_and_write(
     ($vm:expr, $stack_frame:expr, $target:expr, $reg:expr, $val:expr) => {
-        let target_ty = $stack_frame.get_offset($target).unwrap().1;
+        let target_ty = $stack_frame.get_offset($target, $vm).unwrap().1;
         match target_ty {
             t if t == $reg.u8() => {
                 $vm.write(*$target, $val as u8, $stack_frame, $reg)
@@ -100,68 +100,68 @@ impl MirAs {
         target: &MirValue,
         reg: &MirTypeRegistry,
     ) {
-        let (_src_range, src_ty) = stack_frame.get_offset(&self.val).unwrap();
+        let (_src_range, src_ty) = stack_frame.get_offset(&self.val, vm).unwrap();
         match src_ty {
-            t if t == &reg.u8() => {
+            t if t == reg.u8() => {
                 let val: u8 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.u16() => {
+            t if t == reg.u16() => {
                 let val: u16 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.u32() => {
+            t if t == reg.u32() => {
                 let val: u32 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.u64() => {
+            t if t == reg.u64() => {
                 let val: u64 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.u128() => {
+            t if t == reg.u128() => {
                 let val: u128 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.usize() => {
+            t if t == reg.usize() => {
                 let val: usize = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
 
-            t if t == &reg.i8() => {
+            t if t == reg.i8() => {
                 let val: i8 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.i16() => {
+            t if t == reg.i16() => {
                 let val: i16 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.i32() => {
+            t if t == reg.i32() => {
                 let val: i32 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.i64() => {
+            t if t == reg.i64() => {
                 let val: i64 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.i128() => {
+            t if t == reg.i128() => {
                 let val: i128 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.isize() => {
+            t if t == reg.isize() => {
                 let val: isize = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
 
-            t if t == &reg.f32() => {
+            t if t == reg.f32() => {
                 let val: f32 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
-            t if t == &reg.f64() => {
+            t if t == reg.f64() => {
                 let val: f64 = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val);
             }
 
-            t if t == &reg.char() => {
+            t if t == reg.char() => {
                 let val: char = vm.read(self.val, stack_frame, reg).unwrap();
                 cast_and_write!(vm, stack_frame, target, reg, val as u8);
             }

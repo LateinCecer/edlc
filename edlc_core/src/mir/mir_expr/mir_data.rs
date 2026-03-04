@@ -54,8 +54,8 @@ impl MirData {
         target: &MirValue,
         _reg: &MirTypeRegistry,
     ) {
-        let (target_range, target_ty) = stack_frame.get_offset(target).unwrap();
-        assert_eq!(target_ty, &self.ty);
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(target_ty, self.ty);
         vm.copy_bytes(target_range.start, self.value.as_slice());
     }
 
