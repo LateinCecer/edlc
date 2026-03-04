@@ -144,8 +144,8 @@ impl SigConstraint {
             // future me: check for auto-referencing
             // if !infer.at_env(node, &self.env).try_eq(&param.ty, param_value) {}
 
-            let value_is_ref = matches!(infer.find_type(*param_value), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF);
-            let param_is_ref = matches!(infer.find_type(param.ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF);
+            let value_is_ref = matches!(infer.find_type(*param_value), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF);
+            let param_is_ref = matches!(infer.find_type(param.ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF);
 
             if value_is_ref == param_is_ref {
                 // dereference nothing

@@ -108,7 +108,7 @@ impl ResolveTypes for HirLet {
         let rhs_ty = self.value.get_type_uid(infer);
 
         let var_uid = self.infer_info.as_ref().unwrap().var_uid;
-        if matches!(infer.find_type(rhs_ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF) {
+        if matches!(infer.find_type(rhs_ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
             // rhs is a reference type
             let inner_ty = infer.get_generic_type(rhs_ty, 0).unwrap();
             if let Err(err) = infer.at(node)

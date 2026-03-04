@@ -69,8 +69,11 @@ impl HirDeref {
     pub fn can_be_assigned_to(&self, _phase: &HirPhase) -> Result<bool, HirError> {
         let info = &self.compiler_info.as_ref().unwrap().finalized_type;
         match info {
-            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_MUT_REF => Ok(true),
-            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => Ok(false),
+            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => {
+                inst.get_ref_mutability()
+                    .map_err(|err| HirError::new_edl(self.pos, err))
+                    .map(|m| m.clone().unwrap_literal().unwrap_bool())
+            },
             EdlMaybeType::Fixed(inst) => {
                 Err(HirError::new_edl(self.pos, EdlError::E003 { exp: edl_type::EDL_REF, got: inst.ty }))
             }
@@ -106,7 +109,8 @@ impl HirDeref {
         self.value.resolve_types(phase, infer_state)
     }
 
-    /// Tries to adapt the output of the specified expression to the output type by applying a
+    // TODO see if this is still needed, delete if not, otherwise fix
+/*    /// Tries to adapt the output of the specified expression to the output type by applying a
     /// auto-ref or auto-deref.
     pub fn try_auto(
         output: TypeUid,
@@ -129,9 +133,11 @@ impl HirDeref {
 
         let ty_resolved = inferer.find_type(value_ty);
         let output_resolved = inferer.find_type(output);
-        if matches!(&ty_resolved, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF || instance.ty == edl_type::EDL_MUT_REF) {
+        if matches!(&ty_resolved, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF) {
             match output_resolved {
                 EdlMaybeType::Fixed(output) if output.ty == edl_type::EDL_REF => {
+                    if output.get_ref_mutability().unwrap().unwrap_literal().unwrap_bool() {}
+
                     if matches!(&ty_resolved, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF) {
                         // should be caught by the check above
                         unreachable!();
@@ -164,7 +170,7 @@ impl HirDeref {
             return Err(report_infer_error(err, infer_state, phase));
         }
         value.resolve_types(phase, infer_state)
-    }
+    }*/
 
     /// Tries to adapt the output of the specified expression to the output type by applying a
     /// auto-deref.
@@ -188,7 +194,7 @@ impl HirDeref {
         }
 
         let ty_resolved = inferer.find_type(value_ty);
-        if matches!(&ty_resolved, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF || instance.ty == edl_type::EDL_MUT_REF) {
+        if matches!(&ty_resolved, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF) {
             // deref shared reference
             *value = Box::new(HirDeref::new(value.clone(), phase.new_uid()).into());
             inferer = phase.infer_from(infer_state);
@@ -214,7 +220,7 @@ impl HirDeref {
             let expr_id = value.get_type_uid(&mut inferer);
 
             match &inferer.find_type(expr_id) {
-                EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF || inst.ty == edl_type::EDL_MUT_REF => {
+                EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => {
                     let new_base: Box<HirExpression> = Box::new(HirDeref::new(value.clone(), phase.new_uid()).into());
                     *value = new_base;
                 },
@@ -229,16 +235,8 @@ impl HirDeref {
 
 impl ResolveTypes for HirDeref {
     fn resolve_types(&mut self, phase: &mut HirPhase, infer_state: &mut InferState) -> Result<(), HirError> {
-        let mut inferer = phase.infer_from(infer_state);
-        let snapshot = inferer.snapshot();
-        let mut ty = phase.types.new_ref(EdlMaybeType::Unknown).unwrap();
-        if self.resolve_ref(phase, infer_state, ty).is_err() {
-            inferer = phase.infer_from(infer_state);
-            inferer.roll_back_to(snapshot);
-            // try mutable reference
-            ty = phase.types.new_mut_ref(EdlMaybeType::Unknown).unwrap();
-            self.resolve_ref(phase, infer_state, ty)?;
-        }
+        let ty = phase.types.new_ref(EdlMaybeType::Unknown, None).unwrap();
+        self.resolve_ref(phase, infer_state, ty)?;
         Ok(())
     }
 

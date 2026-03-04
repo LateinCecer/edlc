@@ -194,8 +194,8 @@ impl ResolveTypes for HirAssign {
         self.lhs.resolve_types(phase, infer_state)?;
 
         let mut infer = phase.infer_from(infer_state);
-        let lhs_is_ref = matches!(infer.find_type(lhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF || fixed.ty == edl_type::EDL_MUT_REF);
-        let rhs_is_ref = matches!(infer.find_type(rhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF || fixed.ty == edl_type::EDL_MUT_REF);
+        let lhs_is_ref = matches!(infer.find_type(lhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
+        let rhs_is_ref = matches!(infer.find_type(rhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
 
         if lhs_is_ref == rhs_is_ref {
             if let Err(err) = infer.at(node).eq(&lhs, &rhs) {

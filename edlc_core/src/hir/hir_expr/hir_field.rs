@@ -706,7 +706,6 @@ impl ResolveTypes for HirField {
             };
             // find reference base type to extract field offset
             let lhs_ty = lhs_ty.get_ref_type()
-                .or_else(|_| lhs_ty.get_mut_ref_type())
                 .expect("lhs of field expression must be auto-referenced to a local reference");
 
             let EdlType::Type { state, .. } = phase.types.get_type(lhs_ty.ty)
@@ -963,13 +962,9 @@ impl MakeGraph for HirField {
             })
         }
         let lhs_ty = lhs_ty.unwrap();
-        let ty = if lhs_ty.ty == edl_type::EDL_REF {
-            graph.hir_phase.types.new_ref(field_ty)?
-        } else if lhs_ty.ty == edl_type::EDL_MUT_REF {
-            graph.hir_phase.types.new_mut_ref(field_ty)?
-        } else {
-            unreachable!()
-        };
+        let lhs_mutability = lhs_ty.get_ref_mutability()?.clone();
+
+        let ty = graph.hir_phase.types.new_ref(field_ty, Some(lhs_mutability))?;
         graph.mir_phase.types.mir_id(&ty, &graph.hir_phase.types)
             .map_err(HirTranslationError::EdlError)
     }

@@ -81,7 +81,6 @@ pub const EDL_ARRAY: EdlTypeId = EdlTypeId(18);
 pub const EDL_SLICE: EdlTypeId = EdlTypeId(19);
 pub const EDL_NEVER: EdlTypeId = EdlTypeId(20);
 pub const EDL_REF: EdlTypeId = EdlTypeId(21);
-pub const EDL_MUT_REF: EdlTypeId = EdlTypeId(22);
 
 
 #[derive(Debug, Clone)]
@@ -678,11 +677,20 @@ impl EdlTypeInstance {
         self.param.get_type(0)
     }
 
-    pub fn get_mut_ref_type(&self) -> Result<&EdlTypeInstance, EdlError> {
-        if self.ty != EDL_MUT_REF {
-            return Err(EdlError::E003 { exp: EDL_MUT_REF, got: self.ty });
+    pub fn get_ref_mutability(&self) -> Result<&EdlConstValue, EdlError> {
+        if self.ty != EDL_REF {
+            Err(EdlError::E003 { exp: EDL_REF, got: self.ty })
+        } else {
+            self.param.get_const(1)
         }
-        self.param.get_type(0)
+    }
+
+    pub fn get_ref_mutability_mut(&mut self) -> Result<&mut EdlConstValue, EdlError> {
+        if self.ty != EDL_REF {
+            Err(EdlError::E003 { exp: EDL_REF, got: self.ty })
+        } else {
+            self.param.get_const_mut(1)
+        }
     }
 }
 
@@ -1177,24 +1185,16 @@ impl Default for EdlTypeRegistry {
             name: "T".to_string(),
             variant: EdlGenericParamVariant::Type,
         });
+        env_ref.params.push(EdlGenericParam {
+            name: "M".to_string(),
+            variant: EdlGenericParamVariant::Const(EDL_BOOL),
+        });
         reg.types.view_mut(EDL_REF.0).set(EdlType::Type {
             param: env,
             name: QualifierName::empty(),
             state: EdlTypeState::default(),
         });
 
-        // insert mut ref definition
-        let env = reg.new_env();
-        let env_ref = reg.get_env_mut(env).unwrap();
-        env_ref.params.push(EdlGenericParam {
-            name: "T".to_string(),
-            variant: EdlGenericParamVariant::Type,
-        });
-        reg.types.view_mut(EDL_MUT_REF.0).set(EdlType::Type {
-            param: env,
-            name: QualifierName::empty(),
-            state: EdlTypeState::default(),
-        });
         reg
     }
 }
@@ -1359,21 +1359,13 @@ impl EdlTypeRegistry {
     /// Creates a new type instance with the base type `ref` (&T).
     /// The reference type instance is then a shared reference to a value of the type specified by
     /// [t].
-    pub fn new_ref(&self, t: EdlMaybeType) -> Result<EdlTypeInstance, EdlError> {
+    pub fn new_ref(&self, t: EdlMaybeType, mutable: Option<EdlConstValue>) -> Result<EdlTypeInstance, EdlError> {
         let mut instance = self.new_type_instance(EDL_REF).unwrap();
         if let EdlMaybeType::Fixed(t) = t {
             EdlGenericParamValue::Type(t).adapt_other(&mut instance.param.params[0], self)?;
         }
-        Ok(instance)
-    }
-
-    /// Creates a new type instance with the base type `mut ref` (&mut T).
-    /// The reference type instance is then a mutable reference to a value of the type specified by
-    /// [t].
-    pub fn new_mut_ref(&self, t: EdlMaybeType) -> Result<EdlTypeInstance, EdlError> {
-        let mut instance = self.new_type_instance(EDL_MUT_REF).unwrap();
-        if let EdlMaybeType::Fixed(t) = t {
-            EdlGenericParamValue::Type(t).adapt_other(&mut instance.param.params[0], self)?;
+        if let Some(mutable) = mutable {
+            EdlGenericParamValue::Const(mutable).adapt_other(&mut instance.param.params[1], self)?;
         }
         Ok(instance)
     }

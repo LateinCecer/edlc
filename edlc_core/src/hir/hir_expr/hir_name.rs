@@ -160,12 +160,18 @@ impl ResolveTypes for HirName {
                     //       mutable or not, so we can find the tightest fitting borrowing rules
                     //       possible. For type resolution it is enough to reject cases were the
                     //       user tries to modify an immutable variable.
-                    let ref_uid = inferer.new_reference_type(own_uid, node, *mutable);
+                    let ref_uid = if *mutable {
+                        // if the variable itself is mutable, we can leave the mutability of the
+                        // reference indeterminate
+                        inferer.new_reference_type(own_uid, node, None)
+                    } else {
+                        inferer.new_reference_type(own_uid, node, Some(false))
+                    };
                     (own_uid, ref_uid)
                 },
                 _ => {
                     let own_uid = inferer.new_type(node);
-                    let ref_uid = inferer.new_reference_type(own_uid, node, false);
+                    let ref_uid = inferer.new_reference_type(own_uid, node, Some(false));
                     (own_uid, ref_uid)
                 },
             };
@@ -524,7 +530,7 @@ impl MakeGraph for HirName {
                     if var.global {
                         // is a global variable
                         let ref_ty = graph.hir_phase.types
-                            .new_ref(ty)?;
+                            .new_ref(ty, Some(EdlConstValue::from_bool(false)))?;
                         // NOTE: since we deref immediately, we just need a shared reference
                         let mir_ref_ty = graph.mir_phase.types
                             .mir_id(&ref_ty, &graph.hir_phase.types)?;
@@ -706,11 +712,8 @@ impl MakeGraph for HirName {
             });
         }
 
-        let ref_ty = if self.can_be_assigned_to(&graph.hir_phase)? {
-            graph.hir_phase.types.new_mut_ref(ty)?
-        } else {
-            graph.hir_phase.types.new_ref(ty)?
-        };
+        let ref_ty = graph.hir_phase.types
+            .new_ref(ty, Some(EdlConstValue::from_bool(self.can_be_assigned_to(&graph.hir_phase)?)))?;
         graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
             .map_err(HirTranslationError::EdlError)
     }

@@ -152,6 +152,14 @@ impl EdlLiteralValue {
             }
         }
     }
+
+    pub fn unwrap_bool(self) -> bool {
+        if let Self::Bool(val) = self {
+            val
+        } else {
+            panic!("attempted to unwrap a non-bool value");
+        }
+    }
 }
 
 // macro_rules! create_into(
@@ -170,6 +178,18 @@ impl EdlLiteralValue {
 // system. The only thing that does work is to adapt the **type** of variables **that are not const** to some other
 // type.
 impl EdlConstValue {
+    pub fn from_bool(val: bool) -> Self {
+        Self::Literal(EdlLiteralValue::Bool(val))
+    }
+
+    pub fn unwrap_literal(self) -> EdlLiteralValue {
+        if let Self::Literal(val) = self {
+            val
+        } else {
+            panic!("attempted to unwrap a non-literal value");
+        }
+    }
+
     /// Returns whether the constant value is fully resolved.
     /// Currently, we can treat all variations of constant values as fully resolved,
     /// since it can be assumed that all generics are fully resolved.

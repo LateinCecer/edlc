@@ -1280,13 +1280,12 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         self.state.get_or_insert_var(var_id, node)
     }
 
-    pub fn new_reference_type(&mut self, ref_of: TypeUid, node: NodeId, mutable: bool) -> TypeUid {
+    pub fn new_reference_type(&mut self, ref_of: TypeUid, node: NodeId, mutable: Option<bool>) -> TypeUid {
         let uid = self.new_type(node);
-        let ref_ty = if mutable {
-            self.type_reg.new_mut_ref(EdlMaybeType::Unknown).unwrap()
-        } else {
-            self.type_reg.new_ref(EdlMaybeType::Unknown).unwrap()
-        };
+        let ref_ty = self.type_reg
+            .new_ref(EdlMaybeType::Unknown, mutable.map(EdlConstValue::from_bool))
+            .unwrap();
+
         <InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(
             &mut self.at(node),
             &uid,
@@ -1661,8 +1660,7 @@ pub struct InferAt<'a, 'reg, 'state> {
 
 impl<'a, 'reg, 'state> InferAt<'a, 'reg, 'state> {
     pub fn auto_deference(&mut self, value: TypeUid) -> (TypeUid, bool) {
-        if matches!(self.ctx.find_type(value), EdlMaybeType::Fixed(ty)
-            if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF) {
+        if matches!(self.ctx.find_type(value), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
             (self.ctx.get_generic_type(value, 0).unwrap().uid, true)
         } else {
             (value, false)

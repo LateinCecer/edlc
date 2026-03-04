@@ -14,6 +14,7 @@
  *    limitations under the License.
  */
 use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::mem;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type;
@@ -40,6 +41,36 @@ struct CompilerInfo {
     finalized_type: EdlMaybeType,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InternalMutability {
+    Mutable,
+    Immutable,
+    Undetermined,
+}
+
+impl Display for InternalMutability {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mutable => write!(f, "mut"),
+            Self::Immutable => write!(f, "shared"),
+            Self::Undetermined => write!(f, "?"),
+        }
+    }
+}
+
+impl InternalMutability {
+    /// Joins the internal mutability states.
+    fn join(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Undetermined, o) => Some(o),
+            (o, Self::Undetermined) => Some(o),
+            (Self::Mutable, Self::Mutable) => Some(Self::Mutable),
+            (Self::Immutable, Self::Immutable) => Some(Self::Immutable),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirRef {
     pub pos: SrcPos,
@@ -64,7 +95,12 @@ impl HirRef {
         }
     }
 
-    pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, state: &mut InferState) -> Result<(), HirError> {
+    pub fn verify(
+        &mut self,
+        phase: &mut HirPhase,
+        ctx: &mut HirContext,
+        state: &mut InferState,
+    ) -> Result<(), HirError> {
         self.value.verify(phase, ctx, state)?;
         if self.mutable && !self.value.is_mutable(phase)? {
             phase.report_error(

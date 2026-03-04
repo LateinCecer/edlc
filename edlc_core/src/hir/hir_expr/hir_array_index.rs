@@ -102,7 +102,7 @@ impl HirArrayIndex {
 
         // check that the type of LHS is a reference (must be enforced as such during type inference)
         let reference = lhs_ty.unwrap();
-        if reference.ty != edl_type::EDL_REF && reference.ty != edl_type::EDL_MUT_REF {
+        if reference.ty != edl_type::EDL_REF {
             phase.report_error(
                 format_type_args!(
                     format_args!("LHS of index operator must be a reference")
@@ -354,8 +354,11 @@ impl ResolveTypes for HirArrayIndex {
 
         let lhs_uid = self.lhs.get_type_uid(inferer);
         info.mutable = match &inferer.find_type(lhs_uid) {
-            EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF => false,
-            EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_MUT_REF => true,
+            EdlMaybeType::Fixed(ty) => {
+                let m = ty.get_ref_mutability().unwrap();
+                assert!(m.is_fully_resolved(), "mutability is not fully resolved!");
+                m.clone().unwrap_literal().unwrap_bool()
+            }
             _ => unreachable!(),
         };
         // finalize children
@@ -544,11 +547,8 @@ impl MakeGraph for HirArrayIndex {
                 pos: self.pos,
             });
         }
-        let ref_ty = if self.info.as_ref().unwrap().mutable {
-            graph.hir_phase.types.new_mut_ref(ty)?
-        } else {
-            graph.hir_phase.types.new_ref(ty)?
-        };
+        let ref_ty = graph.hir_phase.types
+            .new_ref(ty, Some(EdlConstValue::from_bool(self.info.as_ref().unwrap().mutable)))?;
         graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
             .map_err(HirTranslationError::EdlError)
     }
