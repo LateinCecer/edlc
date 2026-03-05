@@ -19,12 +19,13 @@ use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlTypeId};
 use crate::core::edl_value::EdlConstValue;
-use crate::core::EdlVarId;
+use crate::core::{edl_type, EdlVarId};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::{HirTypeName, SegmentType};
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
-use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::SrcError;
@@ -52,7 +53,20 @@ struct InferInfo {
     ref_uid: TypeUid,
     const_uid: ExtConstUid,
     finalized_type: EdlMaybeType,
-    finalized_const: Option<EdlConstValue>
+    finalized_const: Option<EdlConstValue>,
+    /// The mutability of a named identifier is tricky.
+    /// If the base variable is declared as `mut`, then the name ident **can** be mutable but it
+    /// does not have to be as we don't want to force taking a mutable reference of a mutable
+    /// variable very single time we reference that variable (that would fuck with the borrow
+    /// checker and hinder during type inference and monomorphization).
+    /// Thus, if the name refers to something that _can_ be mutable, then we don't infer the
+    /// mutability at all.
+    /// Otherwise, we infer immutability.
+    ///
+    /// This way, mutability is only inferred if other expressions that stand in relation to the
+    /// identifier need it to be mutable.
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 
@@ -176,6 +190,11 @@ impl ResolveTypes for HirName {
                 },
             };
 
+            // insert mutability
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            let ref_mut = inferer.get_generic_const(ref_uid, 1).unwrap();
+            inferer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(ref_mut)).unwrap();
+
             // insert constant
             // ---
             //
@@ -203,6 +222,8 @@ impl ResolveTypes for HirName {
                 node,
                 finalized_type: EdlMaybeType::Unknown,
                 finalized_const: None,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -211,7 +232,9 @@ impl ResolveTypes for HirName {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.infer_info.as_mut().unwrap();
         let ty = inferer.find_type(info.own_uid);
+        let mutable = inferer.find_ext_const(info.mutable);
         info.finalized_type = ty;
+        info.finalized_mutable = mutable.try_into().unwrap();
         let val = inferer.find_ext_const(info.const_uid);
         info.finalized_const = val;
     }
@@ -223,6 +246,11 @@ impl ResolveTypes for HirName {
             }
             _ => None,
         }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.infer_info.as_ref().unwrap().mutable
     }
 }
 
@@ -364,7 +392,7 @@ impl HirName {
         }
     }
 
-    pub fn verify(&mut self, phase: &mut HirPhase, _ctx: &mut HirContext, _infer_state: &mut InferState) -> Result<(), HirError> {
+    pub fn verify(&mut self, phase: &mut HirPhase, _ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {
         if self.info.is_none() {
             phase.report_error(
                 issue::format_type_args!(
@@ -392,7 +420,31 @@ impl HirName {
                 ty: Box::new(HirErrorType::NameUnresolved(self.name.clone())),
             });
         }
+
+        // if mutability is still undetermined, we default to immutable borrows here
+        let infer = phase.infer_from(infer_state);
+        if let Some(m) = infer.find_ext_const(self.infer_info.as_ref().unwrap().mutable) {
+            if !m.is_fully_resolved() {
+                self.infer_immutable(phase, infer_state)?;
+            }
+        } else {
+            self.infer_immutable(phase, infer_state)?;
+        }
         Ok(())
+    }
+
+    /// Infers immutability for this expression.
+    fn infer_immutable(&mut self, phase: &mut HirPhase, infer_state: &mut InferState) -> Result<(), HirError> {
+        let mut infer = phase.infer_from(infer_state);
+        let node = self.infer_info.as_ref().unwrap().node;
+
+        if let Err(err) = infer
+            .at(node)
+            .eq(&self.infer_info.as_ref().unwrap().mutable, &EdlConstValue::from_bool(false)) {
+            Err(report_infer_error(err, infer_state, phase))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -463,27 +515,8 @@ impl EdlFnArgument for HirName {
     /// The decision of how to proceed with mutable variables is somewhat important for the
     /// overall design of the language, and the final decision regarding this problem has not been
     /// made yet.
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Const(_) => {
-                // Note on mutability: The mutability of a function argument value is specified as the mutability of
-                // the value of the parameter within the function body.
-                // Since constants are always passed `by value`, their mutability is `true`.
-                Ok(true)
-            }
-            NameSource::Var(var, mutable) => {
-                let m = state.vars.is_mutable(*var).ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))?;
-                assert_eq!(*mutable, m, "mutability state of variable changed!");
-                Ok(m)
-                    // .and_then(|mutable| state.vars.is_global(*var)
-                    //     .map(|global| mutable & !global)
-                    //     .map_err(|err| HirError::new_edl(self.pos, err)))
-            }
-            NameSource::Function(_) => {
-                todo!()
-            }
-        }
+    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
+        Ok(matches!(self.infer_info.as_ref().unwrap().finalized_mutable, InternalMutability::Mutable))
     }
 
     fn const_expr(
@@ -713,7 +746,7 @@ impl MakeGraph for HirName {
         }
 
         let ref_ty = graph.hir_phase.types
-            .new_ref(ty, Some(EdlConstValue::from_bool(self.can_be_assigned_to(&graph.hir_phase)?)))?;
+            .new_ref(ty, self.infer_info.as_ref().unwrap().finalized_mutable.clone().into())?;
         graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
             .map_err(HirTranslationError::EdlError)
     }

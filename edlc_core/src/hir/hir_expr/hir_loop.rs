@@ -29,6 +29,7 @@ use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::core::edl_type;
 use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +37,7 @@ struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,10 +127,14 @@ impl ResolveTypes for HirLoop {
                 .eq(&own_uid, &never)
                 .unwrap();
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -143,6 +149,11 @@ impl ResolveTypes for HirLoop {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

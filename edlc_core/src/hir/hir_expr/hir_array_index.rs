@@ -19,7 +19,7 @@ use crate::core::edl_type::{EdlMaybeType, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph};
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
@@ -41,7 +41,8 @@ struct CompilerInfo {
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
     /// the internal reference is mutable if the LHS of the operator is mutable.
-    mutable: bool,
+    mutable: ExtConstUid,
+    finalized_mutability: InternalMutability,
 }
 
 /// This implements HIR array index operations.
@@ -318,9 +319,18 @@ impl ResolveTypes for HirArrayIndex {
             return Err(report_infer_error(err, infer_state, phase));
         }
 
+        // infer the type of the index expression (usually usize)
         let index_ty = self.index.get_type_uid(&mut infer);
         let ty = infer.type_reg.usize();
         if let Err(err) = infer.at(node).eq(&index_ty, &ty) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+
+        // infer mutability of this to be equal to the mutability of the LHS reference type
+        let lhs_mut = infer.get_generic_const(lhs_ty, 1).unwrap();
+        if let Err(err) = infer
+            .at(node)
+            .eq(&self.info.as_ref().unwrap().mutable, &Into::<ExtConstUid>::into(lhs_mut)) {
             return Err(report_infer_error(err, infer_state, phase));
         }
 
@@ -336,11 +346,13 @@ impl ResolveTypes for HirArrayIndex {
         } else {
             let node_id = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let ty_uid = inferer.new_type(node_id);
+            let m = inferer.new_ext_const_with_type(node_id, edl_type::EDL_BOOL);
             self.info = Some(CompilerInfo {
                 node: node_id,
                 type_uid: ty_uid,
                 finalized_type: EdlMaybeType::Unknown,
-                mutable: false,
+                mutable: m,
+                finalized_mutability: InternalMutability::Undetermined,
             });
             ty_uid
         }
@@ -350,17 +362,10 @@ impl ResolveTypes for HirArrayIndex {
         let info = self.info.as_mut()
             .expect("tried to finalize uninitialized node");
         let uid = info.type_uid;
+        let m = info.mutable;
         info.finalized_type = inferer.find_type(uid);
+        info.finalized_mutability = inferer.find_ext_const(m).try_into().unwrap();
 
-        let lhs_uid = self.lhs.get_type_uid(inferer);
-        info.mutable = match &inferer.find_type(lhs_uid) {
-            EdlMaybeType::Fixed(ty) => {
-                let m = ty.get_ref_mutability().unwrap();
-                assert!(m.is_fully_resolved(), "mutability is not fully resolved!");
-                m.clone().unwrap_literal().unwrap_bool()
-            }
-            _ => unreachable!(),
-        };
         // finalize children
         self.lhs.finalize_types(inferer);
         self.index.finalize_types(inferer);
@@ -368,6 +373,11 @@ impl ResolveTypes for HirArrayIndex {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -547,8 +557,9 @@ impl MakeGraph for HirArrayIndex {
                 pos: self.pos,
             });
         }
+
         let ref_ty = graph.hir_phase.types
-            .new_ref(ty, Some(EdlConstValue::from_bool(self.info.as_ref().unwrap().mutable)))?;
+            .new_ref(ty, self.info.as_ref().unwrap().finalized_mutability.into())?;
         graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
             .map_err(HirTranslationError::EdlError)
     }

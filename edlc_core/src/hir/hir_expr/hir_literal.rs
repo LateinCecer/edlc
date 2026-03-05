@@ -41,6 +41,9 @@ struct CompilerInfo {
     const_uid: ExtConstUid,
     finalized_type: EdlMaybeType,
     finalized_const: Option<EdlConstValue>,
+    /// This is always immutable, but we need to carry the mutability as a constant anyway for
+    /// consistency.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,12 +224,16 @@ impl ResolveTypes for HirLiteral {
             let const_uid = inferer.new_ext_const(node);
             inferer.at(node).eq_const_type(const_uid, own_uid).unwrap();
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 const_uid,
                 finalized_type: EdlMaybeType::Unknown,
                 finalized_const: None,
+                mutable,
             });
             own_uid
         }
@@ -243,6 +250,11 @@ impl ResolveTypes for HirLiteral {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         Some(self.info.as_ref().unwrap().const_uid)
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

@@ -44,6 +44,10 @@ struct CompilerInfo {
     finalized_type: EdlMaybeType,
     deref_lhs: bool,
     deref_rhs: bool,
+    /// The return value of the assign expression **must** always be immutable, since it is just an
+    /// empty value `()` created from scratch.
+    /// We still need the constant for completeness.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,15 +202,29 @@ impl ResolveTypes for HirAssign {
         let rhs_is_ref = matches!(infer.find_type(rhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
 
         if lhs_is_ref == rhs_is_ref {
+            // lhs must be mutable
+            let lhs_mut = self.lhs.mutability(&mut infer);
+            if let Err(err) = infer.at(node).eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             if let Err(err) = infer.at(node).eq(&lhs, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
         } else if lhs_is_ref {
+            // reference must be mutable
+            let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
+            if let Err(err) = infer.at(node).eq(&lhs_mut.into(), &EdlConstValue::from_bool(true)) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             let el_type = infer.get_generic_type(lhs, 0).unwrap();
             if let Err(err) = infer.at(node).eq(&el_type.uid, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
         } else {
+            let lhs_mut = self.lhs.mutability(&mut infer);
+            if let Err(err) = infer.at(node).eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             let el_type = infer.get_generic_type(rhs, 0).unwrap();
             if let Err(err) = infer.at(node).eq(&lhs, &el_type.uid) {
                 return Err(report_infer_error(err, infer_state, phase));
@@ -231,12 +249,16 @@ impl ResolveTypes for HirAssign {
             inferer.at(node)
                 .eq(&own_uid, &empty)
                 .unwrap();
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Fixed(inferer.type_reg.empty()),
                 deref_rhs: false,
                 deref_lhs: false,
+                mutable,
             });
             own_uid
         }
@@ -249,6 +271,11 @@ impl ResolveTypes for HirAssign {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

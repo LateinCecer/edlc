@@ -29,7 +29,7 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
-use crate::prelude::{report_infer_error, HirErrorType};
+use crate::prelude::{edl_type, report_infer_error, HirErrorType};
 use crate::resolver::ScopeId;
 use std::error::Error;
 use std::mem;
@@ -48,6 +48,10 @@ struct CompileInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// Like a block, a if-expression is always immutable.
+    /// If the if-expression yields a reference, that reference may still be mutable, but the
+    /// reference itself - as a stand alone value - is immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +189,13 @@ impl ResolveTypes for HirCondition {
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
     }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        match self {
+            Self::Plane(val, _) => val.mutability(inferer),
+            Self::Match {} => unimplemented!("match cases are currently unimplemented"),
+        }
+    }
 }
 
 impl ResolveTypes for HirIf {
@@ -235,10 +246,14 @@ impl ResolveTypes for HirIf {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let type_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompileInfo {
                 node,
                 own_uid: type_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             type_uid
         }
@@ -260,6 +275,11 @@ impl ResolveTypes for HirIf {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

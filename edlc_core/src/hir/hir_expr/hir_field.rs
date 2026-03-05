@@ -36,7 +36,7 @@ use crate::resolver::ScopeId;
 use std::error::Error;
 use crate::core::edl_type;
 use crate::hir::hir_expr::hir_deref::HirDeref;
-use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::mir::mir_expr::{MirRef, MirValue};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,6 +44,9 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// A field inherits its mutability from the parent.
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -686,6 +689,16 @@ fn adapt_member_type(
 
 
 impl ResolveTypes for HirField {
+
+    /// # On the Types of Field Operators
+    ///
+    /// The LHS of a field operator must always be reference.
+    /// Internally, the return value of a field operator is also always a reference – however this
+    /// only applies to the internal references in MIR and onwards.
+    /// On the actual syntax level and in HIR, the return value of the field operator is a plane
+    /// type.
+    /// Since the LHS is a reference, we must infer equality for the mutability of the output value
+    /// and the mutability of the LHS reference.
     fn resolve_types(&mut self, phase: &mut HirPhase, infer_state: &mut InferState) -> Result<(), HirError> {
         let own_uid = self.get_type_uid(&mut phase.infer_from(infer_state));
         let node = self.info.as_ref().unwrap().node;
@@ -704,9 +717,17 @@ impl ResolveTypes for HirField {
             let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
                 return Ok(());
             };
+
             // find reference base type to extract field offset
             let lhs_ty = lhs_ty.get_ref_type()
                 .expect("lhs of field expression must be auto-referenced to a local reference");
+
+            // infer mutability
+            let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
+            let mutable = self.info.as_ref().unwrap().mutable;
+            if let Err(err) = infer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(lhs_mut)) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
 
             let EdlType::Type { state, .. } = phase.types.get_type(lhs_ty.ty)
                 .ok_or(HirError::new_edl(self.pos, EdlError::E011(lhs_ty.ty)))? else {
@@ -785,10 +806,14 @@ impl ResolveTypes for HirField {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+
             self.info = Some(CompilerInfo {
                 node,
                 type_uid: own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -797,12 +822,19 @@ impl ResolveTypes for HirField {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.info.as_mut().unwrap();
         let ty = inferer.find_type(info.type_uid);
+        let mutable = inferer.find_ext_const(info.mutable);
         info.finalized_type = ty;
+        info.finalized_mutable = mutable.try_into().unwrap();
         self.lhs.finalize_types(inferer);
     }
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

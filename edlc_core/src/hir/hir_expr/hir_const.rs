@@ -42,6 +42,8 @@ struct CompilerInfo {
     node: NodeId,
     const_uid: ExtConstUid,
     type_uid: TypeUid,
+    /// Take a wild fucking guess
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,10 +119,15 @@ impl ResolveTypes for HirConst {
             inferer.at(node)
                 .eq(&const_uid, &EdlConstValue::Const(self.finalized_const.as_ref().unwrap().id))
                 .unwrap();
+
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 type_uid,
                 const_uid,
+                mutable,
             });
             type_uid
         }
@@ -132,6 +139,11 @@ impl ResolveTypes for HirConst {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         Some(self.info.as_ref().unwrap().const_uid)
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

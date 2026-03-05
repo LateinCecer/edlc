@@ -46,7 +46,7 @@ use crate::core::edl_type;
 use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
 use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_field::HirField;
-use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_vars::VariableMapper;
@@ -572,29 +572,6 @@ impl HirExpr for HirExpression {
 
 impl EdlFnArgument for HirExpression {
     type CompilerState = HirPhase;
-
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        match self {
-            HirExpression::ArrayInit(val) => val.is_mutable(state),
-            HirExpression::ArrayIndex(val) => val.is_mutable(state),
-            HirExpression::As(val) => val.is_mutable(state),
-            HirExpression::Block(block) => block.is_mutable(state),
-            HirExpression::Call(val) => val.is_mutable(state),
-            HirExpression::Field(val) => val.is_mutable(state),
-            HirExpression::Literal(val) => val.is_mutable(state),
-            HirExpression::Name(val) => val.is_mutable(state),
-            HirExpression::Assign(val) => val.is_mutable(state),
-            HirExpression::Let(val) => val.is_mutable(state),
-            HirExpression::If(val) => val.is_mutable(state),
-            HirExpression::Break(val) => val.is_mutable(state),
-            HirExpression::Loop(val) => val.is_mutable(state),
-            HirExpression::Continue(val) => val.is_mutable(state),
-            HirExpression::Return(val) => val.is_mutable(state),
-            HirExpression::TypeInit(val) => val.is_mutable(state),
-            HirExpression::Ref(val) => val.is_mutable(state),
-            HirExpression::Deref(val) => val.is_mutable(state),
-        }
-    }
 
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         match self {

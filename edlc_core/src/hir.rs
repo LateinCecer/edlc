@@ -1459,6 +1459,11 @@ pub trait ResolveTypes {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>);
 
     fn as_const(&mut self, inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid>;
+
+    /// For elements that can be mutable, this returns the mutability as a constant.
+    /// The constant should be a boolean that is `true` to indicate a mutable variable, or `false`
+    /// to indicate a shared variable.
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid;
 }
 
 pub trait ResolveFn {

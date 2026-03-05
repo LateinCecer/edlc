@@ -23,7 +23,7 @@ use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::translation::HirTranslationError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
@@ -37,6 +37,9 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// A dereferenced value is mutable exactly when the source reference is mutable.
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +106,13 @@ impl HirDeref {
         }
         let generic = inferer.get_generic_type(ref_type, 0).unwrap();
         if let Err(err) = inferer.at(node).eq(&own_uid, &generic.uid) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+
+        // the mutability of this is equal to the mutability of the source reference
+        let mutable = self.compiler_info.as_ref().unwrap().mutable;
+        let ref_mut = inferer.get_generic_const(ref_type, 1).unwrap();
+        if let Err(err) = inferer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(ref_mut)) {
             return Err(report_infer_error(err, infer_state, phase));
         }
 
@@ -246,10 +256,14 @@ impl ResolveTypes for HirDeref {
         } else{
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+
             self.compiler_info = Some(CompilerInfo {
                 node,
                 type_uid: own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -258,7 +272,9 @@ impl ResolveTypes for HirDeref {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.compiler_info.as_mut().unwrap();
         let ty = inferer.find_type(info.type_uid);
+        let mutable = inferer.find_ext_const(info.mutable);
         info.finalized_type = ty;
+        info.finalized_mutable = mutable.try_into().unwrap();
         self.value.finalize_types(inferer)
     }
 
@@ -267,6 +283,11 @@ impl ResolveTypes for HirDeref {
     /// right now due to limitations in the type resolver.
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.compiler_info.as_ref().unwrap().mutable
     }
 }
 

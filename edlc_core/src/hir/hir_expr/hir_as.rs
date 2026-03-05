@@ -39,6 +39,9 @@ use crate::mir::mir_type::MirTypeId;
 struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
+    /// Always immutable as data is created from scratch.
+    /// Constant needed for completeness.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,12 +102,16 @@ impl ResolveTypes for HirAs {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let type_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             inferer.at(node)
                 .eq(&type_uid, &self.target)
                 .unwrap();
             self.info = Some(CompilerInfo {
                 node,
                 own_uid: type_uid,
+                mutable,
             });
             type_uid
         }
@@ -116,6 +123,11 @@ impl ResolveTypes for HirAs {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

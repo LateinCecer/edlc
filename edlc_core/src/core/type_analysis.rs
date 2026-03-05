@@ -1434,6 +1434,9 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         Some(env_id)
     }
 
+    /// Gets the generic type at the given index from the parameter environment of the type.
+    /// The index corresponds to the index of the generic parameter in the environment directly;
+    /// don't overthink it ;)
     pub fn get_generic_type(&mut self, base: TypeUid, index: usize) -> Option<GenericType> {
         let env_id = self.get_base_type_env(base)?;
         let flat_index = GenericType::flat_index(index, env_id, &self.type_reg);
@@ -1445,6 +1448,9 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         })
     }
 
+    /// Gets the generic constant at the given index from the parameter environment of the type.
+    /// The index corresponds to the index of the generic parameter in the environment directly;
+    /// don't overthink it ;)
     pub fn get_generic_const(&mut self, base: TypeUid, index: usize) -> Option<GenericConst> {
         let env_id = self.get_base_type_env(base)?;
         let flat_index = GenericConst::flat_index(index, env_id, &self.type_reg);
@@ -1969,6 +1975,12 @@ impl GenericType {
     }
 }
 
+impl From<GenericType> for TypeUid {
+    fn from(value: GenericType) -> Self {
+        value.uid
+    }
+}
+
 impl GenericConst {
     pub fn new(uid: ExtConstUid, index: usize, env_id: EdlEnvId, reg: &EdlTypeRegistry) -> Self {
         let index = Self::flat_index(index, env_id, reg);
@@ -1978,6 +1990,8 @@ impl GenericConst {
         }
     }
 
+    /// Transforms the index of a generic parameter in the parameter environment of a type to the
+    /// index of a generic constant.
     fn flat_index(index: usize, env_id: EdlEnvId, reg: &EdlTypeRegistry) -> usize {
         let env = reg.get_env(env_id).unwrap();
         assert!(matches!(&env.params[index].variant, EdlGenericParamVariant::Const(_)));
@@ -1988,6 +2002,12 @@ impl GenericConst {
             .filter(|param| matches!(&param.variant, EdlGenericParamVariant::Const(_)))
             .count();
         index
+    }
+}
+
+impl From<GenericConst> for ExtConstUid {
+    fn from(value: GenericConst) -> Self {
+        value.uid
     }
 }
 

@@ -40,6 +40,13 @@ struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// The return value of a block is always immutable.
+    /// This is a design decision; however, it should be noted that Rust makes the same design
+    /// decision.
+    /// Having mutable expression evals for blocks would be confusing for the user; it would also
+    /// be even more confusing to have syntax deviating from that of Rust in a language that is
+    /// otherwise so close to it.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -333,10 +340,14 @@ impl ResolveTypes for HirBlock {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -361,6 +372,11 @@ impl ResolveTypes for HirBlock {
         } else {
             None
         }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

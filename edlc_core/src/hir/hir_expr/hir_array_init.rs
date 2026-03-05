@@ -26,6 +26,7 @@ use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::{HirContext, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
@@ -36,7 +37,7 @@ use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
-use crate::prelude::report_infer_error;
+use crate::prelude::{edl_type, report_infer_error};
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +45,9 @@ struct CompilerInfo {
     node_id: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// The init expression is always immutable as it creates data from scratch.
+    /// We still need a constant for completeness though.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,10 +349,14 @@ impl ResolveTypes for HirArrayInit {
         } else {
             let node_id = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let type_uid = inferer.new_type(node_id);
+            let mutable = inferer.new_ext_const_with_type(node_id, edl_type::EDL_BOOL);
+            inferer.at(node_id).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node_id,
                 type_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             type_uid
         }
@@ -374,6 +382,11 @@ impl ResolveTypes for HirArrayInit {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

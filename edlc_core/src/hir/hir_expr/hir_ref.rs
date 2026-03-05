@@ -16,10 +16,11 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::mem;
+use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type;
 use crate::core::edl_type::EdlMaybeType;
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
@@ -39,10 +40,12 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InternalMutability {
+pub enum InternalMutability {
     Mutable,
     Immutable,
     Undetermined,
@@ -71,19 +74,72 @@ impl InternalMutability {
     }
 }
 
+impl From<InternalMutability> for Option<bool> {
+    fn from(value: InternalMutability) -> Self {
+        match value {
+            InternalMutability::Mutable => Some(true),
+            InternalMutability::Immutable => Some(false),
+            InternalMutability::Undetermined => None,
+        }
+    }
+}
+
+impl From<Option<bool>> for InternalMutability {
+    fn from(value: Option<bool>) -> Self {
+        match value {
+            Some(true) => InternalMutability::Mutable,
+            Some(false) => InternalMutability::Immutable,
+            None => InternalMutability::Undetermined,
+        }
+    }
+}
+
+impl TryFrom<Option<EdlConstValue>> for InternalMutability {
+    type Error = EdlError;
+
+    fn try_from(value: Option<EdlConstValue>) -> Result<Self, Self::Error> {
+        let Some(value) = value else {
+            return Ok(InternalMutability::Undetermined);
+        };
+
+        if !value.is_fully_resolved() {
+            return Err(EdlError::E008);
+        }
+
+        let EdlConstValue::Literal(EdlLiteralValue::Bool(val)) = value else {
+            return Err(EdlError::E008);
+        };
+        if val {
+            Ok(InternalMutability::Mutable)
+        } else {
+            Ok(InternalMutability::Immutable)
+        }
+    }
+}
+
+impl From<InternalMutability> for Option<EdlConstValue> {
+    fn from(value: InternalMutability) -> Self {
+        match value {
+            InternalMutability::Mutable => Some(EdlConstValue::Literal(EdlLiteralValue::Bool(true))),
+            InternalMutability::Immutable => Some(EdlConstValue::Literal(EdlLiteralValue::Bool(false))),
+            InternalMutability::Undetermined => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirRef {
     pub pos: SrcPos,
     pub src: ModuleSrc,
     pub scope: ScopeId,
     pub uid: HirUid,
-    pub mutable: bool,
+    pub mutable: InternalMutability,
     value: Box<HirExpression>,
     compiler_info: Option<CompilerInfo>,
 }
 
 impl HirRef {
-    pub fn new(value: Box<HirExpression>, uid: HirUid, mutable: bool) -> Self {
+    pub fn new(value: Box<HirExpression>, uid: HirUid, mutable: InternalMutability) -> Self {
         Self {
             pos: value.pos(),
             src: value.src().clone(),
@@ -102,7 +158,7 @@ impl HirRef {
         state: &mut InferState,
     ) -> Result<(), HirError> {
         self.value.verify(phase, ctx, state)?;
-        if self.mutable && !self.value.is_mutable(phase)? {
+        if self.mutable == InternalMutability::Mutable && !self.value.is_mutable(phase)? {
             phase.report_error(
                 format_type_args!(
                     format_args!("cannot create mutable reference from immutable value")
@@ -136,15 +192,16 @@ impl HirRef {
         let expr_ty = expr.get_type_uid(&mut inferer);
 
         match &inferer.find_type(expr_ty) {
-            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF || inst.ty == edl_type::EDL_MUT_REF => {
+            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => {
                 // is already a reference
                 return Ok(());
             }
             _ => (),
         }
 
+        let mutable = expr.is_mutable(phase)?;
         let new_base = Box::new(
-            Self::new(expr.clone(), phase.new_uid(), true).into());
+            Self::new(expr.clone(), phase.new_uid(), None).into());
         *expr = new_base;
         expr.resolve_types(phase, state)?;
         Ok(())
@@ -161,11 +218,10 @@ impl ResolveTypes for HirRef {
         let own_uid = self.get_type_uid(&mut inferer);
         let node = self.compiler_info.as_ref().unwrap().node;
 
-        let ty = if self.mutable {
-            phase.types.new_mut_ref(EdlMaybeType::Unknown).unwrap()
-        } else {
-            phase.types.new_ref(EdlMaybeType::Unknown).unwrap()
-        };
+        let ty = phase.types
+            .new_ref(EdlMaybeType::Unknown, self.mutable.map(EdlConstValue::from_bool))
+            .unwrap();
+
         if let Err(err) = inferer.at(node).eq(&own_uid, &ty) {
             return Err(report_infer_error(err, infer_state, phase));
         }
@@ -204,6 +260,10 @@ impl ResolveTypes for HirRef {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        todo!()
     }
 }
 
@@ -265,8 +325,11 @@ impl HirExpr for HirRef {
 impl EdlFnArgument for HirRef {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(self.value.is_mutable(state)? && self.mutable)
+    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
+        let ty = self.compiler_info.as_ref().unwrap().finalized_type.clone().unwrap();
+        ty.get_ref_mutability()
+            .map_err(|err| HirError::new_edl(self.pos, err))
+            .map(|val| val.clone().unwrap_literal().unwrap_bool())
     }
 
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {

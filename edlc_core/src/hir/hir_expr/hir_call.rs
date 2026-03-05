@@ -57,6 +57,13 @@ struct CompilerInfo {
     node: NodeId,
     resolver: CallResolver,
     finalized_type_info: Option<FinalizedTypeInfo>,
+    /// For calls the mutability of the return value is somewhat complicated; if the function
+    /// returns by value, then the value is newly created (from the standpoint of the caller) and
+    /// is thus immutable.
+    /// If the function returns by reference, then the reference may be mutable, but the reference
+    /// as a value _itself_ is always immutable.
+    /// Thus, the mutability of a call is always immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1720,10 +1727,14 @@ impl ResolveTypes for HirFunctionCall {
                 resolver.with_trait(trait_id.clone());
             }
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 resolver,
                 finalized_type_info: None,
+                mutable,
             });
             ret_type
         }
@@ -1749,6 +1760,11 @@ impl ResolveTypes for HirFunctionCall {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

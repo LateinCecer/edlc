@@ -30,6 +30,7 @@ use crate::prelude::type_analysis::NodeId;
 use crate::prelude::HirErrorType;
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::core::edl_type;
 use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +42,7 @@ struct CompInfo {
 struct InferInfo {
     node: NodeId,
     type_uid: TypeUid,
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,9 +113,14 @@ impl ResolveTypes for HirContinue {
             inferer.at(node)
                 .eq(&type_uid, &never)
                 .unwrap();
+
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.infer_info = Some(InferInfo {
                 node,
                 type_uid,
+                mutable,
             });
             type_uid
         }
@@ -123,6 +130,11 @@ impl ResolveTypes for HirContinue {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.infer_info.as_ref().unwrap().mutable
     }
 }
 

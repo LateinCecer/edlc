@@ -34,6 +34,7 @@ use crate::mir::mir_let::MirLet;
 use crate::mir::MirPhase;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
+use crate::core::binop::BinaryOp::Mul;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_type::MirTypeId;
 
@@ -49,6 +50,9 @@ struct InferInfo {
     var_uid: TypeUid,
     finalized_var_uid: EdlMaybeType,
     dereference: bool,
+    /// This refers to the mutability of the _return value_ of the let-expression.
+    /// That is always `()` and should always be immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,12 +181,16 @@ impl ResolveTypes for HirLet {
             let var_uid = inferer.get_or_insert_var(
                 self.info.as_ref().unwrap().var_id, node);
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.infer_info = Some(InferInfo {
                 node,
                 own_uid,
                 var_uid,
                 finalized_var_uid: EdlMaybeType::Unknown,
                 dereference: false,
+                mutable,
             });
             own_uid
         }
@@ -197,6 +205,14 @@ impl ResolveTypes for HirLet {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    /// Please node that this mutablity statement refers to the mutablity of the return value of the
+    /// let-expression.
+    /// It does not refer to the mutability of the variable that is created in the let-expression!
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.infer_info.as_ref().unwrap().mutable
     }
 }
 

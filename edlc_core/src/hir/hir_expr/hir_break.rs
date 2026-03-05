@@ -30,6 +30,7 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::core::edl_type;
 use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +38,10 @@ struct CompInfo {
     node: NodeId,
     own_uid: TypeUid,
     break_uid: TypeUid,
+    /// The return value of a `break` statement is always `()`.
+    /// Since this value is always created from scratch, it cannot be mutable (also is zero-sized,
+    /// so mutability would make even less sense).
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,10 +205,14 @@ impl ResolveTypes for HirBreak {
                     .unwrap();
             }
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompInfo {
                 node,
                 own_uid,
                 break_uid: ret_uid,
+                mutable,
             });
             own_uid
         }
@@ -217,6 +226,11 @@ impl ResolveTypes for HirBreak {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
