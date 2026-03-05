@@ -18,7 +18,7 @@ use edlc_core::prelude::mir_expr::{process_comptime_functions, process_function_
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
-use edlc_core::prelude::hir_expr::{HirExpression, LoopMapper, MakeGraph, MirGraph};
+use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_str::FatPtr;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
@@ -89,6 +89,9 @@ impl TestCompiler {
         hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
         hir.resolve_fn(&mut compiler.phase)?;
         hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
+        hir.walk_mut(&mut |_| true, &mut |s| {
+            s.insert_default_mutability(&mut compiler.phase, &mut infer_state)
+        })?;
         hir.finalize_types(&mut compiler.phase.infer_from(&mut infer_state));
 
         if let Err(err) = hir.verify(

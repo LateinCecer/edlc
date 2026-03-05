@@ -16,11 +16,11 @@
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, FmtType};
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
-use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpr, HirExpression, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
@@ -188,8 +188,8 @@ impl HirArrayIndex {
         Ok(())
     }
 
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        self.lhs.can_be_assigned_to(phase)
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
+        self.info.as_ref().unwrap().finalized_mutability
     }
 
     /// The array index operation is always an internal reference operation.
@@ -198,7 +198,12 @@ impl HirArrayIndex {
         Ok(true)
     }
 
-    pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {
+    pub fn verify(
+        &mut self,
+        phase: &mut HirPhase,
+        ctx: &mut HirContext,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
         self.lhs.verify(phase, ctx, infer_state)?;
         self.index.verify(phase, ctx, infer_state)?;
         self.verify_array_types(phase)?;

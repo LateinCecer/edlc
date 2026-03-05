@@ -588,7 +588,7 @@ impl ExprEval<DataOrigin, PartialSsaDeconstruction> for MirAssign {
         loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, DeconstructionConflict> {
-        Ok(false) // does not change anything
+        Ok(input.replace(target, DataOrigin::from_source(ctx.get_source(loc))))
     }
 }
 

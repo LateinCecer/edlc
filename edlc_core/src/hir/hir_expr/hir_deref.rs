@@ -21,7 +21,7 @@ use crate::core::edl_type::{EdlMaybeType, EdlTypeInstance};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::translation::HirTranslationError;
@@ -69,24 +69,8 @@ impl HirDeref {
         Ok(())
     }
 
-    pub fn can_be_assigned_to(&self, _phase: &HirPhase) -> Result<bool, HirError> {
-        let info = &self.compiler_info.as_ref().unwrap().finalized_type;
-        match info {
-            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => {
-                inst.get_ref_mutability()
-                    .map_err(|err| HirError::new_edl(self.pos, err))
-                    .map(|m| m.clone().unwrap_literal().unwrap_bool())
-            },
-            EdlMaybeType::Fixed(inst) => {
-                Err(HirError::new_edl(self.pos, EdlError::E003 { exp: edl_type::EDL_REF, got: inst.ty }))
-            }
-            EdlMaybeType::Unknown => {
-                Err(HirError {
-                    pos: self.pos,
-                    ty: Box::new(HirErrorType::TypeNotResolvable),
-                })
-            }
-        }
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
+        self.compiler_info.as_ref().unwrap().finalized_mutable
     }
 
     /// Internally, deref operations yield a reference – this is important for assignment

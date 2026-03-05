@@ -18,7 +18,7 @@ use crate::core::edl_error::EdlError;
 use crate::core::edl_param_env::{EdlGenericParamValue, EdlParameterDef, EdlGenericParam, EdlGenericParamVariant, EdlParameterEnv};
 use crate::core::edl_type::{EdlEnvId, EdlMaybeType, EdlTypeInstance};
 use crate::core::type_analysis::*;
-use crate::hir::hir_expr::{HirExpr, HirExpression};
+use crate::hir::hir_expr::{HirExpr, HirExpression, SourceObject};
 use crate::hir::hir_expr::hir_type::HirType;
 use crate::hir::{report_infer_error, HirError, HirErrorType, HirPhase, IntoEdl, ResolveNames, ResolveTypes};
 use crate::hir::hir_expr::hir_const::HirConst;

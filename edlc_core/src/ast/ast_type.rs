@@ -24,7 +24,7 @@ use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::{HirTrait, HirType, HirTypeName, HirTypeNameSegment};
-use crate::hir::hir_expr::HirExpr;
+use crate::hir::hir_expr::{HirExpr, SourceObject};
 use crate::hir::{HirPhase, ResolveNames, ResolveTypes};
 use crate::lexer::{KeyWord, LexError, Punct, SrcPos, SrcToken, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};

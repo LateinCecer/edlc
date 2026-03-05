@@ -23,7 +23,7 @@ use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::translation::HirTranslationError;
 use crate::issue::{format_type_args, SrcError};
@@ -376,7 +376,8 @@ impl ResolveTypes for HirRef {
     }
 
     fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
-        todo!()
+        self.get_type_uid(inferer);
+        self.compiler_info.as_ref().unwrap().mutable
     }
 }
 

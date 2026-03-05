@@ -31,7 +31,7 @@ use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlMaybeType, EdlTraitInstance, EdlTypeId, EdlTypeInitError, EdlTypeInstance, EdlTypeRegistry, FmtType, StackReplacements};
 use crate::core::edl_var::EdlVarRegistry;
 use crate::file::{ModuleSrc, ParserSupplier};
-use crate::hir::hir_expr::{hir_as, HirExpr, HirExpression};
+use crate::hir::hir_expr::{hir_as, DefaultMut, HirExpr, HirExpression, HirTreeWalker, SourceObject};
 use crate::hir::hir_expr::hir_const::HirConst;
 use crate::hir::hir_expr::hir_let::HirLet;
 use crate::hir::hir_expr::hir_type::HirTypeName;
@@ -64,7 +64,7 @@ mod lifetime;
 pub use context::HirContext;
 pub use context::ExecType;
 use crate::ast::ItemDoc;
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::{Infer, InferError, InferProvider, InferState, TypeUid, ExtConstUid};
 use crate::documentation::{DocCompilerState, DocElement};
 use crate::hir::code_container::CodeContainer;
@@ -665,6 +665,9 @@ impl HirModule {
             phase.report_mode.print_warnings = false;
             return errors;
         }
+
+        // traverse HIR tree and insert default mutability values
+        self.insert_default_mutability(phase, infer_state, &mut errors);
         self.finalize_types(phase, infer_state);
         phase.report_mode.print_errors = false;
         phase.report_mode.print_warnings = false;
@@ -845,6 +848,47 @@ impl HirModule {
                 HirItem::Impl(im) => im.finalize_types(&mut phase.infer_from(infer_state)),
                 HirItem::Submod(val, _) => {
                     val.finalize_types(phase, infer_state)
+                }
+                HirItem::Use(_) => (),
+            }
+        }
+    }
+
+    fn insert_default_mutability(&mut self, phase: &mut HirPhase, infer_state: &mut InferState, errors: &mut Vec<HirError>) {
+        for item in self.items.iter_mut() {
+            match item {
+                HirItem::Let(val) => {
+                    if let Err(err) = val.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Const(val) => {
+                    if let Err(err) = val.value.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Func(val) => {
+                    if let Err(err) = val.body.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Impl(val) => {
+                    for func in val.funcs.iter_mut() {
+                        if let Err(err) = func.body.walk_mut(&mut |_| true, &mut |s| {
+                            s.insert_default_mutability(phase, infer_state)
+                        }) {
+                            errors.push(err);
+                        }
+                    }
+                }
+                HirItem::Submod(val, _) => {
+                    val.insert_default_mutability(phase, infer_state, errors);
                 }
                 HirItem::Use(_) => (),
             }

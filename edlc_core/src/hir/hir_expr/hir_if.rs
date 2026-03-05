@@ -19,7 +19,7 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;

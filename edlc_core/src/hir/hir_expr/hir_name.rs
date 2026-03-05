@@ -352,17 +352,8 @@ impl HirName {
         })
     }
 
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Var(var,  _) => {
-                Ok(!phase.vars.is_global(*var)
-                    .map_err(|err| HirError::new_edl(self.pos, err))?
-                    && phase.vars.is_mutable(*var)
-                    .ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))?)
-            }
-            _ => Ok(false)
-        }
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
+        self.infer_info.as_ref().unwrap().finalized_mutable
     }
 
     /// Returns the EDL variable id if the name refers to a variable.

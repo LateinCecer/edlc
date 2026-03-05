@@ -22,7 +22,7 @@ use crate::core::type_analysis::*;
 use crate::documentation::{ConstDoc, DocCompilerState, DocElement, Modifiers};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirType;
-use crate::hir::hir_expr::{HirExpression, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpression, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, IntoEdl, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;

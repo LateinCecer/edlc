@@ -18,7 +18,7 @@ use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
@@ -33,6 +33,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::report_infer_error;
@@ -399,11 +400,16 @@ impl MakeGraph for HirAssign {
             }
         }
 
-        if !self.lhs.can_be_assigned_to(&mut graph.hir_phase)? {
-            return Err(HirTranslationError::CannotAssignToExpr {
-                pos: self.pos,
-                msg: "expression is not mutable".to_string(),
-            })
+        if self.lhs.can_be_assigned_to() != InternalMutability::Mutable {
+            let lhs_ty = self.lhs.get_type(&mut graph.hir_phase)?.unwrap();
+            if lhs_ty.ty != edl_type::EDL_REF || !lhs_ty.get_ref_mutability()?.clone().unwrap_literal().unwrap_bool() {
+                // can assign to references, so check if this is not a reference
+                dbg!(&self.lhs);
+                return Err(HirTranslationError::CannotAssignToExpr {
+                    pos: self.pos,
+                    msg: "expression is not mutable".to_string(),
+                })
+            }
         }
 
         // use the MIR assign expression to execute a partial assign

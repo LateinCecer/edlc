@@ -16,7 +16,7 @@
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_array_index::HirArrayIndex;
 use crate::hir::hir_expr::hir_array_init::HirArrayInit;
@@ -32,7 +32,7 @@ use crate::hir::hir_expr::hir_literal::HirLiteral;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::hir_return::HirReturn;
 use crate::hir::translation::{HirTranslationError};
-use crate::hir::{HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::{report_infer_error, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
@@ -43,10 +43,10 @@ use crate::prelude::HirContext;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use crate::core::edl_type;
-use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
+use crate::core::type_analysis::*;
 use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_field::HirField;
-use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_vars::VariableMapper;
@@ -99,6 +99,54 @@ pub enum HirExpression {
     Deref(HirDeref),
 }
 
+impl SourceObject for HirExpression {
+    fn pos(&self) -> SrcPos {
+        match self {
+            HirExpression::ArrayInit(val) => val.pos,
+            HirExpression::ArrayIndex(val) => val.pos,
+            HirExpression::As(val) => val.pos,
+            HirExpression::Block(val) => val.pos,
+            HirExpression::Call(val) => val.pos,
+            HirExpression::Field(val) => val.pos,
+            HirExpression::Literal(val) => val.pos,
+            HirExpression::Name(val) => val.pos,
+            HirExpression::Assign(val) => val.pos,
+            HirExpression::Let(val) => val.pos,
+            HirExpression::If(val) => val.pos,
+            HirExpression::Loop(val) => val.pos,
+            HirExpression::Break(val) => val.pos,
+            HirExpression::Continue(val) => val.pos,
+            HirExpression::Return(val) => val.pos,
+            HirExpression::TypeInit(val) => val.pos,
+            HirExpression::Ref(val) => val.pos,
+            HirExpression::Deref(val) => val.pos,
+        }
+    }
+
+    fn src(&self) -> &ModuleSrc {
+        match self {
+            HirExpression::ArrayInit(val) => &val.src,
+            HirExpression::ArrayIndex(val) => &val.src,
+            HirExpression::As(val) => &val.src,
+            HirExpression::Block(val) => &val.src,
+            HirExpression::Call(val) => &val.src,
+            HirExpression::Field(val) => &val.src,
+            HirExpression::Literal(val) => &val.src,
+            HirExpression::Name(val) => &val.src,
+            HirExpression::Assign(val) => &val.src,
+            HirExpression::Let(val) => &val.src,
+            HirExpression::If(val) => &val.src,
+            HirExpression::Loop(val) => &val.src,
+            HirExpression::Break(val) => &val.src,
+            HirExpression::Continue(val) => &val.src,
+            HirExpression::Return(val) => &val.src,
+            HirExpression::TypeInit(val) => &val.src,
+            HirExpression::Ref(val) => &val.src,
+            HirExpression::Deref(val) => &val.src,
+        }
+    }
+}
+
 impl HirExpression {
     pub fn request_function_instance(&self, type_reg: &mut EdlTypeRegistry, collection: &mut HashSet<EdlFnInstance>) {
         match self {
@@ -124,13 +172,13 @@ impl HirExpression {
     }
 
     /// Returns true if it is possible to assign a value to the expression.
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
         match self {
-            HirExpression::Field(val) => val.can_be_assigned_to(phase),
-            HirExpression::Name(name) => name.can_be_assigned_to(phase),
-            HirExpression::ArrayIndex(index) => index.can_be_assigned_to(phase),
-            HirExpression::Deref(deref) => deref.can_be_assigned_to(phase),
-            _ => Ok(false),
+            HirExpression::Field(val) => val.can_be_assigned_to(),
+            HirExpression::Name(name) => name.can_be_assigned_to(),
+            HirExpression::ArrayIndex(index) => index.can_be_assigned_to(),
+            HirExpression::Deref(deref) => deref.can_be_assigned_to(),
+            _ => InternalMutability::Immutable,
         }
     }
 
@@ -145,29 +193,6 @@ impl HirExpression {
             HirExpression::ArrayIndex(index) => index.is_internal_ref(phase),
             HirExpression::Deref(deref) => deref.is_internal_ref(phase),
             _ => Ok(false),
-        }
-    }
-
-    pub fn pos(&self) -> SrcPos {
-        match self {
-            HirExpression::ArrayInit(val) => val.pos,
-            HirExpression::ArrayIndex(val) => val.pos,
-            HirExpression::As(val) => val.pos,
-            HirExpression::Block(val) => val.pos,
-            HirExpression::Call(val) => val.pos,
-            HirExpression::Field(val) => val.pos,
-            HirExpression::Literal(val) => val.pos,
-            HirExpression::Name(val) => val.pos,
-            HirExpression::Assign(val) => val.pos,
-            HirExpression::Let(val) => val.pos,
-            HirExpression::If(val) => val.pos,
-            HirExpression::Loop(val) => val.pos,
-            HirExpression::Break(val) => val.pos,
-            HirExpression::Continue(val) => val.pos,
-            HirExpression::Return(val) => val.pos,
-            HirExpression::TypeInit(val) => val.pos,
-            HirExpression::Ref(val) => val.pos,
-            HirExpression::Deref(val) => val.pos,
         }
     }
 
@@ -191,29 +216,6 @@ impl HirExpression {
             HirExpression::TypeInit(val) => &val.scope,
             HirExpression::Ref(val) => &val.scope,
             HirExpression::Deref(val) => &val.scope,
-        }
-    }
-
-    pub fn src(&self) -> &ModuleSrc {
-        match self {
-            HirExpression::ArrayInit(val) => &val.src,
-            HirExpression::ArrayIndex(val) => &val.src,
-            HirExpression::As(val) => &val.src,
-            HirExpression::Block(val) => &val.src,
-            HirExpression::Call(val) => &val.src,
-            HirExpression::Field(val) => &val.src,
-            HirExpression::Literal(val) => &val.src,
-            HirExpression::Name(val) => &val.src,
-            HirExpression::Assign(val) => &val.src,
-            HirExpression::Let(val) => &val.src,
-            HirExpression::If(val) => &val.src,
-            HirExpression::Loop(val) => &val.src,
-            HirExpression::Break(val) => &val.src,
-            HirExpression::Continue(val) => &val.src,
-            HirExpression::Return(val) => &val.src,
-            HirExpression::TypeInit(val) => &val.src,
-            HirExpression::Ref(val) => &val.src,
-            HirExpression::Deref(val) => &val.src,
         }
     }
 
@@ -265,6 +267,80 @@ impl HirExpression {
     }
 }
 
+impl DefaultMut for HirExpression {}
+
+pub trait SourceObject {
+    fn pos(&self) -> SrcPos;
+    fn src(&self) -> &ModuleSrc;
+}
+
+pub trait DefaultMut: ResolveTypes + SourceObject {
+    /// Inserts the default mutability into the expression.
+    /// This should be called after type inference but before validation.
+    ///
+    /// # Node
+    ///
+    /// This does not traverse the HIR node tree.
+    /// Children should be visited through the [HirTreeWalker] infrastructure.
+    fn insert_default_mutability(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        fn process(
+            m: ExtConstUid,
+            pos: &SrcPos,
+            src: &ModuleSrc,
+            infer: &mut Infer<'_, '_>,
+        ) -> Result<bool, InferError> {
+            match infer.find_ext_const(m) {
+                Some(EdlConstValue::Literal(EdlLiteralValue::Bool(_))) => {
+                    // already resolved!
+                    return Ok(false);
+                },
+                Some(EdlConstValue::Literal(_)) => {
+                    unreachable!("invalid literal value for mutability")
+                }
+                _ => (),
+            }
+
+            // insert
+            let node = infer.state.node_gen.gen_info(pos, src);
+            infer
+                .at(node)
+                .eq(&m, &EdlConstValue::from_bool(false))?;
+            Ok(true)
+        }
+
+        // first check the mutability of the base expression
+        let mut infer = phase.infer_from(infer_state);
+        let m = self.mutability(&mut infer);
+        let pos = self.pos();
+        let src = self.src();
+        let changed = match process(m, &pos, src, &mut infer) {
+            Ok(v) => v,
+            Err(err) => return Err(report_infer_error(err, infer_state, phase)),
+        };
+
+        // check return value for references
+        // let ty = self.get_type_uid(&mut infer);
+        // if matches!(infer.find_type(ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
+        //     dbg!(ty);
+        //
+        //     let m: ExtConstUid = infer.get_generic_const(ty, 1).unwrap().into();
+        //     let src = self.src();
+        //     changed |= match process(m, &pos, src, &mut infer) {
+        //         Ok(v) => v,
+        //         Err(err) => return Err(report_infer_error(err, infer_state, phase)),
+        //     };
+        // }
+
+        if changed {
+            self.resolve_types(phase, infer_state)?;
+        }
+        Ok(())
+    }
+}
 
 impl ResolveFn for HirExpression {
     fn resolve_fn(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
