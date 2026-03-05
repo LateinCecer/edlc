@@ -624,8 +624,7 @@ fn test_env() -> Result<(), anyhow::Error> {
 
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
 comptime fn transform(val: f32) -> f32 {
-    let out: f32 = f32::mul(val, 2.0_f32);
-    out
+    val * 2.0
 }
 
 fn test_function(val: f32) -> f32 {
@@ -663,7 +662,8 @@ fn some_hybrid(y: f32, comptime x: f32) -> i32 {
         let mut y = i + x;
 
         // create an array to test internal references
-        let arr = [1_i32, 2, 4, 8, 16, 32];
+        let mut arr = [1_i32, 2, 4, 8, 16, 32];
+        arr[2] = 6;
         std::print("array index access: ");
         std::print(arr[2]);
         std::print("\n");

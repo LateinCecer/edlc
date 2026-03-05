@@ -13,20 +13,18 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::any::Any;
-use std::error::Error;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlTypeId};
 use crate::core::edl_value::EdlConstValue;
-use crate::core::{edl_type, EdlVarId};
 use crate::core::type_analysis::*;
+use crate::core::{edl_type, EdlVarId};
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::hir_expr::hir_type::{HirTypeName, SegmentType};
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::hir_expr::hir_ref::InternalMutability;
-use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
@@ -34,11 +32,10 @@ use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{MirRef, MirValue};
-use crate::mir::mir_expr::mir_literal::MirLiteral;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
-use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
+use std::error::Error;
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -493,32 +490,6 @@ impl HirExpr for HirName {
 impl EdlFnArgument for HirName {
     type CompilerState = HirPhase;
 
-    /// Names are considered mutable, if...
-    /// 1. ... the name refers to a variable
-    /// 2. ... the variable is mutable
-    /// 3. ... and the variable is **not** global.
-    ///
-    /// Having global variables as effectively constant means that they can be treated as
-    /// constant expressions in function bodies, which greatly increases runtime performance.
-    ///
-    /// Since many types in EDL are actually pointers to other data structures in memory, it should
-    /// be noted that the data a global variables points to, _can_ be mutable.
-    /// The pointer itself, however, cannot.
-    ///
-    /// # Edit 07.03.2024
-    ///
-    /// This approach comes with a slight problem: it naturally also means that global variables
-    /// cannot be used in functions that take mutable arguments.
-    /// To fix this, the exclusion check for global variables is currently only done during
-    /// assignment checks, and resides within the method `HirName::can_be_assigned_to(...)`.
-    ///
-    /// The decision of how to proceed with mutable variables is somewhat important for the
-    /// overall design of the language, and the final decision regarding this problem has not been
-    /// made yet.
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(matches!(self.infer_info.as_ref().unwrap().finalized_mutable, InternalMutability::Mutable))
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState
@@ -602,14 +573,14 @@ impl MakeGraph for HirName {
                     // in this case we may need to create an internal reference
                     let target_base_ty = graph.mir_phase.types
                         .get_ref_type(&target_ty)
-                        .or_else(|| graph.mir_phase.types.get_mut_ref_type(&target_ty))
                         .expect("target type is not a reference");
                     assert_eq!(target_base_ty, mir_ty,
                                "target reference base type does not match type of reference");
-                    let is_mutable = graph.mir_phase.types.is_mut_ref(&target_ty);
+                    let is_mutable = graph.mir_phase.types.is_ref_mutable(&target_ty);
 
                     if var.global {
                         // create a reference to a global variable
+                        assert!(!is_mutable, "cannot create mutable reference to global variable");
                         let var = MirGlobalVar {
                             pos: self.pos,
                             scope: self.scope,
@@ -673,6 +644,7 @@ impl MakeGraph for HirName {
 
                 let target_ty = *graph.graph.get_var_type(&target);
                 if let Some(ref_base) = graph.mir_phase.types.get_ref_type(&target_ty) {
+                    assert!(!graph.mir_phase.types.is_ref_mutable(&target_ty), "cannot create mutable reference to constant");
                     // we need a shared reference
                     assert_eq!(ref_base, mir_val_ty);
                     let tmp_value = graph.graph.create_temp_variable(mir_val_ty);
@@ -685,27 +657,6 @@ impl MakeGraph for HirName {
 
                     // create shared reference
                     graph.graph.def_ref(
-                        graph.current_block,
-                        tmp_value,
-                        target,
-                        &graph.mir_phase.types,
-                        self.pos,
-                        self.src.clone(),
-                    );
-                    Ok(())
-                } else if let Some(ref_base) = graph.mir_phase.types.get_mut_ref_type(&target_ty) {
-                    // we need a mutable reference
-                    assert_eq!(ref_base, mir_val_ty);
-                    let tmp_value = graph.graph.create_temp_variable(mir_val_ty);
-                    graph.graph.insert_def(
-                        graph.current_block,
-                        tmp_value,
-                        expr_id,
-                        &graph.mir_phase.types,
-                    );
-
-                    // create mutable reference
-                    graph.graph.def_mut_ref(
                         graph.current_block,
                         tmp_value,
                         target,

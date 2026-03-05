@@ -350,13 +350,6 @@ impl HirExpr for HirAssign {
 impl EdlFnArgument for HirAssign {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     /// While the value returned by the assign operation is always `()`, which is known at
     /// compiletime, the operation itself can generally not be performed at compiletime.
     /// Therefore, this method always returns `false`.

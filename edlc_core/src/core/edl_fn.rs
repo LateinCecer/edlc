@@ -290,8 +290,6 @@ pub trait EdlRecoverableError: Error {
 pub trait EdlFnArgument: Debug + PartialEq {
     type CompilerState: EdlCompilerState;
 
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error>;
-
     /// Returns if the argument is a const expression.
     /// Const expressions are expressions that can be evaluated at compiletime.
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error>;

@@ -235,28 +235,6 @@ impl HirExpr for HirLoop {
 impl EdlFnArgument for HirLoop {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        // if all break statements return a mutable value, the value of the loop itself can also
-        // be considered mutable
-        let id = self.element_id;
-        let mutable = self.block.walk(
-            &mut |expr| match expr {
-                HirExpression::Break(b) => b.refers_to_loop(id),
-                _ => false,
-            },
-            &mut |expr| match expr {
-                HirExpression::Break(b) => b.is_mutable(state),
-                _ => panic!("illegal state"),
-            }
-        )?.into_iter()
-            .reduce(|lhs, rhs| lhs & rhs)
-            .unwrap_or(true);
-        Ok(mutable)
-    }
-
     /// Currently, we cannot check if the loop terminates.
     /// As long as this is not possible, we can also not check if the loop can be interpreted as a
     /// constant value or not.

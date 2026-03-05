@@ -40,6 +40,7 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    lhs_type_stencil: TypeUid,
     /// the internal reference is mutable if the LHS of the operator is mutable.
     mutable: ExtConstUid,
     finalized_mutability: InternalMutability,
@@ -290,7 +291,7 @@ impl ResolveTypes for HirArrayIndex {
         self.lhs.resolve_types(phase, infer_state)?;
 
         // insert constraints
-        HirRef::auto(&mut self.lhs, phase, infer_state)?;
+        HirRef::auto(&mut self.lhs, phase, infer_state, self.info.as_ref().unwrap().lhs_type_stencil)?;
         infer = phase.infer_from(infer_state);
         let lhs_ty = self.lhs.get_type_uid(&mut infer);
         // LHS must be a reference type now
@@ -347,10 +348,17 @@ impl ResolveTypes for HirArrayIndex {
             let node_id = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let ty_uid = inferer.new_type(node_id);
             let m = inferer.new_ext_const_with_type(node_id, edl_type::EDL_BOOL);
+
+            // build lhs type stencil as a reference
+            let lhs_type_stencil = inferer.new_type(node_id);
+            let ref_ty = inferer.type_reg.new_ref(EdlMaybeType::Unknown, None).unwrap();
+            inferer.at(node_id).eq(&lhs_type_stencil, &ref_ty).unwrap();
+
             self.info = Some(CompilerInfo {
                 node: node_id,
                 type_uid: ty_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                lhs_type_stencil,
                 mutable: m,
                 finalized_mutability: InternalMutability::Undetermined,
             });
@@ -434,13 +442,6 @@ impl HirExpr for HirArrayIndex {
 impl EdlFnArgument for HirArrayIndex {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        self.lhs.is_mutable(state)
-    }
-
     fn const_expr(
         &self,
         _state: &Self::CompilerState
@@ -477,42 +478,44 @@ impl MakeGraph for HirArrayIndex {
 
         // get target value and check if it is mutable
         let target_type = *graph.graph.get_var_type(&target);
-        if graph.mir_phase.types.is_mut_ref(&target_type) {
-            // write as mutable offset
-            let index_expr = graph.graph.expressions.insert_ref(MirRef::mut_array_index(
-                lhs_expr, // assume that lhs is a mutable reference type - there are checks for this later down the pipeline
-                index_expr,
-                target_type,
-                &graph.graph,
-                &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
-            ));
-            graph.graph.insert_def(
-                graph.current_block,
-                target,
-                index_expr,
-                &graph.mir_phase.types,
-            );
-            Ok(())
-        } else if graph.mir_phase.types.is_ref(&target_type) {
-            // write as sheared offset
-            let index_expr = graph.graph.expressions.insert_ref(MirRef::shared_array_index(
-                lhs_expr, // assume that lhs is a shared reference type - there are checks for this later down te pipeline
-                index_expr,
-                target_type,
-                &graph.graph,
-                &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
-            ));
-            graph.graph.insert_def(
-                graph.current_block,
-                target,
-                index_expr,
-                &graph.mir_phase.types,
-            );
-            Ok(())
+        if graph.mir_phase.types.is_ref(&target_type) {
+            if graph.mir_phase.types.is_ref_mutable(&target_type) {
+                // write as mutable offset
+                let index_expr = graph.graph.expressions.insert_ref(MirRef::mut_array_index(
+                    lhs_expr, // assume that lhs is a mutable reference type - there are checks for this later down the pipeline
+                    index_expr,
+                    target_type,
+                    &graph.graph,
+                    &graph.mir_phase.types,
+                    self.pos,
+                    self.src.clone(),
+                ));
+                graph.graph.insert_def(
+                    graph.current_block,
+                    target,
+                    index_expr,
+                    &graph.mir_phase.types,
+                );
+                Ok(())
+            } else {
+                // write as sheared offset
+                let index_expr = graph.graph.expressions.insert_ref(MirRef::shared_array_index(
+                    lhs_expr, // assume that lhs is a shared reference type - there are checks for this later down te pipeline
+                    index_expr,
+                    target_type,
+                    &graph.graph,
+                    &graph.mir_phase.types,
+                    self.pos,
+                    self.src.clone(),
+                ));
+                graph.graph.insert_def(
+                    graph.current_block,
+                    target,
+                    index_expr,
+                    &graph.mir_phase.types,
+                );
+                Ok(())
+            }
         } else {
             // get as shared offset, then dereference immediately
             let ref_type = self.mir_type(graph)?;

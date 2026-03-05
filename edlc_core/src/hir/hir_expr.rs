@@ -46,7 +46,7 @@ use crate::core::edl_type;
 use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
 use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_field::HirField;
-use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
+use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_vars::VariableMapper;
@@ -381,6 +381,29 @@ impl ResolveTypes for HirExpression {
             HirExpression::TypeInit(val) => val.as_const(inferer),
             HirExpression::Ref(val) => val.as_const(inferer),
             HirExpression::Deref(val) => val.as_const(inferer),
+        }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        match self {
+            HirExpression::ArrayInit(val) => val.mutability(inferer),
+            HirExpression::ArrayIndex(val) => val.mutability(inferer),
+            HirExpression::As(val) => val.mutability(inferer),
+            HirExpression::Block(val) => val.mutability(inferer),
+            HirExpression::Call(val) => val.mutability(inferer),
+            HirExpression::Field(val) => val.mutability(inferer),
+            HirExpression::Literal(val) => val.mutability(inferer),
+            HirExpression::Name(val) => val.mutability(inferer),
+            HirExpression::Assign(val) => val.mutability(inferer),
+            HirExpression::Let(val) => val.mutability(inferer),
+            HirExpression::If(val) => val.mutability(inferer),
+            HirExpression::Loop(val) => val.mutability(inferer),
+            HirExpression::Break(val) => val.mutability(inferer),
+            HirExpression::Continue(val) => val.mutability(inferer),
+            HirExpression::Return(val) => val.mutability(inferer),
+            HirExpression::TypeInit(val) => val.mutability(inferer),
+            HirExpression::Ref(val) => val.mutability(inferer),
+            HirExpression::Deref(val) => val.mutability(inferer),
         }
     }
 }

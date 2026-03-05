@@ -1468,51 +1468,6 @@ impl MirFlowGraph {
         };
     }
 
-    /// Generates a reference from the specified value.
-    /// If the value is already a reference, then we don't need to do anything.
-    /// If it is not, then we create a shared reference with an offset of 0.
-    /// If the value is a mutable reference, a downcast expression is inserted instead of creating
-    /// an entirely new reference.
-    /// In this case, the original mutable reference must outlive the downcasted shared reference
-    /// and may not be used as mutable for the entire lifetime of the derived shared reference.
-    pub fn insert_ref(
-        &mut self,
-        block: MirBlockRef,
-        value: MirValue,
-        target_ty: MirTypeId,
-        types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
-    ) -> MirValue {
-        let ty = self.get_var_type(&value);
-        if types.is_ref(ty) {
-            return value;
-        }
-        if types.is_mut_ref(ty) {
-            // downcast
-            let downcast_expr = self.expressions.insert_downcast(MirDowncastRef::new(
-                value,
-                target_ty,
-                self,
-                types,
-                pos,
-                src,
-            ));
-            return self.insert_expr(block, downcast_expr, types);
-        }
-
-        // value is not a reference
-        let reference_expr = self.expressions.insert_ref(MirRef::shared(
-            value,
-            target_ty,
-            self,
-            types,
-            pos,
-            src,
-        ));
-        self.insert_expr(block, reference_expr, types)
-    }
-
     pub fn def_ref(
         &mut self,
         block: MirBlockRef,
@@ -1523,22 +1478,6 @@ impl MirFlowGraph {
         src: ModuleSrc,
     ) -> BlockLocalStatementUid {
         let target_ty = *self.get_var_type(&target);
-        let ty = self.get_var_type(&value);
-        assert!(!types.is_ref(ty));
-
-        if types.is_mut_ref(ty) {
-            // downcast
-            let downcast_expr = self.expressions.insert_downcast(MirDowncastRef::new(
-                value,
-                target_ty,
-                self,
-                types,
-                pos,
-                src,
-            ));
-            return self.insert_def(block, target, downcast_expr, types);
-        }
-
         // value is not a reference
         let reference_expr = self.expressions.insert_ref(MirRef::shared(
             value,
@@ -1549,46 +1488,6 @@ impl MirFlowGraph {
             src,
         ));
         self.insert_def(block, target, reference_expr, types)
-    }
-
-    /// Generates a mutable reference from the specified value.
-    /// If the value is already a mutable reference, then we don't need to do anything.
-    /// If it is not, then we create a mutable reference with an offset of 0.
-    /// If the value is a shared reference, this method panics (compiler panic, should never happen
-    /// in a working compiler build).
-    pub fn insert_mut_ref(
-        &mut self,
-        block: MirBlockRef,
-        value: MirValue,
-        target_ty: MirTypeId,
-        types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
-    ) -> MirValue {
-        let ty = self.get_var_type(&value);
-        if types.is_mut_ref(ty) {
-            return value;
-        }
-        if types.is_ref(ty) {
-            panic!("cannot generate upcast shared reference to mutable reference!");
-        }
-
-        // value is not a reference
-        // - we must move the value into a new value as the mutable reference may modify the
-        // original and we cannot ensure that the original value is truly SSA.
-        // - the new base variable must then outlive the mutable reference before it is accessed
-        // or written to in any way.
-        let moved = self.create_temp_variable(*ty);
-        self.insert_move(block, value, moved);
-        let reference_expr = self.expressions.insert_ref(MirRef::mutable(
-            moved,
-            target_ty,
-            self,
-            types,
-            pos,
-            src,
-        ));
-        self.insert_expr(block, reference_expr, types)
     }
 
     pub fn def_mut_ref(
@@ -1602,9 +1501,7 @@ impl MirFlowGraph {
     ) -> BlockLocalStatementUid {
         let target_ty = *self.get_var_type(&target);
         let ty = self.get_var_type(&value);
-        assert!(!types.is_ref(ty) && !types.is_mut_ref(ty));
 
-        // value is not a reference
         // - we must move the value into a new value as the mutable reference may modify the
         // original and we cannot ensure that the original value is truly SSA.
         // - the new base variable must then outlive the mutable reference before it is accessed

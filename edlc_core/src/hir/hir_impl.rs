@@ -203,6 +203,10 @@ impl ResolveTypes for HirImpl {
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
     }
+
+    fn mutability(&mut self, _inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        todo!()
+    }
 }
 
 

@@ -14,24 +14,25 @@
  *    limitations under the License.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
+use crate::core::edl_type;
 use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, ResolveTypes};
 use crate::resolver::ScopeId;
 use std::error::Error;
-use crate::mir::mir_expr::MirValue;
-use crate::mir::mir_type::MirTypeId;
+
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -39,6 +40,7 @@ struct CompilerInfo {
     own_uid: TypeUid,
     return_uid: TypeUid,
     finalized_return: EdlMaybeType,
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -178,6 +180,11 @@ impl ResolveTypes for HirReturn {
             info.own_uid
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer
+                .at(node)
+                .eq(&mutable, &EdlConstValue::from_bool(false))
+                .unwrap();
 
             // create own return type and init as `!`
             let own_uid = inferer.new_type(node);
@@ -193,6 +200,7 @@ impl ResolveTypes for HirReturn {
                 own_uid,
                 return_uid,
                 finalized_return: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -209,6 +217,11 @@ impl ResolveTypes for HirReturn {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -261,13 +274,6 @@ impl HirExpr for HirReturn {
 
 impl EdlFnArgument for HirReturn {
     type CompilerState = HirPhase;
-
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
 
     fn const_expr(
         &self,

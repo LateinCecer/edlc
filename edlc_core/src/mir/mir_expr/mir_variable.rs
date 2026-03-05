@@ -35,11 +35,10 @@ use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
-use crate::mir::mir_expr::mir_graph::ConstFrame;
 use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
@@ -101,7 +100,6 @@ impl MirGlobalVar {
         let var_ty = vars.get_var_type(self.var).unwrap();
         let var_ty = mir_types.mir_id(var_ty, types).unwrap();
         let base = mir_types.get_ref_type(&self.ty)
-            .or_else(|| mir_types.get_mut_ref_type(&self.ty))
             .expect("return type of global var access mut be a reference in MIR!");
         assert_eq!(base, var_ty, "variable type does not match return type of var access");
     }

@@ -19,6 +19,7 @@ use crate::ast::ItemDoc;
 use crate::core::edl_fn::{EdlFnParam, EdlFnSignature, EdlFunctionBody, EdlPreSignature};
 use crate::core::edl_param_env::{EdlParameterDef, EdlParamStack};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlMaybeType, EdlType, EdlTypeId, EdlTypeInstance, FmtType, FunctionState};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::edl_var::EdlVar;
 use crate::core::EdlVarId;
 use crate::core::type_analysis::*;
@@ -37,7 +38,7 @@ use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGe
 use crate::mir::mir_type::TMirFnCallInfo;
 use crate::mir::mir_vars::VariableMapper;
 use crate::mir::MirPhase;
-use crate::prelude::{report_infer_error, ExecType, HirContext};
+use crate::prelude::{edl_type, report_infer_error, ExecType, HirContext};
 use crate::prelude::mir_type::MirTypeRegistry;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 
@@ -77,6 +78,7 @@ pub struct HirFnParam {
 struct InferInfo {
     node: NodeId,
     type_uid: TypeUid,
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -259,10 +261,13 @@ impl ResolveTypes for HirFn {
             inferer.at(node)
                 .eq(&type_uid, &self.signature.ret)
                 .unwrap();
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
 
             self.info = Some(InferInfo {
                 node,
                 type_uid,
+                mutable,
             });
             type_uid
         }
@@ -274,6 +279,11 @@ impl ResolveTypes for HirFn {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 

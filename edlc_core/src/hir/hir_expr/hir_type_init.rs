@@ -33,12 +33,16 @@ use crate::resolver::ScopeId;
 use std::error::Error;
 use std::ops::BitAnd;
 use crate::mir::mir_expr::MirValue;
+use crate::prelude::edl_type;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// Since a type init always creates a new value instance, we can safely say that his type of
+    /// expression is _never_ mutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -432,10 +436,14 @@ impl ResolveTypes for HirTypeInit {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let ty = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid: ty,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             ty
         }
@@ -474,6 +482,11 @@ impl ResolveTypes for HirTypeInit {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -855,13 +868,6 @@ impl HirTypeInit {
 
 impl EdlFnArgument for HirTypeInit {
     type CompilerState = HirPhase;
-
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
 
     fn const_expr(
         &self,

@@ -313,13 +313,6 @@ impl HirExpr for HirLiteral {
 impl EdlFnArgument for HirLiteral {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     /// Literals can always be evaluated.
     fn const_expr(
         &self,

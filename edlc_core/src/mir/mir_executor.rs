@@ -443,7 +443,7 @@ impl ExecutorVM {
         reg: &MirTypeRegistry,
     ) {
         let (range, ty) = layout.get_offset(&dst, self).unwrap();
-        assert!(reg.is_ref(&ty) || reg.is_mut_ref(&ty));
+        assert!(reg.is_ref(&ty));
         std::ptr::write(self.memory[range.clone()].as_mut_ptr() as *mut *const u8, value);
     }
 

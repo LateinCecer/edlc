@@ -1043,7 +1043,7 @@ impl MirTypeRegistry {
             || ty == self.bool() || ty == self.char()
             || ty == self.str() || ty == self.empty()
             || ty == self.never()
-            || self.is_ref(&ty) || self.is_mut_ref(&ty)
+            || self.is_ref(&ty)
     }
 
     pub fn is_i_type(&self, ty: MirTypeId) -> bool {
@@ -1140,28 +1140,30 @@ impl MirTypeRegistry {
         Some((element, array_length))
     }
 
+    /// Checks if `id` is a reference.
+    /// This applies for both mutable and immutable references.
     pub fn is_ref(&self, id: &MirTypeId) -> bool {
         self.types[id.0].tmir_version.id == edl_type::EDL_REF
     }
 
+    /// Returns the mutability of a reference type.
+    /// If `id` is not a reference type, this method panics.
+    pub fn is_ref_mutable(&self, id: &MirTypeId) -> bool {
+        assert_eq!(self.types[id.0].tmir_version.id, edl_type::EDL_REF, "not a reference type");
+
+        // get the mutability from the generics
+        let val = self.types[id.0].tmir_version.param.params[1].clone();
+        if let TMirParamValue::Const(EdlLiteralValue::Bool(mutable)) = val {
+            mutable
+        } else {
+            panic!("mutability of reference not specified / resolved");
+        }
+    }
+
+    /// Returns the base type behind a reference.
+    /// This works for both mutable and immutable references.
     pub fn get_ref_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
         if !self.is_ref(id) {
-            return None;
-        }
-        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
-            unreachable!()
-        };
-        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
-        //       already exist in the conversion map
-        Some(*self.conversion_map.get(param).unwrap())
-    }
-
-    pub fn is_mut_ref(&self, id: &MirTypeId) -> bool {
-        self.types[id.0].tmir_version.id == edl_type::EDL_MUT_REF
-    }
-
-    pub fn get_mut_ref_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
-        if !self.is_mut_ref(id) {
             return None;
         }
         let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
@@ -1207,7 +1209,7 @@ impl MirTypeRegistry {
             Ok(*value)
         } else if edl_type.ty == edl_type::EDL_ARRAY {
             self.register_array(edl_type.clone(), edl_reg)
-        } else if edl_type.ty == edl_type::EDL_REF || edl_type.ty == edl_type::EDL_MUT_REF {
+        } else if edl_type.ty == edl_type::EDL_REF {
             self.register_ref(edl_type.clone(), edl_reg)
         } else {
             // try to generate structured type
@@ -1347,7 +1349,7 @@ impl MirTypeRegistry {
         &mut self,
         ty: EdlTypeInstance,
     ) -> Result<Layout, EdlError> {
-        if ty.ty != edl_type::EDL_REF && ty.ty != edl_type::EDL_MUT_REF {
+        if ty.ty != edl_type::EDL_REF {
             return Err(EdlError::E003 { exp: edl_type::EDL_REF, got: ty.ty });
         }
 

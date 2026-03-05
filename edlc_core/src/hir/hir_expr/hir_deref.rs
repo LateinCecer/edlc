@@ -349,10 +349,6 @@ impl HirExpr for HirDeref {
 impl EdlFnArgument for HirDeref {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(false)
-    }
-
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         self.value.const_expr(state)
     }

@@ -592,20 +592,6 @@ impl HirCondition {
 impl EdlFnArgument for HirIf {
     type CompilerState = HirPhase;
 
-    /// The return value of an if-expression is only mutable, when all branches are mutable.
-    /// For now, this holds true regardless of if these branches can actually be reached.
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        for block in self.iter() {
-            if !block.is_mutable(state)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// An if expression is `const_expr` exactly when the condition, and **all** internal blocks
     /// are constant.
     fn const_expr(

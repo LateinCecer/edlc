@@ -181,13 +181,6 @@ impl HirExpr for HirContinue {
 impl EdlFnArgument for HirContinue {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     fn const_expr(
         &self,
         _state: &Self::CompilerState

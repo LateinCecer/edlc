@@ -845,12 +845,12 @@ impl<'reg> BorrowContext<'reg> {
 
     fn is_ref(&self, value: &MirValue) -> bool {
         let ty = self.cfg.get_var_type(value);
-        self.reg.is_ref(ty) | self.reg.is_mut_ref(ty)
+        self.reg.is_ref(ty)
     }
 
     fn is_mut_ref(&self, value: &MirValue) -> bool {
         let ty = self.cfg.get_var_type(value);
-        self.reg.is_mut_ref(ty)
+        self.reg.is_ref(ty) && self.reg.is_ref_mutable(ty)
     }
 
     #[inline(always)]

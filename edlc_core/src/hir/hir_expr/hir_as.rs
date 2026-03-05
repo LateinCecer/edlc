@@ -177,14 +177,6 @@ impl HirExpr for HirAs {
 impl EdlFnArgument for HirAs {
     type CompilerState = HirPhase;
 
-    /// For `as` expressions, the argument is always mutable.
-    /// This is because `as` only works on core types, which have to be passed by value.
-    /// Thus,
-    /// modifying the value within a function does not have any side effects on other memory segments.
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState

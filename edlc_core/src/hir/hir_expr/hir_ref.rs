@@ -133,20 +133,20 @@ pub struct HirRef {
     pub src: ModuleSrc,
     pub scope: ScopeId,
     pub uid: HirUid,
-    pub mutable: InternalMutability,
+    pub force_mutable: InternalMutability,
     value: Box<HirExpression>,
     compiler_info: Option<CompilerInfo>,
 }
 
 impl HirRef {
-    pub fn new(value: Box<HirExpression>, uid: HirUid, mutable: InternalMutability) -> Self {
+    pub fn new(value: Box<HirExpression>, uid: HirUid, force_mutable: InternalMutability) -> Self {
         Self {
             pos: value.pos(),
             src: value.src().clone(),
             scope: *value.scope(),
             uid,
-            mutable,
             value,
+            force_mutable,
             compiler_info: None,
         }
     }
@@ -157,24 +157,56 @@ impl HirRef {
         ctx: &mut HirContext,
         state: &mut InferState,
     ) -> Result<(), HirError> {
-        self.value.verify(phase, ctx, state)?;
-        if self.mutable == InternalMutability::Mutable && !self.value.is_mutable(phase)? {
-            phase.report_error(
-                format_type_args!(
-                    format_args!("cannot create mutable reference from immutable value")
-                ),
-                &[
-                    SrcError::Single {
-                        pos: self.pos.clone().into(),
-                        src: self.src.clone(),
-                        error: format_type_args!(
-                            format_args!("value is immutable")
-                        )
-                    }
-                ],
-                None,
-            );
+        if matches!(self.force_mutable, InternalMutability::Mutable) {
+            let mut inferer = phase.infer_from(state);
+            let src_mutable = self.value.mutability(&mut inferer);
+            let mutable = inferer.find_ext_const(src_mutable);
+
+            let Some(mutable) = mutable else {
+                // mutability is not resolved yet, default to immutable
+                if let Err(err) = inferer
+                    .at(self.compiler_info.as_ref().unwrap().node)
+                    .eq(&src_mutable, &EdlConstValue::from_bool(false)) {
+                    return Err(report_infer_error(err, state, phase));
+                }
+                self.resolve_types(phase, state)?;
+                self.value.verify(phase, ctx, state)?;
+                return Ok(());
+            };
+
+            if !mutable.unwrap_literal().unwrap_bool() {
+                // base is not mutable, which means that we cannot create a mutable reference from
+                // it
+                phase.report_error(
+                    format_type_args!(
+                        format_args!("cannot create mutable reference from immutable expression")
+                    ),
+                    &[
+                        SrcError::Double {
+                            src: self.src.clone(),
+                            first: self.pos.clone().into(),
+                            second: self.value.pos().clone().into(),
+                            error_first: format_type_args!(
+                                format_args!("reference is mutable")
+                            ),
+                            error_second: format_type_args!(
+                                format_args!("expression is immutable")
+                            ),
+                        }
+                    ],
+                    None
+                );
+
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::NotMutable(
+                        "cannot create mutable reference from immutable expression".to_string()))
+                })
+            }
         }
+
+        self.resolve_types(phase, state)?;
+        self.value.verify(phase, ctx, state)?;
         Ok(())
     }
 
@@ -186,24 +218,47 @@ impl HirRef {
     ///
     /// NOTE: this sort of handling may lead to problems in situations in which LHS is only later
     ///       able to resolve that it is a reference type.
-    pub fn auto(expr: &mut Box<HirExpression>, phase: &mut HirPhase, state: &mut InferState) -> Result<(), HirError> {
-        expr.resolve_types(phase, state)?;
+    pub fn auto(
+        expr: &mut Box<HirExpression>,
+        phase: &mut HirPhase,
+        state: &mut InferState,
+        target: TypeUid,
+    ) -> Result<(), HirError> {
+        // try to resolve expr as a reference
         let mut inferer = phase.infer_from(state);
         let expr_ty = expr.get_type_uid(&mut inferer);
+        let node = inferer.state.node_gen.gen_info(&expr.pos(), &expr.src());
 
-        match &inferer.find_type(expr_ty) {
-            EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_REF => {
-                // is already a reference
-                return Ok(());
-            }
-            _ => (),
+        let snapshot = inferer.snapshot();
+        if let Err(_err) = inferer
+            .at(node)
+            .eq(&expr_ty, &target) {
+            // expr type is not a reference type
+            inferer.roll_back_to(snapshot);
+        } else {
+            // expr already has the right type
+            inferer.confirm(snapshot);
+            return Ok(());
         }
 
-        let mutable = expr.is_mutable(phase)?;
-        let new_base = Box::new(
-            Self::new(expr.clone(), phase.new_uid(), None).into());
-        *expr = new_base;
-        expr.resolve_types(phase, state)?;
+        // NOTE: base relations between the types of the base expression and the target expression
+        //       are forged in the `get_type_uid` call of the assembled [HirRef]
+        let mut new_expr = Self::new(
+            expr.clone(),
+            phase.new_uid(),
+            InternalMutability::Undetermined
+        );
+        // engrave type inference relations between base type and target type
+        let mut inferer = phase.infer_from(state);
+        let ty_uid = new_expr.get_type_uid(&mut inferer);
+        if let Err(err) = inferer
+            .at(new_expr.compiler_info.as_ref().unwrap().node)
+            .eq(&ty_uid, &target) {
+            return Err(report_infer_error(err, state, phase));
+        }
+        new_expr.resolve_types(phase, state)?;
+
+        *expr = Box::new(new_expr.into());
         Ok(())
     }
 }
@@ -215,23 +270,34 @@ impl ResolveTypes for HirRef {
         infer_state: &mut InferState,
     ) -> Result<(), HirError> {
         let mut inferer = phase.infer_from(infer_state);
-        let own_uid = self.get_type_uid(&mut inferer);
-        let node = self.compiler_info.as_ref().unwrap().node;
+        let _own_uid = self.get_type_uid(&mut inferer); // <- we need this to ensure base
+        // relations are established
 
-        let ty = phase.types
-            .new_ref(EdlMaybeType::Unknown, self.mutable.map(EdlConstValue::from_bool))
-            .unwrap();
+        // we assume that `target` is a reference type with `expr` being the plane type in that
+        // reference
+        if !self.value.is_internal_ref(phase)? {
+            // expr is not a reference and we cannot create an internal reference from it
+            phase.report_error(
+                format_type_args!(
+                    format_args!("cannot create reference from expression")
+                ),
+                &[
+                    SrcError::Single {
+                        pos: self.value.pos().clone().into(),
+                        src: self.value.src().clone(),
+                        error: format_type_args!(
+                            format_args!("expression cannot be treated as a reference")
+                        )
+                    }
+                ],
+                None,
+            );
 
-        if let Err(err) = inferer.at(node).eq(&own_uid, &ty) {
-            return Err(report_infer_error(err, infer_state, phase));
-        }
-        // assert that generic parameter of reference must be equal to the base type
-        let generic_ty = inferer
-            .get_generic_type(own_uid, 0)
-            .unwrap();
-        let value_ty = self.value.get_type_uid(&mut inferer);
-        if let Err(err) = inferer.at(node).eq(&value_ty, &generic_ty.uid) {
-            return Err(report_infer_error(err, infer_state, phase));
+            return Err(HirError {
+                pos: self.value.pos(),
+                ty: Box::new(HirErrorType::NonReferencableExpression(
+                    "only name identifiers or dereferenced references are referencable".to_string()))
+            });
         }
         self.value.resolve_types(phase, infer_state)
     }
@@ -242,10 +308,57 @@ impl ResolveTypes for HirRef {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
+            let tmp = inferer.type_reg.new_ref(EdlMaybeType::Unknown, None).unwrap();
+            inferer
+                .at(node)
+                .eq(&own_uid, &tmp)
+                .unwrap();
+            let ref_base = inferer.get_generic_type(own_uid, 0).unwrap();
+            let expr_ty = self.value.get_type_uid(inferer);
+            inferer
+                .at(node)
+                .eq(&Into::<TypeUid>::into(ref_base), &expr_ty)
+                .unwrap();
+
+            let ref_mut = inferer.get_generic_const(own_uid, 1).unwrap();
+            match self.force_mutable {
+                InternalMutability::Undetermined => {
+                    // in this case, we simply link the mutability to the mutability of the source
+                    let expr_mut = self.value.mutability(inferer);
+                    inferer
+                        .at(node)
+                        .eq(&Into::<ExtConstUid>::into(ref_mut), &expr_mut)
+                        .unwrap();
+                },
+                InternalMutability::Mutable => {
+                    // in this case, the mutability is forced to be mutable
+                    // -> during verification we must check if the source expression is marked as
+                    //    mutable, otherwise this fails
+                    inferer
+                        .at(node)
+                        .eq(&Into::<ExtConstUid>::into(ref_mut), &EdlConstValue::from_bool(true))
+                        .unwrap();
+                },
+                InternalMutability::Immutable => {
+                    // in this case, we force this reference to be immutable.
+                    // -> if the source value is mutable, this expression needs to generate a
+                    //    MIR downcast.
+                    inferer
+                        .at(node)
+                        .eq(&Into::<ExtConstUid>::into(ref_mut), &EdlConstValue::from_bool(false))
+                        .unwrap();
+                },
+            }
+
             self.compiler_info = Some(CompilerInfo {
                 node,
                 type_uid: own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -325,13 +438,6 @@ impl HirExpr for HirRef {
 impl EdlFnArgument for HirRef {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        let ty = self.compiler_info.as_ref().unwrap().finalized_type.clone().unwrap();
-        ty.get_ref_mutability()
-            .map_err(|err| HirError::new_edl(self.pos, err))
-            .map(|val| val.clone().unwrap_literal().unwrap_bool())
-    }
-
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         self.value.const_expr(state)
     }
@@ -342,38 +448,34 @@ impl MakeGraph for HirRef {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        if let HirExpression::Deref(downcast) = &*self.value {
-            // the reference operation follows a deref immediately -> we have a downcast from a
-            // mutable reference to an immutable reference
-            let ori_ref = &downcast.value;
-            let ori_ref_ty = ori_ref.mir_type(graph)?;
-
-            if graph.mir_phase.types.is_ref(&ori_ref_ty) {
-                // there is nothing to do here, just return the value of the original reference
-                assert!(!self.mutable);
-                assert_eq!(&ori_ref_ty, graph.graph.get_var_type(&target));
-                return downcast.write_to_graph(graph, target);
-            }
-            assert!(graph.mir_phase.types.is_mut_ref(&ori_ref_ty));
-            let ori_ref_value = graph.graph.create_temp_variable(ori_ref_ty);
-            let target_ty = *graph.graph.get_var_type(&target);
-            let downcast = graph.graph.expressions.insert_downcast(MirDowncastRef::new(
-                ori_ref_value,
-                target_ty,
-                &graph.graph,
-                &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
-            ));
-            graph.graph.insert_def(graph.current_block, target, downcast, &graph.mir_phase.types);
-            return Ok(());
-        }
-
-        // we don't have a downcast here, proceed as usual
+        let target_ty = *graph.graph.get_var_type(&target);
         let value_type = self.value.mir_type(graph)?;
         if value_type != self.value.mir_deref_type(graph)? {
-            // LHS compiles to an internal reference. We can assume that this is enough to fulfill
-            // the requirements and just exit here
+            // LHS compiles to an internal reference.
+            // In this case, we just need to check for a downcast
+            if graph.mir_phase.types.is_ref_mutable(&value_type)
+                && !graph.mir_phase.types.is_ref_mutable(&target_ty) {
+                // insert downcast from original
+                let ori_ref_value = graph.graph.create_temp_variable(value_type);
+                self.value.write_to_graph(graph, ori_ref_value)?;
+                let downcast = graph.graph.expressions.insert_downcast(MirDowncastRef::new(
+                    ori_ref_value,
+                    target_ty,
+                    &graph.graph,
+                    &graph.mir_phase.types,
+                    self.pos,
+                    self.src.clone(),
+                ));
+                graph.graph.insert_def(
+                    graph.current_block,
+                    target,
+                    downcast,
+                    &graph.mir_phase.types,
+                );
+                return Ok(());
+            }
+
+            assert_eq!(value_type, target_ty);
             self.value.write_to_graph(graph, target)?;
             return Ok(());
         }
@@ -382,7 +484,7 @@ impl MakeGraph for HirRef {
         // in this case, we need to actually create the reference to a temporary value in MIR
         let value = graph.graph.create_temp_variable(value_type);
         self.value.write_to_graph(graph, value)?;
-        if self.mutable {
+        if graph.mir_phase.types.is_ref_mutable(&target_ty) {
             graph.graph.def_mut_ref(
                 graph.current_block,
                 value,

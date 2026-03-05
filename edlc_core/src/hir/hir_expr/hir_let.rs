@@ -527,13 +527,6 @@ impl HirExpr for HirLet {
 impl EdlFnArgument for HirLet {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     /// While the value of the let expression might be known at compiletime, the actual let-expression
     /// cannot be executed in pre-processing, since it involves allocating stack space.
     fn const_expr(

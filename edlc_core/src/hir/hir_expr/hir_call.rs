@@ -1859,10 +1859,6 @@ impl HirExpr for HirFunctionCall {
 impl EdlFnArgument for HirFunctionCall {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        todo!()
-    }
-
     /// At this state, it is not clear whether the function is stateless.
     /// This information is only present in the MIR phase of the compiler pipeline, since only then
     /// the body of the function can be considered.

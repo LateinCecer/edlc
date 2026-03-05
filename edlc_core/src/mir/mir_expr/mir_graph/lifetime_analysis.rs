@@ -66,7 +66,7 @@ impl LifetimeAnalysis {
             .iter()
             .enumerate()
             .map(|(index_raw, item)| (MirValue(index_raw), item.ty))
-            .filter(|(_, ty)| mir_types.is_ref(ty) || mir_types.is_mut_ref(ty))
+            .filter(|(_, ty)| mir_types.is_ref(ty))
             .for_each(|(value, _)| { self.reference_table.insert(value); });
     }
 

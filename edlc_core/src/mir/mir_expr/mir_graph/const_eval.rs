@@ -243,7 +243,7 @@ impl ConstEval {
         //     target location of that reference might/will probably change after code gen)
         let mut view = self.consts.view_mut(value.0);
         let ty = cfg.get_var_type(value);
-        if reg.is_ref(ty) || reg.is_mut_ref(ty) {
+        if reg.is_ref(ty) {
             view.set(ConstEvalState::Runtime);
             return;
         }
@@ -317,7 +317,7 @@ impl ConstEval {
             // get value from vm
             let view = self.consts.view(dst.0);
             let ty = cfg.get_var_type(dst);
-            if reg.is_ref(ty) || reg.is_mut_ref(ty) {
+            if reg.is_ref(ty) {
                 return self.mark_runtime(dst);
             }
 

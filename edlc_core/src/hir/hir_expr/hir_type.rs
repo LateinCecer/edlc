@@ -567,15 +567,9 @@ impl IntoEdl for HirType {
                 Ok(EdlMaybeType::Unknown)
             },
             HirType::Empty(_) => Ok(EdlMaybeType::Fixed(phase.types.empty())),
-            HirType::Ref(pos, base, true) => {
+            HirType::Ref(pos, base, mutable) => {
                 let base = base.edl_repr(phase)?;
-                phase.types.new_mut_ref(base)
-                    .map_err(|err| HirError::new_edl(*pos, err))
-                    .map(|ty| EdlMaybeType::Fixed(ty))
-            }
-            HirType::Ref(pos, base, false) => {
-                let base = base.edl_repr(phase)?;
-                phase.types.new_ref(base)
+                phase.types.new_ref(base, Some(EdlConstValue::from_bool(*mutable)))
                     .map_err(|err| HirError::new_edl(*pos, err))
                     .map(|ty| EdlMaybeType::Fixed(ty))
             }

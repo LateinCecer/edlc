@@ -44,6 +44,7 @@ struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    base_stencil: TypeUid,
     /// A field inherits its mutability from the parent.
     mutable: ExtConstUid,
     finalized_mutable: InternalMutability,
@@ -704,7 +705,7 @@ impl ResolveTypes for HirField {
         let node = self.info.as_ref().unwrap().node;
 
         // resolve base to find where to get the member types from
-        HirRef::auto(&mut self.lhs, phase, infer_state)?;
+        HirRef::auto(&mut self.lhs, phase, infer_state, self.info.as_ref().unwrap().base_stencil)?;
 
         let infer = &mut phase.infer_from(infer_state);
         let lhs = self.lhs.get_type_uid(infer);
@@ -808,10 +809,18 @@ impl ResolveTypes for HirField {
             let own_uid = inferer.new_type(node);
             let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
 
+            let base_stencil = inferer.new_type(node);
+            let ref_ty = inferer.type_reg.new_ref(EdlMaybeType::Unknown, None).unwrap();
+            inferer
+                .at(node)
+                .eq(&base_stencil, &ref_ty)
+                .unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 type_uid: own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                base_stencil,
                 mutable,
                 finalized_mutable: InternalMutability::Undetermined,
             });
@@ -884,13 +893,6 @@ impl HirExpr for HirField {
 impl EdlFnArgument for HirField {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        self.lhs.is_mutable(state)
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState
@@ -929,7 +931,7 @@ impl MakeGraph for HirField {
                     self.src.clone(),
                 ))
         } else {
-            assert!(graph.mir_phase.types.is_mut_ref(&target_ty));
+            assert!(graph.mir_phase.types.is_ref_mutable(&target_ty));
             graph.graph.expressions
                 .insert_ref(MirRef::mut_field(
                     base_value,

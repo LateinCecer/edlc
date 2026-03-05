@@ -2,11 +2,11 @@
 
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
+
 
 #[derive(Debug, Clone, PartialEq)]
 /// Creates a reference from a value type.
@@ -131,7 +131,6 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        assert!(!reg.is_ref(&src_ty) && !reg.is_mut_ref(&src_ty));
         let base_type = reg.get_ref_type(&ty).unwrap();
         assert_eq!(src_ty, base_type);
 
@@ -155,8 +154,8 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        assert!(!reg.is_ref(&src_ty) && !reg.is_mut_ref(&src_ty));
-        let base_type = reg.get_mut_ref_type(&ty).unwrap();
+        assert!(reg.is_ref_mutable(&ty));
+        let base_type = reg.get_ref_type(&ty).unwrap();
         assert_eq!(src_ty, base_type);
 
         Self {
@@ -180,9 +179,7 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
-            .unwrap_or(src_ty);
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let layout = reg.get_layout(base_type).unwrap();
         let offset = layout.member_offset(field, reg).unwrap();
 
@@ -208,9 +205,7 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
-            .unwrap_or(src_ty);
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let layout = reg.get_layout(base_type).unwrap();
         let offset = layout.enum_variant_offset(variant, field, reg).unwrap();
 
@@ -235,11 +230,9 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
-            .unwrap_or(src_ty);
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let (element_ty, array_size) = reg.get_array_type(&base_type).unwrap();
-        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+        assert_eq!(element_ty, reg.get_ref_type(&ty).unwrap());
 
         MirRef {
             mutable: false,
@@ -264,10 +257,9 @@ impl MirRef {
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
             .unwrap_or(src_ty);
         let element_ty = reg.get_slice_type(&base_type).unwrap();
-        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+        assert_eq!(element_ty, reg.get_ref_type(&ty).unwrap());
 
         MirRef {
             mutable: false,
@@ -291,9 +283,7 @@ impl MirRef {
         ty: MirTypeId,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
-            .unwrap_or(src_ty);
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let (array_element, array_size) = reg.get_array_type(&base_type).unwrap();
         let target_element = reg.get_slice_type(&ty).unwrap();
         assert_eq!(array_element, target_element);
@@ -319,8 +309,8 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_mut_ref_type(&src_ty)
-            .unwrap_or(src_ty);
+        assert!(reg.is_ref_mutable(&src_ty));
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let layout = reg.get_layout(base_type).unwrap();
         let offset = layout.member_offset(field, reg).unwrap();
 
@@ -346,8 +336,8 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_mut_ref_type(&src_ty)
-            .unwrap_or(src_ty);
+        assert!(reg.is_ref_mutable(&src_ty));
+        let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
         let layout = reg.get_layout(base_type).unwrap();
         let offset = layout.enum_variant_offset(variant, field, reg).unwrap();
 
@@ -372,10 +362,11 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_mut_ref_type(&src_ty)
+        assert!(reg.is_ref_mutable(&src_ty));
+        let base_type = reg.get_ref_type(&src_ty)
             .unwrap_or(src_ty);
         let (element_ty, array_size) = reg.get_array_type(&base_type).unwrap();
-        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+        assert_eq!(element_ty, reg.get_ref_type(&ty).unwrap());
 
         MirRef {
             mutable: true,
@@ -399,10 +390,11 @@ impl MirRef {
         src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_mut_ref_type(&src_ty)
+        assert!(reg.is_ref_mutable(&src_ty));
+        let base_type = reg.get_ref_type(&src_ty)
             .unwrap_or(src_ty);
         let element_ty = reg.get_slice_type(&base_type).unwrap();
-        assert_eq!(element_ty, reg.get_ref_type(&ty).or_else(|| reg.get_mut_ref_type(&ty)).unwrap());
+        assert_eq!(element_ty, reg.get_ref_type(&ty).unwrap());
 
         MirRef {
             mutable: true,
@@ -426,7 +418,8 @@ impl MirRef {
         ty: MirTypeId,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let base_type = reg.get_mut_ref_type(&src_ty)
+        assert!(reg.is_ref_mutable(&src_ty));
+        let base_type = reg.get_ref_type(&src_ty)
             .unwrap_or(src_ty);
         let (array_element, array_size) = reg.get_array_type(&base_type).unwrap();
         let target_element = reg.get_slice_type(&ty).unwrap();
@@ -446,7 +439,7 @@ impl MirRef {
     /// The reference operator creates a subset of another reference, if the source is already a
     /// reference type.
     pub fn is_reference_from_owner(&self, reg: &MirTypeRegistry) -> bool {
-        reg.is_ref(&self.src_ty) || reg.is_mut_ref(&self.src_ty)
+        reg.is_ref(&self.src_ty)
     }
 
     pub fn execute(
@@ -459,10 +452,9 @@ impl MirRef {
         let (range, ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         let base_ty = reg
             .get_ref_type(&self.ty)
-            .or_else(|| reg.get_mut_ref_type(&self.ty))
             .unwrap();
 
-        let ptr = if reg.is_ref(&ty) || reg.is_mut_ref(&ty) {
+        let ptr = if reg.is_ref(&ty) {
             // the base value is already a reference.
             // for all offset calculations, we read `value` as a pointer and then add the offset to
             // that
@@ -618,7 +610,6 @@ impl MirDeref {
     pub fn new(value: MirValue, graph: &MirFlowGraph, reg: &MirTypeRegistry, pos: SrcPos, src: ModuleSrc) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let ty = reg.get_ref_type(&src_ty)
-            .or_else(|| reg.get_mut_ref_type(&src_ty))
             .expect("only reference types can be dereferenced");
         MirDeref {
             pos,
@@ -639,7 +630,7 @@ impl MirDeref {
         let ptr: *const u8 = vm.read(self.value, stack_frame, reg).unwrap();
 
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
-        assert_eq!(reg.get_ref_type(&value_ty).or_else(|| reg.get_mut_ref_type(&value_ty)).unwrap(), target_ty);
+        assert_eq!(reg.get_ref_type(&value_ty).unwrap(), target_ty);
 
         let [mut target_buf] = vm.get_data_mut([target_range.clone()], &[target_ty]);
         unsafe {
@@ -683,7 +674,8 @@ impl MirGraphElement for MirDowncastRef {
 impl MirDowncastRef {
     pub fn new(value: MirValue, target_ty: MirTypeId, graph: &MirFlowGraph, reg: &MirTypeRegistry, pos: SrcPos, src: ModuleSrc) -> Self {
         let src_ty = *graph.get_var_type(&value);
-        let src_base_ty = reg.get_mut_ref_type(&src_ty)
+        assert!(reg.is_ref_mutable(&src_ty));
+        let src_base_ty = reg.get_ref_type(&src_ty)
             .expect("only mutable references can be downcast to immutable references");
         let target_base_ty = reg.get_ref_type(&target_ty)
             .expect("target of a downcast operator has to be a shared reference");
@@ -705,7 +697,8 @@ impl MirDowncastRef {
     ) {
         let (_, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         let (_, value_ty) = stack_frame.get_offset(&self.value, vm).unwrap();
-        assert_eq!(reg.get_ref_type(&target_ty).unwrap(), reg.get_mut_ref_type(&value_ty).unwrap());
+        assert!(reg.is_ref_mutable(&value_ty));
+        assert_eq!(reg.get_ref_type(&target_ty).unwrap(), reg.get_ref_type(&value_ty).unwrap());
         vm.memcpy_slice(&[*target], &[self.value], stack_frame);
     }
 

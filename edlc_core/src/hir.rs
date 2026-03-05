@@ -1153,6 +1153,8 @@ pub enum HirErrorType {
     NeverTypeInVariable(EdlVarId),
     Infer(InferError),
     TypeInit(EdlTypeInitError),
+    NonReferencableExpression(String),
+    NotMutable(String),
 }
 
 impl Display for HirError {
@@ -1296,6 +1298,12 @@ impl Display for HirErrorType {
             }
             HirErrorType::ConstantValueUnresolved(val) => {
                 write!(f, "Constant value `{val:?}` is not fully resolved")
+            }
+            HirErrorType::NonReferencableExpression(expr) => {
+                write!(f, "Expression is not referencable; {expr}")
+            }
+            HirErrorType::NotMutable(msg) => {
+                write!(f, "Expression is not mutable; {msg}")
             }
         }
     }

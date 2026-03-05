@@ -452,17 +452,6 @@ impl HirExpr for HirBlock {
 impl EdlFnArgument for HirBlock {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        if let Some(ret) = self.ret.as_ref() {
-            ret.is_mutable(state)
-        } else {
-            Ok(true)
-        }
-    }
-
     /// A block is `const_expr` exactly when **all** items in the block are.
     fn const_expr(
         &self,
