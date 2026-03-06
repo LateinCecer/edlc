@@ -279,22 +279,31 @@ impl SwitchTarget {
     }
 }
 
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DebugSymbols {
+    pub pos: SrcPos,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 enum Statement {
     VarDef {
         var: MirValue,
         value: MirExprId,
         uid: BlockLocalStatementUid,
+        debug: DebugSymbols,
     },
     VarMove {
         var: MirValue,
         value: MirValue,
         uid: BlockLocalStatementUid,
+        debug: DebugSymbols,
     },
     VarCopy {
         var: MirValue,
         value: MirValue,
         uid: BlockLocalStatementUid,
+        debug: DebugSymbols
     },
 }
 
@@ -324,13 +333,13 @@ impl Statement {
 
     fn uses_var(&self, expressions: &MirExprContainer, var: &MirValue) -> bool {
         match self {
-            Statement::VarMove { uid: _, value, var: _ } => {
+            Statement::VarMove { uid: _, value, var: _, debug: _ } => {
                 value == var
             },
-            Statement::VarCopy { uid: _, value, var: _ } => {
+            Statement::VarCopy { uid: _, value, var: _, debug: _ } => {
                 value == var
             },
-            Statement::VarDef { uid: _, value, var: _ } => {
+            Statement::VarDef { uid: _, value, var: _, debug: _ } => {
                 expressions.uses_var(*value, var)
             },
         }
@@ -376,13 +385,13 @@ impl Statement {
         backend: &impl Backend,
     ) {
         match self {
-            Self::VarMove { var, value, uid: _ }
-                | Self::VarCopy { var, value, uid: _ } => {
+            Self::VarMove { var, value, uid: _, debug: _ }
+                | Self::VarCopy { var, value, uid: _, debug: _ } => {
                 let dst = stack_frame.get_offset(var, vm).unwrap();
                 let src = stack_frame.get_offset(value, vm).unwrap();
                 vm.memcpy(&dst, &src);
             }
-            Self::VarDef { var, value, uid: _ } => {
+            Self::VarDef { var, value, uid: _, debug: _ } => {
                 expr.execute(vm,  stack_frame, *value, var, reg, backend);
             }
         }
@@ -400,24 +409,26 @@ enum Seal {
     /// The ordering of the parameters is really only important for the receiving block, as the
     /// source blocks do not really care in which order they transmit the variables.
     /// To make this more than clear, the collection of output variables is a set and not a vector.
-    Jump(BlockCall),
+    Jump(BlockCall, DebugSymbols),
     /// Returns from the current function body.
     /// The type of the return expression must thus match the return type of the function
     /// signature.
-    Return(MirValue),
+    Return(MirValue, DebugSymbols),
     /// Conditional Jump
     Cond {
         cond: MirValue,
         then_target: BlockCall,
         else_target: BlockCall,
+        debug: DebugSymbols,
     },
     /// Conditional branch table
     Switch {
         cond: MirValue,
         targets: Vec<SwitchTarget>,
         default: BlockCall,
+        debug: DebugSymbols,
     },
-    Panic(MirValue),
+    Panic(MirValue, DebugSymbols),
     #[default]
     /// Used for blocks that are not yet sealed.
     /// NOTE: for a valid control flow graph, all blocks need to be sealed, so this should only
@@ -428,13 +439,13 @@ enum Seal {
 impl Seal {
     fn uses_var(&self, var: &MirValue) -> bool {
          match self {
-            Self::Return(return_value) => return_value == var,
-            Self::Panic(panic_value) => panic_value == var,
-            Self::Jump(block_call) => block_call.uses_var(var),
-            Self::Cond { cond, then_target, else_target } => {
+            Self::Return(return_value, _) => return_value == var,
+            Self::Panic(panic_value, _) => panic_value == var,
+            Self::Jump(block_call, _) => block_call.uses_var(var),
+            Self::Cond { cond, then_target, else_target, debug: _ } => {
                 cond == var || then_target.uses_var(var) || else_target.uses_var(var)
             },
-            Self::Switch { cond, targets, default } => {
+            Self::Switch { cond, targets, default, debug: _ } => {
                 cond == var
                     || targets.iter().any(|target| target.uses_var(var))
                     || default.uses_var(var)
@@ -450,25 +461,25 @@ impl Seal {
     ) {
         match self {
             Seal::None => panic!(),
-            Seal::Jump(target) => {
+            Seal::Jump(target, _) => {
                 target.iter_value_uses(block_ref, func);
             },
-            Seal::Cond { cond, then_target, else_target } => {
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 func(VarUse::Seal(block_ref, *cond));
                 then_target.iter_value_uses(block_ref, func);
                 else_target.iter_value_uses(block_ref, func);
             },
-            Seal::Switch { cond, targets, default  } => {
+            Seal::Switch { cond, targets, default, debug: _ } => {
                 func(VarUse::Seal(block_ref, *cond));
                 targets
                     .iter()
                     .for_each(|target| target.iter_value_uses(block_ref, func));
                 default.iter_value_uses(block_ref, func);
             },
-            Seal::Return(ret_value) => {
+            Seal::Return(ret_value, _) => {
                 func(VarUse::Seal(block_ref, *ret_value));
             },
-            Seal::Panic(panic_value) => {
+            Seal::Panic(panic_value, _) => {
                 func(VarUse::Seal(block_ref, *panic_value));
             }
         }
@@ -481,25 +492,25 @@ impl Seal {
     ) {
         match self {
             Seal::None => panic!(),
-            Seal::Jump(target) => {
+            Seal::Jump(target, _) => {
                 target.iter_value_uses_mut(block_ref, func);
             },
-            Seal::Cond { cond, then_target, else_target } => {
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 *cond = func(VarUse::Seal(block_ref, *cond));
                 then_target.iter_value_uses_mut(block_ref, func);
                 else_target.iter_value_uses_mut(block_ref, func);
             },
-            Seal::Switch { cond, targets, default  } => {
+            Seal::Switch { cond, targets, default, debug: _ } => {
                 *cond = func(VarUse::Seal(block_ref, *cond));
                 targets
                     .iter_mut()
                     .for_each(|target| target.iter_value_uses_mut(block_ref, func));
                 default.iter_value_uses_mut(block_ref, func);
             },
-            Seal::Return(ret_value) => {
+            Seal::Return(ret_value, _) => {
                 *ret_value = func(VarUse::Seal(block_ref, *ret_value));
             },
-            Seal::Panic(panic_value) => {
+            Seal::Panic(panic_value, _) => {
                 *panic_value = func(VarUse::Seal(block_ref, *panic_value));
             }
         }
@@ -710,19 +721,19 @@ impl Block {
         }
         // examine uses in sealing statement
         match &self.seal {
-            Seal::Jump(target) => {
+            Seal::Jump(target, _) => {
                 check_param(
                     &mut self.parameters,
                     &mut defined_vars,
                     target.params.iter(),
                 );
             }
-            Seal::Return(value) => {
+            Seal::Return(value, _) => {
                 if !defined_vars.contains(value) {
                     self.parameters.push(*value);
                 }
             }
-            Seal::Cond { cond, then_target, else_target } => {
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 if !defined_vars.contains(cond) {
                     self.parameters.push(*cond);
                     defined_vars.insert(*cond);
@@ -740,7 +751,7 @@ impl Block {
                     else_target.params.iter(),
                 );
             }
-            Seal::Switch { cond, targets, default } => {
+            Seal::Switch { cond, targets, default, debug: _ } => {
                 if !defined_vars.contains(cond) {
                     self.parameters.push(*cond);
                     defined_vars.insert(*cond);
@@ -763,7 +774,7 @@ impl Block {
                     default.params.iter(),
                 );
             }
-            Seal::Panic(value) => {
+            Seal::Panic(value, _) => {
                 if !defined_vars.contains(value) {
                     self.parameters.push(*value);
                     defined_vars.insert(*value);
@@ -831,9 +842,9 @@ impl Block {
             });
         self.statements.iter()
             .for_each(|statement| match statement {
-                Statement::VarDef { var, value: _, uid } |
-                Statement::VarMove { var, value: _, uid } |
-                Statement::VarCopy { var, value: _, uid } => {
+                Statement::VarDef { var, value: _, uid, debug: _ } |
+                Statement::VarMove { var, value: _, uid, debug: _ } |
+                Statement::VarCopy { var, value: _, uid, debug: _ } => {
                     let def_point = DefPoint::Definition(MirGraphLoc(block_ref, *uid));
                     func(def_point, *var);
                 }
@@ -853,9 +864,9 @@ impl Block {
             });
         self.statements.iter_mut()
             .for_each(|statement| match statement {
-                Statement::VarDef { var, value: _, uid } |
-                Statement::VarMove { var, value: _, uid } |
-                Statement::VarCopy { var, value: _, uid } => {
+                Statement::VarDef { var, value: _, uid, debug: _ } |
+                Statement::VarMove { var, value: _, uid, debug: _ } |
+                Statement::VarCopy { var, value: _, uid, debug: _ } => {
                     let def_point = DefPoint::Definition(MirGraphLoc(block_ref, *uid));
                     *var = func(def_point, *var);
                 }
@@ -933,7 +944,7 @@ impl Block {
     ) {
         self.statements.iter()
             .for_each(|statement| match statement {
-                Statement::VarDef { var: _, value, uid } => {
+                Statement::VarDef { var: _, value, uid, debug: _ } => {
                     expr_container.collect_vars(*value)
                         .into_iter()
                         .for_each(|var| {
@@ -941,8 +952,8 @@ impl Block {
                             func(use_point);
                         });
                 }
-                Statement::VarMove { var: _, value, uid } |
-                Statement::VarCopy { var: _, value, uid } => {
+                Statement::VarMove { var: _, value, uid, debug: _ } |
+                Statement::VarCopy { var: _, value, uid, debug: _ } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
                     func(use_point);
                 }
@@ -958,7 +969,7 @@ impl Block {
     ) {
         self.statements.iter_mut()
             .for_each(|statement| match statement {
-                Statement::VarDef { var: _, value, uid } => {
+                Statement::VarDef { var: _, value, uid, debug: _ } => {
                     expr_container.collect_vars(*value)
                         .into_iter()
                         .for_each(|var| {
@@ -969,8 +980,8 @@ impl Block {
                             }
                         });
                 }
-                Statement::VarMove { var: _, value, uid } |
-                Statement::VarCopy { var: _, value, uid } => {
+                Statement::VarMove { var: _, value, uid, debug: _ } |
+                Statement::VarCopy { var: _, value, uid, debug: _ } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
                     *value = func(use_point);
                 }
@@ -1022,8 +1033,8 @@ impl Block {
 
     fn down_link(&self) -> Vec<MirBlockRef> {
         match &self.seal {
-            Seal::Return(_) => Vec::new(),
-            Seal::Panic(_) => Vec::new(),
+            Seal::Return(_, _) => Vec::new(),
+            Seal::Panic(_, _) => Vec::new(),
             Seal::Cond { else_target, then_target, .. } => {
                 vec![else_target.target, then_target.target]
             },
@@ -1035,7 +1046,7 @@ impl Block {
                 links.push(default.target);
                 links
             },
-            Seal::Jump(target) => vec![target.target],
+            Seal::Jump(target, _) => vec![target.target],
             Seal::None => panic!("block is not sealed!"),
         }
     }
@@ -1192,19 +1203,19 @@ impl MirFlowGraph {
             self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg, backend);
             // jump to other block using sealing statement
             match &self.blocks[current_block.0].seal {
-                Seal::Return(value) => {
+                Seal::Return(value, _) => {
                     // println!("returning from execution");
                     let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
                     let data = vm.get_data(range.clone(), ty);
                     break Ok(data.get_copy(reg));
                 }
-                Seal::Panic(value) => {
+                Seal::Panic(value, _) => {
                     // println!("panic in execution");
                     let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
                     let data = vm.get_data(range.clone(), ty);
                     break Err(ExecutionError { value: data.get_copy(reg) });
                 }
-                Seal::Jump(target) => {
+                Seal::Jump(target, _) => {
                     vm.memcpy_slice(
                         self.blocks[target.target.0].parameters.as_slice(),
                         target.params.as_slice(),
@@ -1212,7 +1223,7 @@ impl MirFlowGraph {
                     );
                     current_block = target.target;
                 }
-                Seal::Cond { cond, then_target, else_target } => {
+                Seal::Cond { cond, then_target, else_target, debug: _ } => {
                     let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
                     if cond_value {
                         vm.memcpy_slice(
@@ -1230,7 +1241,7 @@ impl MirFlowGraph {
                         current_block = else_target.target;
                     }
                 }
-                Seal::Switch { cond, targets, default } => {
+                Seal::Switch { cond, targets, default, debug: _ } => {
                     let (cond_range, cond_ty) = stack_frame.get_offset(cond, vm).unwrap();
                     let cond_data = vm.get_data(cond_range.clone(), cond_ty);
 
@@ -1284,6 +1295,7 @@ impl MirFlowGraph {
         var: MirValue,
         value: MirExprId,
         reg: &MirTypeRegistry,
+        debug: DebugSymbols,
     ) -> BlockLocalStatementUid {
         assert_eq!(
             self.temp_vars[var.0].ty,
@@ -1292,7 +1304,7 @@ impl MirFlowGraph {
         );
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed");
         let uid = self.blocks[block.0].new_uid();
-        self.blocks[block.0].statements.push(Statement::VarDef { var, value, uid });
+        self.blocks[block.0].statements.push(Statement::VarDef { var, value, uid, debug });
         uid
     }
 
@@ -1300,18 +1312,17 @@ impl MirFlowGraph {
     /// return value of the expression.
     /// If the temporary value is never actually read, the value is never actually stored in the
     /// generated code.
-    pub fn insert_expr(&mut self, block: MirBlockRef, expr: MirExprId, reg: &MirTypeRegistry) -> MirValue {
+    pub fn insert_expr(&mut self, block: MirBlockRef, expr: MirExprId, reg: &MirTypeRegistry, debug: DebugSymbols) -> MirValue {
         let ty = self.expressions.get_type(expr, reg);
         let var = self.create_temp_variable(ty);
-        let _uid = self.insert_def(block, var, expr, reg);
+        let _uid = self.insert_def(block, var, expr, reg, debug);
         var
     }
 
-    pub fn insert_move(&mut self, block: MirBlockRef, value: MirValue, target: MirValue) {
-        let ty = *self.get_var_type(&value);
+    pub fn insert_move(&mut self, block: MirBlockRef, value: MirValue, target: MirValue, debug: DebugSymbols) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed");
         let uid = self.blocks[block.0].new_uid();
-        self.blocks[block.0].statements.push(Statement::VarMove { var: target, value, uid });
+        self.blocks[block.0].statements.push(Statement::VarMove { var: target, value, uid, debug });
     }
 
     pub fn get_expr_value(&mut self, block: MirBlockRef, uid: BlockLocalStatementUid) -> Option<&MirValue> {
@@ -1326,7 +1337,7 @@ impl MirFlowGraph {
         &self.temp_vars[var.0].ty
     }
 
-    fn move_var(&mut self, block: MirBlockRef, value: &MirValue) -> (MirValue, VarUse) {
+    fn move_var(&mut self, block: MirBlockRef, value: &MirValue, debug: DebugSymbols) -> (MirValue, VarUse) {
         let ty = *self.get_var_type(value);
         let var = self.create_temp_variable(ty);
         let uid = self.blocks[block.0].new_uid();
@@ -1334,12 +1345,13 @@ impl MirFlowGraph {
             var,
             value: *value,
             uid,
+            debug,
         });
         let use_var = VarUse::Statement(block, *value, uid);
         (var, use_var)
     }
 
-    fn copy_var(&mut self, block: MirBlockRef, value: &MirValue) -> (MirValue, VarUse) {
+    fn copy_var(&mut self, block: MirBlockRef, value: &MirValue, debug: DebugSymbols) -> (MirValue, VarUse) {
         let ty = *self.get_var_type(value);
         let var = self.create_temp_variable(ty);
         let uid = self.blocks[block.0].new_uid();
@@ -1347,6 +1359,7 @@ impl MirFlowGraph {
             var,
             value: *value,
             uid,
+            debug,
         });
         let use_var = VarUse::Statement(block, *value, uid);
         (var, use_var)
@@ -1406,12 +1419,13 @@ impl MirFlowGraph {
         &mut self,
         block: MirBlockRef,
         target: MirBlockRef,
+        debug: DebugSymbols,
     ) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
         self.blocks[block.0].seal = Seal::Jump(BlockCall {
             target,
             params: vec![],
-        });
+        }, debug);
     }
 
     pub fn insert_conditional_jump(
@@ -1420,12 +1434,14 @@ impl MirFlowGraph {
         then_target: MirBlockRef,
         else_target: MirBlockRef,
         cond: MirValue,
+        debug: DebugSymbols,
     ) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
         self.blocks[block.0].seal = Seal::Cond {
             cond,
             then_target: BlockCall { target: then_target, params: vec![] },
             else_target: BlockCall { target: else_target, params: vec![] },
+            debug,
         };
     }
 
@@ -1433,6 +1449,7 @@ impl MirFlowGraph {
         &mut self,
         block: MirBlockRef,
         return_value: MirValue,
+        debug: DebugSymbols,
     ) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
         assert_eq!(
@@ -1441,16 +1458,17 @@ impl MirFlowGraph {
             "return type does not match",
         );
         // self.temp_vars[return_value.0].uses.insert(VarUse::Return(block, return_value));
-        self.blocks[block.0].seal = Seal::Return(return_value);
+        self.blocks[block.0].seal = Seal::Return(return_value, debug);
     }
 
     pub fn insert_panic(
         &mut self,
         block: MirBlockRef,
         panic_value: MirValue,
+        debug: DebugSymbols,
     ) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
-        self.blocks[block.0].seal = Seal::Panic(panic_value);
+        self.blocks[block.0].seal = Seal::Panic(panic_value, debug);
     }
 
     pub fn insert_switch<I: Iterator<Item=SwitchTarget>>(
@@ -1459,12 +1477,14 @@ impl MirFlowGraph {
         cond: MirValue,
         cases: I,
         default: MirBlockRef,
+        debug: DebugSymbols,
     ) {
         assert!(matches!(self.blocks[block.0].seal, Seal::None), "block is already sealed!");
         self.blocks[block.0].seal = Seal::Switch {
             cond,
             targets: cases.collect(),
             default: BlockCall { target: default, params: vec![] },
+            debug,
         };
     }
 
@@ -1474,8 +1494,7 @@ impl MirFlowGraph {
         value: MirValue,
         target: MirValue,
         types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
+        debug: DebugSymbols,
     ) -> BlockLocalStatementUid {
         let target_ty = *self.get_var_type(&target);
         // value is not a reference
@@ -1484,10 +1503,8 @@ impl MirFlowGraph {
             target_ty,
             self,
             types,
-            pos,
-            src,
         ));
-        self.insert_def(block, target, reference_expr, types)
+        self.insert_def(block, target, reference_expr, types, debug)
     }
 
     pub fn def_mut_ref(
@@ -1496,8 +1513,7 @@ impl MirFlowGraph {
         value: MirValue,
         target: MirValue,
         types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
+        debug: DebugSymbols,
     ) -> BlockLocalStatementUid {
         let target_ty = *self.get_var_type(&target);
         let ty = self.get_var_type(&value);
@@ -1507,16 +1523,14 @@ impl MirFlowGraph {
         // - the new base variable must then outlive the mutable reference before it is accessed
         // or written to in any way.
         let moved = self.create_temp_variable(*ty);
-        self.insert_move(block, value, moved);
+        self.insert_move(block, value, moved, debug.clone());
         let reference_expr = self.expressions.insert_ref(MirRef::mutable(
             moved,
             target_ty,
             self,
             types,
-            pos,
-            src,
         ));
-        self.insert_def(block, target, reference_expr, types)
+        self.insert_def(block, target, reference_expr, types, debug)
     }
 
     /// Inserts a dereferencing expression into the graph.
@@ -1526,17 +1540,14 @@ impl MirFlowGraph {
         block: MirBlockRef,
         value: MirValue,
         types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
+        debug: DebugSymbols,
     ) -> MirValue {
         let deref_expr = self.expressions.insert_deref(MirDeref::new(
             value,
             self,
             types,
-            pos,
-            src,
         ));
-        self.insert_expr(block, deref_expr, types)
+        self.insert_expr(block, deref_expr, types, debug)
     }
 
     /// Inserts a dereferencing expression into the graph.
@@ -1546,17 +1557,14 @@ impl MirFlowGraph {
         value: MirValue,
         target: MirValue,
         types: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
+        debug: DebugSymbols,
     ) -> BlockLocalStatementUid {
         let deref_expr = self.expressions.insert_deref(MirDeref::new(
             value,
             self,
             types,
-            pos,
-            src,
         ));
-        self.insert_def(block, target, deref_expr, types)
+        self.insert_def(block, target, deref_expr, types, debug)
     }
 
     /// Checks if the graph is completely sealed.
@@ -1580,20 +1588,20 @@ impl MirFlowGraph {
         for (source_block_index, source_block) in self.blocks.iter().enumerate() {
             match &source_block.seal {
                 Seal::None => panic!("block is not sealed"),
-                Seal::Jump(call) => rev_jump_list[call.target.0].push(MirBlockRef(source_block_index)),
-                Seal::Cond { cond: _, then_target, else_target } => {
+                Seal::Jump(call, _) => rev_jump_list[call.target.0].push(MirBlockRef(source_block_index)),
+                Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                     rev_jump_list[then_target.target.0].push(MirBlockRef(source_block_index));
                     rev_jump_list[else_target.target.0].push(MirBlockRef(source_block_index));
                 },
-                Seal::Switch { cond: _, targets, default } => {
+                Seal::Switch { cond: _, targets, default, debug: _ } => {
                     rev_jump_list[default.target.0].push(MirBlockRef(source_block_index));
                     targets
                         .iter()
                         .for_each(|target| rev_jump_list[target.block_call.target.0]
                             .push(MirBlockRef(source_block_index)));
                 },
-                Seal::Return(_) => (),
-                Seal::Panic(_) => (),
+                Seal::Return(_, _) => (),
+                Seal::Panic(_, _) => (),
             }
         }
         self.backlinks = rev_jump_list;
@@ -1657,12 +1665,12 @@ impl MirFlowGraph {
             let mut required_parameters = HashSet::new();
             match &self.blocks[block_index].seal {
                 Seal::None => unreachable!(),
-                Seal::Jump(target) => {
+                Seal::Jump(target, _) => {
                     self.blocks[target.target.0].parameters
                         .iter()
                         .for_each(|param| { required_parameters.insert(*param); });
                 },
-                Seal::Cond { cond: _, then_target, else_target } => {
+                Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                     self.blocks[then_target.target.0].parameters
                         .iter()
                         .for_each(|param| { required_parameters.insert(*param); });
@@ -1670,7 +1678,7 @@ impl MirFlowGraph {
                         .iter()
                         .for_each(|param| { required_parameters.insert(*param); });
                 },
-                Seal::Switch { cond: _, targets, default } => {
+                Seal::Switch { cond: _, targets, default, debug: _ } => {
                     targets
                         .iter()
                         .for_each(|param| {
@@ -1682,10 +1690,10 @@ impl MirFlowGraph {
                         .iter()
                         .for_each(|param| { required_parameters.insert(*param); });
                 },
-                Seal::Return(value) => {
+                Seal::Return(value, _) => {
                     required_parameters.insert(*value);
                 },
-                Seal::Panic(value) => {
+                Seal::Panic(value, _) => {
                     required_parameters.insert(*value);
                 },
             }
@@ -1730,21 +1738,21 @@ impl MirFlowGraph {
             // check for unconditional jumps in block seal
             match &self.blocks[block_index].seal {
                 Seal::None => panic!("block is not sealed!"),
-                Seal::Jump(target) => {
+                Seal::Jump(target, _) => {
                     let target_parameters = self.blocks[target.target.0].parameters.clone();
                     let target_check = target.target;
                     // borrow mut
                     let Seal::Jump(BlockCall {
                                        target,
                                        params
-                                   }) = &mut self.blocks[block_index].seal else {
+                                   }, _) = &mut self.blocks[block_index].seal else {
                         unreachable!()
                     };
                     assert_eq!(*target, target_check);
                     assert!(params.is_empty());
                     *params = target_parameters;
                 },
-                Seal::Cond { cond: _, then_target, else_target } => {
+                Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                     let then_parameters = self.blocks[then_target.target.0].parameters.clone();
                     let then_check = then_target.target;
                     let else_parameters = self.blocks[else_target.target.0].parameters.clone();
@@ -1754,6 +1762,7 @@ impl MirFlowGraph {
                         cond: _,
                         then_target,
                         else_target,
+                        debug: _,
                     } = &mut self.blocks[block_index].seal else {
                         unreachable!()
                     };
@@ -1764,7 +1773,7 @@ impl MirFlowGraph {
                     then_target.params = then_parameters;
                     else_target.params = else_parameters;
                 },
-                Seal::Switch { cond: _, targets, default } => {
+                Seal::Switch { cond: _, targets, default, debug: _ } => {
                     let target_parameters = targets
                         .iter()
                         .map(|target| self.blocks[target.block_call.target.0]
@@ -1782,6 +1791,7 @@ impl MirFlowGraph {
                         cond: _,
                         targets,
                         default,
+                        debug: _,
                     } = &mut self.blocks[block_index].seal else {
                         unreachable!()
                     };
@@ -1797,8 +1807,8 @@ impl MirFlowGraph {
                             target.block_call.params = params;
                         });
                 },
-                Seal::Return(_) => (),
-                Seal::Panic(_) => (),
+                Seal::Return(_, _) => (),
+                Seal::Panic(_, _) => (),
             }
         }
     }
@@ -1813,12 +1823,12 @@ impl MirFlowGraph {
         for (block_index, block) in self.blocks.iter_mut().enumerate() {
             let block_ref = MirBlockRef(block_index);
             for idx in 0..block.statements.len() {
-                let Statement::VarMove { var, uid, value } = &block.statements[idx] else {
+                let Statement::VarMove { var, uid, value, debug } = &block.statements[idx] else {
                     continue;
                 };
                 // look ahead to find latest use point
                 if block.find_closest_use(block_ref, &self.expressions, idx + 1, value).is_some() {
-                    let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value };
+                    let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value, debug: debug.clone() };
                     block.statements[idx] = new_statement;
                 }
             }
@@ -2013,7 +2023,7 @@ impl<'cfg> Iterator for ExitBlockIter<'cfg> {
         loop {
             if let Some(e) = self.cfg.blocks.get(self.index) {
                 self.index += 1;
-                if matches!(&e.seal, Seal::Return(_) | Seal::Panic(_)) {
+                if matches!(&e.seal, Seal::Return(_, _) | Seal::Panic(_, _)) {
                     break Some(MirBlockRef(self.index - 1))
                 }
             } else {
@@ -2231,7 +2241,7 @@ impl MirFlowGraph {
     ) {
         match &predecessor.seal {
             Seal::None => panic!(),
-            Seal::Jump(call) => {
+            Seal::Jump(call, _) => {
                 assert_eq!(&call.target, id);
                 assert_eq!(params.len(), call.params.len());
                 for (dst, src) in params
@@ -2241,9 +2251,9 @@ impl MirFlowGraph {
                     dst.push(*src);
                 }
             }
-            Seal::Return(_) => panic!(),
-            Seal::Panic(_) => panic!(),
-            Seal::Cond { cond: _, then_target, else_target } => {
+            Seal::Return(_, _) => panic!(),
+            Seal::Panic(_, _) => panic!(),
+            Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                 let mut i = 0usize;
                 if &then_target.target == id {
                     assert_eq!(params.len(), then_target.params.len());
@@ -2259,7 +2269,7 @@ impl MirFlowGraph {
                 }
                 assert!(i > 0);
             }
-            Seal::Switch { cond: _, targets, default } => {
+            Seal::Switch { cond: _, targets, default, debug: _ } => {
                 let mut i = 0usize;
                 for target in targets.iter() {
                     if &target.block_call.target != id {
@@ -2291,17 +2301,17 @@ impl MirFlowGraph {
     ) -> bool {
         match &predecessor.seal {
             Seal::None => panic!("illegal state"),
-            Seal::Jump(call) => {
+            Seal::Jump(call, _) => {
                 assert_eq!(&call.target, id);
                 join_prec_block_parameters(call, block, state)
             },
-            Seal::Return(_) => {
+            Seal::Return(_, _) => {
                 panic!("invalid route found!");
             },
-            Seal::Panic(_) => {
+            Seal::Panic(_, _) => {
                 panic!("invalid route found!");
             },
-            Seal::Cond { cond: _, then_target, else_target } => {
+            Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                 let mut changed = false;
                 let mut i = 0usize;
                 if &then_target.target == id {
@@ -2315,7 +2325,7 @@ impl MirFlowGraph {
                 assert!(i > 0);
                 changed
             },
-            Seal::Switch { cond: _, targets, default } => {
+            Seal::Switch { cond: _, targets, default, debug: _ } => {
                 let mut changed = false;
                 let mut i = 0usize;
                 for target in targets.iter() {
@@ -2405,9 +2415,9 @@ where
 
         match &block.seal {
             Seal::None => panic!(),
-            Seal::Return(_) => (),
-            Seal::Panic(_) => (),
-            Seal::Jump(call) => {
+            Seal::Return(_, _) => (),
+            Seal::Panic(_, _) => (),
+            Seal::Jump(call, _) => {
                 let successor = &self.blocks[call.target.0];
                 call.params.iter().zip(successor.parameters.iter())
                     .for_each(|(call_param, target_param)| {
@@ -2415,7 +2425,7 @@ where
                             .push(*target_param);
                     });
             },
-            Seal::Cond { cond: _, then_target, else_target } => {
+            Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                 let successor = &self.blocks[then_target.target.0];
                 then_target.params.iter().zip(successor.parameters.iter())
                     .for_each(|(call_param, target_param)| {
@@ -2429,7 +2439,7 @@ where
                             .push(*target_param);
                     });
             },
-            Seal::Switch { cond: _, targets, default } => {
+            Seal::Switch { cond: _, targets, default, debug: _ } => {
                 for target in targets.iter() {
                     let successor = &self.blocks[target.block_call.target.0];
                     target.block_call.params.iter().zip(successor.parameters.iter())
@@ -2464,9 +2474,9 @@ where
         let block = &self.blocks[id.0.0];
         match &block.seal {
             Seal::None => panic!(),
-            Seal::Return(_) => false,
-            Seal::Panic(_) => false,
-            Seal::Jump(call) => {
+            Seal::Return(_, _) => false,
+            Seal::Panic(_, _) => false,
+            Seal::Jump(call, _) => {
                 let successor = &self.blocks[call.target.0];
                 assert_eq!(&successor_id.0, &call.target);
                 let mut changed = false;
@@ -2476,7 +2486,7 @@ where
                     });
                 changed
             }
-            Seal::Cond { cond: _, then_target, else_target } => {
+            Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                 let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
                 if &successor_id.0 == &then_target.target {
                     let successor = &self.blocks[then_target.target.0];
@@ -2501,7 +2511,7 @@ where
                 }
                 changed
             }
-            Seal::Switch { cond: _, targets, default } => {
+            Seal::Switch { cond: _, targets, default, debug: _ } => {
                 let mut params = HashMap::<MirValue, Vec<MirValue>>::new();
 
                 for target in targets.iter() {
@@ -2552,11 +2562,12 @@ where
         let block = &self.blocks[id.0.0];
         match &block.seal {
             Seal::None => None,
-            Seal::Jump(target) => Some(vec![target.target.into()]),
+            Seal::Jump(target, _) => Some(vec![target.target.into()]),
             Seal::Cond {
                 cond: _,
                 then_target,
                 else_target,
+                debug: _,
             } => {
                 Some(vec![
                     then_target.target.into(),
@@ -2567,6 +2578,7 @@ where
                 cond: _,
                 targets,
                 default,
+                debug: _,
             } => {
                 let mut targets = targets
                     .iter()
@@ -2575,8 +2587,8 @@ where
                 targets.push(default.target.into());
                 Some(targets)
             },
-            Seal::Return(_) => Some(vec![]),
-            Seal::Panic(_) => Some(vec![]),
+            Seal::Return(_, _) => Some(vec![]),
+            Seal::Panic(_, _) => Some(vec![]),
         }
     }
 
@@ -2648,8 +2660,8 @@ trait TransferCopy<Context>: LatticeElement + IsDefault + Clone {
     fn transfer_copy(
         value: &MirValue,
         input: &mut HashNodeState<MirValue, Self>,
-        ctx: &mut Context,
-        loc: &MirGraphLoc,
+        _ctx: &mut Context,
+        _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, Self::Conflict> {
         Ok(input.replace(target, input.element_value(value)))
@@ -2660,8 +2672,8 @@ trait TransferMove<Context>: LatticeElement + IsDefault + Clone {
     fn transfer_move(
         value: &MirValue,
         input: &mut HashNodeState<MirValue, Self>,
-        ctx: &mut Context,
-        loc: &MirGraphLoc,
+        _ctx: &mut Context,
+        _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, Self::Conflict> {
         Ok(input.replace(target, input.element_value(value)))
@@ -2685,13 +2697,13 @@ impl Statement {
         S: TransferCopy<Context> + TransferMove<Context> {
 
         match self {
-            Statement::VarDef { value, var, uid } => {
+            Statement::VarDef { value, var, uid, debug: _ } => {
                 value.expr_transfer(input, ctx, &MirGraphLoc(block, *uid), var, &cfg.expressions)
             }
-            Statement::VarMove { value, var, uid } => {
+            Statement::VarMove { value, var, uid, debug: _ } => {
                 S::transfer_move(value, input, ctx, &MirGraphLoc(block, *uid), var)
             }
-            Statement::VarCopy { value, var, uid } => {
+            Statement::VarCopy { value, var, uid, debug: _ } => {
                 S::transfer_copy(value, input, ctx, &MirGraphLoc(block, *uid), var)
             }
         }

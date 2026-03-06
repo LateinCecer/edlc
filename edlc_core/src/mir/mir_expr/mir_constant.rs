@@ -15,22 +15,13 @@
  */
 
 use crate::core::edl_value::EdlLiteralValue;
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::mir_graph::ConstFrame;
-use crate::mir::mir_str::{FatPtr, MemPtr};
+use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
-use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirConstant {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub value: EdlLiteralValue,
     pub ty: MirTypeId,

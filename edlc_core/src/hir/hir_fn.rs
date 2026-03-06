@@ -33,7 +33,7 @@ use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{Context, MirFlowGraph, MirValue};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
 use crate::mir::mir_type::TMirFnCallInfo;
 use crate::mir::mir_vars::VariableMapper;
@@ -459,7 +459,7 @@ impl HirFnSignature {
         &self,
         phase: &mut HirPhase,
         mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>,
+        _mir_funcs: &mut MirFuncRegistry<B>,
         param_def: EdlParameterDef,
     ) -> Result<MirFnSignature, HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
@@ -706,7 +706,11 @@ impl HirFn {
             graph_writer.current_block
         };
         if !body.is_block_sealed(&current_block) {
-            body.insert_return(current_block, ret_value);
+            body.insert_return(
+                current_block,
+                ret_value,
+                DebugSymbols { pos: self.body.find_last_item_position() },
+            );
         }
         body.seal();
 

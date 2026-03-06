@@ -26,7 +26,7 @@ use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, ResolveTypes};
@@ -304,8 +304,14 @@ impl MakeGraph for HirReturn {
             let value_ty = graph.mir_phase.types.empty();
             let value = graph.graph.create_temp_variable(value_ty);
             let empty_id = graph.graph.expressions
-                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-            graph.graph.insert_def(graph.current_block, value, empty_id, &graph.mir_phase.types);
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(
+                graph.current_block,
+                value,
+                empty_id,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
             value
         };
 
@@ -313,7 +319,11 @@ impl MakeGraph for HirReturn {
         assert_eq!(target_ty, &graph.mir_phase.types.empty());
 
         // NOTE: we do not need to write to target, as the return seals the block
-        graph.graph.insert_return(graph.current_block, value);
+        graph.graph.insert_return(
+            graph.current_block,
+            value,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

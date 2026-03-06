@@ -27,7 +27,7 @@ use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::translation::HirTranslationError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::resolver::ScopeId;
@@ -367,8 +367,7 @@ impl MakeGraph for HirDeref {
                 ref_value,
                 target,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
+                DebugSymbols { pos: self.pos },
             );
             Ok(())
         }

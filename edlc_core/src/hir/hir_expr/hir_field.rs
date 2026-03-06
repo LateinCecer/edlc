@@ -16,28 +16,25 @@
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_param_env::{Adaptable, AdaptableWithStack, EdlParamStack};
+use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInstance, EdlTypeRegistry, EdlTypeState, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_variable::MirOffset;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::{MirAggregateTypeLayout, MirTypeId};
-use crate::mir::{MirError, MirPhase};
+use crate::mir::mir_expr::{DebugSymbols, MirRef, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
-use crate::core::edl_type;
-use crate::hir::hir_expr::hir_deref::HirDeref;
-use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
-use crate::mir::mir_expr::{MirRef, MirValue};
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -927,8 +924,6 @@ impl MakeGraph for HirField {
                     target_ty,
                     &graph.graph,
                     &graph.mir_phase.types,
-                    self.pos,
-                    self.src.clone(),
                 ))
         } else {
             assert!(graph.mir_phase.types.is_ref_mutable(&target_ty));
@@ -939,8 +934,6 @@ impl MakeGraph for HirField {
                     target_ty,
                     &graph.graph,
                     &graph.mir_phase.types,
-                    self.pos,
-                    self.src.clone(),
                 ))
         };
 
@@ -952,6 +945,7 @@ impl MakeGraph for HirField {
                 target,
                 expr_id,
                 &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
             );
         } else {
             let self_ty = self.mir_deref_type(graph)?;
@@ -963,14 +957,14 @@ impl MakeGraph for HirField {
                 tmp,
                 expr_id,
                 &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
             );
             graph.graph.def_deref(
                 graph.current_block,
                 tmp,
                 target,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
+                DebugSymbols { pos: self.pos },
             );
         }
         Ok(())

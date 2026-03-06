@@ -13,14 +13,12 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
-use crate::resolver::ScopeId;
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirInitAssign {
@@ -30,9 +28,6 @@ pub struct MirInitAssign {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirTypeInit {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub ty: MirTypeId,
     pub inits: Vec<MirInitAssign>,

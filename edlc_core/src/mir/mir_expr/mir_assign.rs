@@ -14,14 +14,11 @@
  *    limitations under the License.
  */
 
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
-use crate::resolver::ScopeId;
 
 
 /// Assign operation.
@@ -32,9 +29,6 @@ use crate::resolver::ScopeId;
 /// plane value type behind the reference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirAssign {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub lhs: MirValue,
     pub rhs: MirValue,

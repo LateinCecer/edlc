@@ -1,7 +1,5 @@
 //! this module implements referencing and dereferencing logic for MirValues
 
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
@@ -26,8 +24,6 @@ use crate::prelude::ExecutorVM;
 pub struct MirRef {
     pub mutable: bool,
     pub value: MirValue,
-    pub src: ModuleSrc,
-    pub pos: SrcPos,
     pub(super) offset: RefOffset,
     pub ty: MirTypeId,
     src_ty: MirTypeId,
@@ -127,8 +123,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&ty).unwrap();
@@ -137,8 +131,6 @@ impl MirRef {
         Self {
             value,
             ty,
-            src,
-            pos,
             offset: RefOffset::Entire,
             src_ty,
             mutable: false,
@@ -150,8 +142,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&ty));
@@ -161,8 +151,6 @@ impl MirRef {
         Self {
             value,
             ty,
-            src,
-            pos,
             offset: RefOffset::Entire,
             src_ty,
             mutable: true,
@@ -175,8 +163,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
@@ -186,8 +172,6 @@ impl MirRef {
         MirRef {
             mutable: false,
             value,
-            src,
-            pos,
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
@@ -201,8 +185,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
@@ -212,8 +194,6 @@ impl MirRef {
         MirRef {
             mutable: false,
             value,
-            src,
-            pos,
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
@@ -226,8 +206,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
@@ -237,8 +215,6 @@ impl MirRef {
         MirRef {
             mutable: false,
             value,
-            src,
-            pos,
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
@@ -252,8 +228,6 @@ impl MirRef {
         slice_length: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty)
@@ -264,8 +238,6 @@ impl MirRef {
         MirRef {
             mutable: false,
             value,
-            src,
-            pos,
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
@@ -278,8 +250,6 @@ impl MirRef {
         end: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
         ty: MirTypeId,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
@@ -291,8 +261,6 @@ impl MirRef {
         MirRef {
             mutable: false,
             value,
-            src,
-            pos,
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty
@@ -305,8 +273,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&src_ty));
@@ -317,8 +283,6 @@ impl MirRef {
         MirRef {
             mutable: true,
             value,
-            src,
-            pos,
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
@@ -332,8 +296,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&src_ty));
@@ -344,8 +306,6 @@ impl MirRef {
         MirRef {
             mutable: true,
             value,
-            src,
-            pos,
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
@@ -358,8 +318,6 @@ impl MirRef {
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&src_ty));
@@ -371,8 +329,6 @@ impl MirRef {
         MirRef {
             mutable: true,
             value,
-            src,
-            pos,
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
@@ -386,8 +342,6 @@ impl MirRef {
         slice_length: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&src_ty));
@@ -399,8 +353,6 @@ impl MirRef {
         MirRef {
             mutable: true,
             value,
-            src,
-            pos,
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
@@ -413,8 +365,6 @@ impl MirRef {
         end: MirValue,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
-        pos: SrcPos,
-        src: ModuleSrc,
         ty: MirTypeId,
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
@@ -428,8 +378,6 @@ impl MirRef {
         MirRef {
             mutable: true,
             value,
-            src,
-            pos,
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty
@@ -584,8 +532,6 @@ pub struct BoundsCheck {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirDeref {
-    pub pos: SrcPos,
-    pub src: ModuleSrc,
     pub ty: MirTypeId,
     pub value: MirValue,
 }
@@ -607,13 +553,11 @@ impl MirGraphElement for MirDeref {
 }
 
 impl MirDeref {
-    pub fn new(value: MirValue, graph: &MirFlowGraph, reg: &MirTypeRegistry, pos: SrcPos, src: ModuleSrc) -> Self {
+    pub fn new(value: MirValue, graph: &MirFlowGraph, reg: &MirTypeRegistry) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let ty = reg.get_ref_type(&src_ty)
             .expect("only reference types can be dereferenced");
         MirDeref {
-            pos,
-            src,
             ty,
             value,
         }
@@ -649,8 +593,6 @@ impl MirDeref {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirDowncastRef {
-    pub pos: SrcPos,
-    pub src: ModuleSrc,
     pub ty: MirTypeId,
     pub value: MirValue,
 }
@@ -672,7 +614,7 @@ impl MirGraphElement for MirDowncastRef {
 }
 
 impl MirDowncastRef {
-    pub fn new(value: MirValue, target_ty: MirTypeId, graph: &MirFlowGraph, reg: &MirTypeRegistry, pos: SrcPos, src: ModuleSrc) -> Self {
+    pub fn new(value: MirValue, target_ty: MirTypeId, graph: &MirFlowGraph, reg: &MirTypeRegistry) -> Self {
         let src_ty = *graph.get_var_type(&value);
         assert!(reg.is_ref_mutable(&src_ty));
         let src_base_ty = reg.get_ref_type(&src_ty)
@@ -681,8 +623,6 @@ impl MirDowncastRef {
             .expect("target of a downcast operator has to be a shared reference");
         assert_eq!(src_base_ty, target_base_ty);
         MirDowncastRef {
-            pos,
-            src,
             ty: target_ty,
             value,
         }

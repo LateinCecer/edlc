@@ -13,8 +13,6 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -28,7 +26,6 @@ use crate::mir::mir_expr::mir_variable::{MirGlobalVar, MirOffset};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
-use crate::resolver::ScopeId;
 use std::ops::{Deref, Index};
 
 pub mod mir_array_init;
@@ -43,8 +40,8 @@ pub mod mir_type_init;
 mod mir_graph;
 mod mir_ref;
 
-pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
 pub use crate::mir::mir_expr::mir_graph::*;
+pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
 use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
@@ -344,16 +341,10 @@ impl MirExprContainer {
     pub fn insert_empty(
         &mut self,
         reg: &MirTypeRegistry,
-        src: ModuleSrc,
-        pos: SrcPos,
-        scope: ScopeId
     ) -> MirExprId {
         self.insert_type_init(MirTypeInit {
             ty: reg.empty(),
             id: MirUid::default(),
-            src,
-            pos,
-            scope,
             inits: vec![],
         })
     }

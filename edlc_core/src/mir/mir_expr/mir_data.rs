@@ -14,22 +14,15 @@
  *    limitations under the License.
  */
 
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{MirError, MirPhase, MirUid};
-use crate::resolver::ScopeId;
-use std::mem;
-use crate::mir::mir_expr::mir_graph::ConstFrame;
+use crate::mir::{MirError, MirPhase};
 use crate::prelude::ExecutorVM;
+use std::mem;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirData {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub ty: MirTypeId,
     pub value: Vec<u8>,
 }

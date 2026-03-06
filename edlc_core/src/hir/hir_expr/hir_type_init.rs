@@ -19,21 +19,20 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ReportResult, ResolveFn, ResolveNames, ResolveTypes, TypeSource, WithInferer};
 use crate::issue;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_type_init::{MirInitAssign, MirTypeInit};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::{MirAggregateTypeLayout, MirTypeId};
-use crate::mir::MirPhase;
+use crate::prelude::edl_type;
 use crate::prelude::type_analysis::*;
 use crate::resolver::ScopeId;
 use std::error::Error;
 use std::ops::BitAnd;
-use crate::mir::mir_expr::MirValue;
-use crate::prelude::edl_type;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -919,10 +918,89 @@ impl MakeGraph for HirTypeInit {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        todo!()
+        let ty = &self.info.as_ref().unwrap().finalized_type;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: ty.clone(),
+                pos: self.pos,
+            });
+        }
+        let EdlMaybeType::Fixed(ty) = ty else { unreachable!() };
+
+        let mir_ty = graph.mir_phase.types.mir_id(ty, &graph.hir_phase.types)?;
+        assert_eq!(&mir_ty, graph.graph.get_var_type(&target));
+        let layout = graph.mir_phase.types.get_layout(mir_ty).unwrap().clone();
+
+        // collect init elements
+        let mut inits = vec![];
+        match &self.variant {
+            Variant::StructList { params, .. }
+            | Variant::Tuple { params, .. } => {
+                for (index, element) in params.iter().enumerate() {
+                    let element_ty = element.mir_deref_type(graph)?;
+                    let element_value = graph.graph
+                        .create_temp_variable(element_ty);
+                    element.write_to_graph(graph, element_value)?;
+                    let offset = layout
+                        .member_offset(&index.to_string(), &graph.mir_phase.types)?;
+                    inits.push(MirInitAssign {
+                        off: offset.offset,
+                        val: element_value,
+                    });
+                }
+            }
+            Variant::StructNamed { params, .. }
+            | Variant::Dict { params, .. } => {
+                for NamedParameter { name, value, .. } in params.iter() {
+                    let element_ty = value.mir_deref_type(graph)?;
+                    let element_value = graph.graph
+                        .create_temp_variable(element_ty);
+                    value.write_to_graph(graph, element_value)?;
+                    let offset = layout
+                        .member_offset(name, &graph.mir_phase.types)?;
+                    inits.push(MirInitAssign {
+                        off: offset.offset,
+                        val: element_value,
+                    })
+                }
+            }
+            Variant::EnumList { .. } => {
+                unimplemented!("")
+            }
+            Variant::EnumNamed { .. } => {
+                unimplemented!()
+            }
+            Variant::Union { .. } => {
+                unimplemented!()
+            }
+            Variant::Unit { ty: _ } => (), // no inits
+        }
+
+        // write to graph
+        let expr_id = graph.graph.expressions.insert_type_init(MirTypeInit {
+            id: graph.mir_phase.new_id(),
+            ty: mir_ty,
+            inits,
+        });
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            expr_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos }
+        );
+        Ok(())
     }
 
     fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
-        todo!()
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: ty.clone(),
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

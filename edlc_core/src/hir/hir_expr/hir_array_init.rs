@@ -38,6 +38,7 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
 use crate::prelude::{edl_type, report_infer_error};
+use crate::prelude::mir_expr::DebugSymbols;
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -548,14 +549,17 @@ impl MakeGraph for HirArrayInit {
         };
         let expr = graph.graph.expressions.insert_array_init(MirArrayInit {
             element_ty: element_ty_mir,
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
             ty: ty_mir,
             id: graph.mir_phase.new_id(),
             elements,
         });
-        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            expr,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

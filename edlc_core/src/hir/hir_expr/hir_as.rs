@@ -34,6 +34,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_type::MirTypeId;
+use crate::prelude::mir_expr::DebugSymbols;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -341,16 +342,19 @@ impl MakeGraph for HirAs {
         }
 
         let expr = MirAs {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
             id: graph.mir_phase.new_id(),
             ty,
             val,
         };
 
         let expr_id = graph.graph.expressions.insert_as(expr);
-        graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            expr_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

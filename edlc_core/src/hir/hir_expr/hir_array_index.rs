@@ -27,7 +27,7 @@ use crate::issue;
 use crate::issue::{format_type_args, SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{MirRef, MirValue};
+use crate::mir::mir_expr::{DebugSymbols, MirRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::hir_expr::HirTreeWalker;
@@ -492,14 +492,13 @@ impl MakeGraph for HirArrayIndex {
                     target_type,
                     &graph.graph,
                     &graph.mir_phase.types,
-                    self.pos,
-                    self.src.clone(),
                 ));
                 graph.graph.insert_def(
                     graph.current_block,
                     target,
                     index_expr,
                     &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
                 );
                 Ok(())
             } else {
@@ -510,14 +509,13 @@ impl MakeGraph for HirArrayIndex {
                     target_type,
                     &graph.graph,
                     &graph.mir_phase.types,
-                    self.pos,
-                    self.src.clone(),
                 ));
                 graph.graph.insert_def(
                     graph.current_block,
                     target,
                     index_expr,
                     &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
                 );
                 Ok(())
             }
@@ -530,8 +528,6 @@ impl MakeGraph for HirArrayIndex {
                 ref_type,
                 &graph.graph,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
             ));
             let temp_value = graph.graph.create_temp_variable(ref_type);
             graph.graph.insert_def(
@@ -539,6 +535,7 @@ impl MakeGraph for HirArrayIndex {
                 temp_value,
                 index_expr,
                 &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
             );
 
             // explicitly dereference temporary value and write result into the target value
@@ -547,8 +544,7 @@ impl MakeGraph for HirArrayIndex {
                 temp_value,
                 target,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
+                DebugSymbols { pos: self.pos },
             );
             Ok(())
         }

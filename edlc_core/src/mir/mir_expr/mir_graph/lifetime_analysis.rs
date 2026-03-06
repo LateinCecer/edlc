@@ -354,20 +354,20 @@ impl SealEval<LifetimeSpan, LifetimeAnalysis> for Seal {
 
         match self {
             Self::None => panic!(),
-            Seal::Return(value) => {
+            Seal::Return(value, _) => {
                 Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc), *value))
             },
-            Seal::Panic(value) => {
+            Seal::Panic(value, _) => {
                 Ok(input.element_value_mut(value).add_use(MirLoc::Seal(*loc), *value))
             },
-            Seal::Jump(target) => {
+            Seal::Jump(target, _) => {
                 add_block_call(target, input, loc)
             },
-            Seal::Cond { cond, then_target, else_target } => {
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 Ok(input.element_value_mut(cond).add_use(MirLoc::Seal(*loc), *cond)
                     | add_block_call(then_target, input, loc)? | add_block_call(else_target, input, loc)?)
             },
-            Seal::Switch { cond, targets, default } => {
+            Seal::Switch { cond, targets, default, debug: _ } => {
                 let mut changed = input.element_value_mut(cond).add_use(MirLoc::Seal(*loc), *cond);
                 changed |= add_block_call(default, input, loc)?;
                 for target in targets.iter() {

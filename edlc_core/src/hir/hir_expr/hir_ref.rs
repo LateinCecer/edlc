@@ -13,9 +13,6 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::mem;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type;
@@ -24,16 +21,18 @@ use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::translation::HirTranslationError;
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{MirDowncastRef, MirValue};
+use crate::mir::mir_expr::{DebugSymbols, MirDowncastRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -464,14 +463,13 @@ impl MakeGraph for HirRef {
                     target_ty,
                     &graph.graph,
                     &graph.mir_phase.types,
-                    self.pos,
-                    self.src.clone(),
                 ));
                 graph.graph.insert_def(
                     graph.current_block,
                     target,
                     downcast,
                     &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
                 );
                 return Ok(());
             }
@@ -491,8 +489,7 @@ impl MakeGraph for HirRef {
                 value,
                 target,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
+                DebugSymbols { pos: self.pos },
             );
         } else {
             graph.graph.def_ref(
@@ -500,8 +497,7 @@ impl MakeGraph for HirRef {
                 value,
                 target,
                 &graph.mir_phase.types,
-                self.pos,
-                self.src.clone(),
+                DebugSymbols { pos: self.pos },
             );
         }
         Ok(())

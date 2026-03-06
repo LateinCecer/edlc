@@ -29,7 +29,7 @@ use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
@@ -490,8 +490,14 @@ impl MakeGraph for HirBlock {
             ret.write_to_graph(graph, target)?;
         } else {
             let empty = graph.graph.expressions
-                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-            graph.graph.insert_def(graph.current_block, target, empty, &graph.mir_phase.types);
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                empty,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
         }
         Ok(())
     }

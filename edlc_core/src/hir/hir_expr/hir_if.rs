@@ -26,7 +26,7 @@ use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{edl_type, report_infer_error, HirErrorType};
@@ -764,13 +764,13 @@ impl MakeGraph for HirIf {
             }
 
             graph.graph.insert_conditional_jump(
-                graph.current_block, then_block, else_block, cond_value);
+                graph.current_block, then_block, else_block, cond_value, DebugSymbols { pos: self.pos });
             // write then block
             graph.current_block = then_block;
             block.write_to_graph(graph, target)?;
             if !graph.is_current_sealed() {
                 // only insert jump if the block does not exit early
-                graph.graph.insert_jump(graph.current_block, merge_block);
+                graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
             }
             // continue on else block
             graph.current_block = else_block;
@@ -782,15 +782,26 @@ impl MakeGraph for HirIf {
                 fin.write_to_graph(graph, target)?;
             } else {
                 let empty_id = graph.graph.expressions
-                    .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-                let empty_value = graph.graph.create_temp_variable(graph.mir_phase.types.empty());
-                graph.graph.insert_def(graph.current_block, empty_value, empty_id, &graph.mir_phase.types);
+                    .insert_empty(&graph.mir_phase.types);
+                let empty_value = graph.graph
+                    .create_temp_variable(graph.mir_phase.types.empty());
+                graph.graph.insert_def(
+                    graph.current_block,
+                    empty_value,
+                    empty_id,
+                    &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
+                );
             }
         }
 
         if !graph.is_current_sealed() {
             // only insert jump if the block does not exit early
-            graph.graph.insert_jump(graph.current_block, merge_block);
+            graph.graph.insert_jump(
+                graph.current_block,
+                merge_block,
+                DebugSymbols { pos: self.pos },
+            );
         }
         graph.current_block = merge_block;
         Ok(())

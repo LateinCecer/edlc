@@ -25,7 +25,7 @@ use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::error::Error;
@@ -265,7 +265,11 @@ impl MakeGraph for HirLoop {
             .build();
         graph.loop_mapper.insert(self.element_id, merge_block, header_block, target);
 
-        graph.graph.insert_jump(graph.current_block, header_block);
+        graph.graph.insert_jump(
+            graph.current_block,
+            header_block,
+            DebugSymbols { pos: self.pos },
+        );
         graph.current_block = header_block;
 
         // compile block and write value to temp variable (never read)
@@ -275,7 +279,11 @@ impl MakeGraph for HirLoop {
 
         // seal loop body by inserting a jump instruction back to the head of the loop and continue
         // writing in the merge block after the loop.
-        graph.graph.insert_jump(graph.current_block, header_block);
+        graph.graph.insert_jump(
+            graph.current_block,
+            header_block,
+            DebugSymbols { pos: self.pos },
+        );
         graph.current_block = merge_block;
         Ok(())
     }

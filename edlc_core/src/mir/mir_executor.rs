@@ -148,13 +148,10 @@ impl AmorphusDataCopy {
         AmorphusDataMut { data: &mut self.data[..], ty: self.ty }
     }
 
-    pub fn into_mir(self, pos: SrcPos, src: ModuleSrc, scope: ScopeId) -> MirData {
+    pub fn into_mir(self) -> MirData {
         MirData {
             value: self.data,
             ty: self.ty,
-            pos,
-            src,
-            scope,
         }
     }
 }

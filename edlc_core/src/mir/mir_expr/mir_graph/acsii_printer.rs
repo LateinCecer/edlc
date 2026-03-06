@@ -265,17 +265,17 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
         write!(self.writer, ")")
     }
 
-    fn write_seal(&mut self, seal: &Seal, graph: &MirFlowGraph) -> Result<(), std::io::Error> {
+    fn write_seal(&mut self, seal: &Seal, _graph: &MirFlowGraph) -> Result<(), std::io::Error> {
         match seal {
-            Seal::Jump(target) => {
+            Seal::Jump(target, _debug) => {
                 write!(self.writer, "jump ")?;
                 self.write_block_call(target)
             }
-            Seal::Return(value) => {
+            Seal::Return(value, _debug) => {
                 write!(self.writer, "return ")?;
                 self.write_value(value)
             }
-            Seal::Cond { cond, then_target, else_target } => {
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 write!(self.writer, "bif ")?;
                 self.write_value(cond)?;
                 write!(self.writer, " then ")?;
@@ -283,10 +283,10 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
                 write!(self.writer, " else ")?;
                 self.write_block_call(else_target)
             }
-            Seal::Switch { cond, targets, default } => {
+            Seal::Switch { cond: _, targets: _, default: _, debug: _ } => {
                 todo!()
             }
-            Seal::Panic(value) => {
+            Seal::Panic(value, _debug) => {
                 write!(self.writer, "panic ")?;
                 self.write_value(value)
             }

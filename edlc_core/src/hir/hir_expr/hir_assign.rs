@@ -15,14 +15,14 @@
  */
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
-use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
+use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
-use crate::issue::SrcError;
+use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_assign::MirAssign;
@@ -34,8 +34,10 @@ use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
 use crate::hir::hir_expr::hir_ref::InternalMutability;
+use crate::hir::hir_report::report_expect_mutable;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_type::MirTypeId;
+use crate::prelude::mir_expr::DebugSymbols;
 use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,32 +204,105 @@ impl ResolveTypes for HirAssign {
         let lhs_is_ref = matches!(infer.find_type(lhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
         let rhs_is_ref = matches!(infer.find_type(rhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
 
-        if lhs_is_ref == rhs_is_ref {
-            // lhs must be mutable
-            let lhs_mut = self.lhs.mutability(&mut infer);
-            if let Err(err) = infer.at(node).eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
-                return Err(report_infer_error(err, infer_state, phase));
+        if lhs_is_ref && rhs_is_ref {
+            // lhs must be a mutable reference
+            let ref_mut = infer.type_reg
+                .new_ref(EdlMaybeType::Unknown, Some(EdlConstValue::from_bool(true)))
+                .unwrap();
+            if let Err(err) = infer.at(node).eq(&lhs, &ref_mut) {
+                let ref_ty = infer.find_type(lhs);
+                return Err(report_expect_mutable(self.pos, err, phase, &[
+                    SrcError::Double {
+                        first: self.pos.clone().into(),
+                        second: self.lhs.pos().into(),
+                        src: self.src.clone(),
+                        error_first: format_type_args!(
+                            format_args!("when assigning to a reference, the reference must be mutable")
+                        ),
+                        error_second: format_type_args!(
+                            format_args!("LHS has reference type `"),
+                            &ref_ty as &dyn FmtType,
+                            format_args!("` which is not mutable")
+                        ),
+                    }
+                ]));
             }
-            if let Err(err) = infer.at(node).eq(&lhs, &rhs) {
+            // base types of references must match
+            let lhs_base: TypeUid = infer.get_generic_type(lhs, 0).unwrap().into();
+            let rhs_base: TypeUid = infer.get_generic_type(rhs, 0).unwrap().into();
+            if let Err(err) = infer.at(node).eq(&lhs_base, &rhs_base) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
         } else if lhs_is_ref {
             // reference must be mutable
-            let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
-            if let Err(err) = infer.at(node).eq(&lhs_mut.into(), &EdlConstValue::from_bool(true)) {
-                return Err(report_infer_error(err, infer_state, phase));
+            let ref_mut = infer.type_reg
+                .new_ref(EdlMaybeType::Unknown, Some(EdlConstValue::from_bool(true)))
+                .unwrap();
+            if let Err(err) = infer.at(node).eq(&lhs, &ref_mut) {
+                let ref_ty = infer.find_type(lhs);
+                return Err(report_expect_mutable(self.pos, err, phase, &[
+                    SrcError::Double {
+                        first: self.pos.clone().into(),
+                        second: self.lhs.pos().into(),
+                        src: self.src.clone(),
+                        error_first: format_type_args!(
+                            format_args!("when assigning to a reference, the reference must be mutable")
+                        ),
+                        error_second: format_type_args!(
+                            format_args!("LHS has reference type `"),
+                            &ref_ty as &dyn FmtType,
+                            format_args!("` which is not mutable")
+                        ),
+                    }
+                ]));
             }
             let el_type = infer.get_generic_type(lhs, 0).unwrap();
             if let Err(err) = infer.at(node).eq(&el_type.uid, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
-        } else {
+        } else if rhs_is_ref {
             let lhs_mut = self.lhs.mutability(&mut infer);
-            if let Err(err) = infer.at(node).eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
-                return Err(report_infer_error(err, infer_state, phase));
+            if let Err(err) = infer
+                .at(node)
+                .eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
+                return Err(report_expect_mutable(self.pos, err, phase, &[
+                    SrcError::Double {
+                        first: self.pos.clone().into(),
+                        second: self.lhs.pos().into(),
+                        src: self.src.clone(),
+                        error_first: format_type_args!(
+                            format_args!("LHS of assignment operator `=` must be mutable")
+                        ),
+                        error_second: format_type_args!(
+                            format_args!("LHS is not mutable")
+                        ),
+                    }
+                ]));
             }
             let el_type = infer.get_generic_type(rhs, 0).unwrap();
             if let Err(err) = infer.at(node).eq(&lhs, &el_type.uid) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
+        } else {
+            let lhs_mut = self.lhs.mutability(&mut infer);
+            if let Err(err) = infer
+                .at(node)
+                .eq(&lhs_mut, &EdlConstValue::from_bool(true)) {
+                return Err(report_expect_mutable(self.pos, err, phase, &[
+                    SrcError::Double {
+                        first: self.pos.clone().into(),
+                        second: self.lhs.pos().into(),
+                        src: self.src.clone(),
+                        error_first: format_type_args!(
+                            format_args!("LHS of assignment operator `=` must be mutable")
+                        ),
+                        error_second: format_type_args!(
+                            format_args!("LHS is not mutable")
+                        ),
+                    }
+                ]));
+            }
+            if let Err(err) = infer.at(node).eq(&lhs, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
         }
@@ -394,8 +469,14 @@ impl MakeGraph for HirAssign {
                 }
 
                 let empty = graph.graph.expressions
-                    .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-                graph.graph.insert_def(graph.current_block, target, empty, &graph.mir_phase.types);
+                    .insert_empty(&graph.mir_phase.types);
+                graph.graph.insert_def(
+                    graph.current_block,
+                    target,
+                    empty,
+                    &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
+                );
                 return Ok(());
             }
         }
@@ -428,16 +509,19 @@ impl MakeGraph for HirAssign {
         }
 
         let assign = MirAssign {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
             lhs: lhs_value,
             rhs: rhs_value,
             id: graph.mir_phase.new_id(),
         };
         assign.assert_check(&graph.graph, &graph.mir_phase.types);
         let assign = graph.graph.expressions.insert_assign(assign);
-        graph.graph.insert_def(graph.current_block, target, assign, &graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            assign,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

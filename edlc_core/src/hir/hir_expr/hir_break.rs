@@ -25,7 +25,7 @@ use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
@@ -323,17 +323,19 @@ impl MakeGraph for HirBreak {
             }
         } else {
             let empty_id = graph.graph.expressions
-                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
+                .insert_empty(&graph.mir_phase.types);
             graph.graph.insert_def(
                 graph.current_block,
                 loop_value,
                 empty_id,
                 &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
             );
         }
 
         // seal block with jump to merger
-        graph.graph.insert_jump(graph.current_block, loop_merger);
+        graph.graph.insert_jump(
+            graph.current_block, loop_merger, DebugSymbols { pos: self.pos });
         Ok(())
     }
 

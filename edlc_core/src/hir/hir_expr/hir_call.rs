@@ -40,7 +40,7 @@ use std::error::Error;
 use log::warn;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::prelude::report_infer_error;
 
 
@@ -1955,9 +1955,6 @@ impl MakeGraph for HirFunctionCall {
         // create call expression
         let expr = graph.graph.expressions
             .insert_call(MirCall {
-                pos: self.pos,
-                scope: self.scope,
-                src: self.src.clone(),
                 id: mir_uid,
                 args: parameter_values,
                 comptime_args: comptime_parameter_values,
@@ -1966,7 +1963,7 @@ impl MakeGraph for HirFunctionCall {
                 is_recursive: false,
                 context: call_context,
             });
-        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types);
+        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
 
         // seal block if the function is marked as 'never-return'
         if matches!(&type_info.ret_ty, EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_NEVER) {
@@ -1976,9 +1973,9 @@ impl MakeGraph for HirFunctionCall {
             let panic_value = graph.graph
                 .create_temp_variable(graph.mir_phase.types.empty());
             let empty = graph.graph.expressions
-                .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-            graph.graph.insert_def(graph.current_block, panic_value, empty, &graph.mir_phase.types);
-            graph.graph.insert_panic(graph.current_block, panic_value);
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(graph.current_block, panic_value, empty, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
+            graph.graph.insert_panic(graph.current_block, panic_value, DebugSymbols { pos: self.pos });
         }
         Ok(())
     }

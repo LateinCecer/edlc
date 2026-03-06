@@ -1,3 +1,7 @@
+//! This module contains some logic for Single Entry - Single Exit region analysis.
+//! This may come in heady in future analysis pass implementations, but for now, this code is
+//! all dead.
+
 /*
  *    Copyright 2026 Adrian Paskert
  *
@@ -18,6 +22,7 @@ use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::{BlockIter, MirBlockRef, MirFlowGraph};
 use crate::mir::mir_expr::mir_graph::Seal;
 
+#[allow(dead_code)]
 struct SeseRegion {
     entry: CfgNode,
     exit: CfgNode,
@@ -83,7 +88,7 @@ impl CfgNode {
     fn outgoing(&self, cfg: &MirFlowGraph) -> Vec<CfgNode> {
         match self {
             Self::Block(block) => {
-                if matches!(&cfg.blocks[block.0].seal, Seal::Return(_) | Seal::Panic(_)) {
+                if matches!(&cfg.blocks[block.0].seal, Seal::Return(_, _) | Seal::Panic(_, _)) {
                     vec![Self::Exit]
                 } else {
                     cfg.outgoing(block).into_iter().map(CfgNode::Block).collect()

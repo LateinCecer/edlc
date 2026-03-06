@@ -13,18 +13,15 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExprId, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
+use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
-use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_opt::{Optimizer, Verifier};
-use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use crate::prelude::mir_expr::mir_graph::report_comptime_unknown;
-use crate::resolver::ScopeId;
+use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,9 +39,6 @@ pub enum CallContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirCall {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub ret: MirTypeId,
     pub args: Vec<MirValue>,
@@ -128,7 +122,7 @@ impl MirCall {
 
             match inline_body.execute_in_vm(params.as_slice(), vm, reg, backend) {
                 Ok(s) => s,
-                Err(err) => {
+                Err(_err) => {
                     panic!("execution error encountered while executing function body in executor VM!");
                 },
             }
@@ -191,9 +185,6 @@ impl MirCall {
     }
 
     pub fn add_usize<B: Backend>(
-        pos: SrcPos,
-        scope: ScopeId,
-        src: ModuleSrc,
         lhs: MirValue,
         rhs: MirValue,
         opt: &mut Optimizer<'_, B>,
@@ -208,9 +199,6 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            pos,
-            scope,
-            src,
             id: opt.mir_phase.new_id(),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
@@ -222,9 +210,6 @@ impl MirCall {
     }
 
     pub fn sub_usize<B: Backend>(
-        pos: SrcPos,
-        scope: ScopeId,
-        src: ModuleSrc,
         lhs: MirValue,
         rhs: MirValue,
         opt: &mut Optimizer<'_, B>,
@@ -239,9 +224,6 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            pos,
-            scope,
-            src,
             id: opt.mir_phase.new_id(),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
@@ -253,9 +235,6 @@ impl MirCall {
     }
 
     pub fn mul_usize<B: Backend>(
-        pos: SrcPos,
-        scope: ScopeId,
-        src: ModuleSrc,
         lhs: MirValue,
         rhs: MirValue,
         opt: &mut Optimizer<'_, B>,
@@ -270,9 +249,6 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            pos,
-            scope,
-            src,
             id: opt.mir_phase.new_id(),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
@@ -284,9 +260,6 @@ impl MirCall {
     }
 
     pub fn div_usize<B: Backend>(
-        pos: SrcPos,
-        scope: ScopeId,
-        src: ModuleSrc,
         lhs: MirValue,
         rhs: MirValue,
         opt: &mut Optimizer<'_, B>,
@@ -301,9 +274,6 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            pos,
-            scope,
-            src,
             id: opt.mir_phase.new_id(),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],

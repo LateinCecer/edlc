@@ -24,7 +24,7 @@ use crate::core::index_map::IndexMap;
 use crate::inline_code;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, DebugSymbols, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
@@ -417,25 +417,21 @@ impl MirFlowGraph {
             // iterate through the statements in the block and replace all statements that write
             // to a target that is known at compile time with a raw data packet
             for statement in block.statements.iter_mut() {
-                let (target, uid) = match statement {
-                    Statement::VarCopy { var, uid, .. } => {
-                        (var, *uid)
+                let (target, uid, debug) = match statement {
+                    Statement::VarCopy { var, uid, debug, .. } => {
+                        (var, *uid, debug.clone())
                     }
-                    Statement::VarMove { var, uid, .. } => {
-                        (var, *uid)
+                    Statement::VarMove { var, uid, debug, .. } => {
+                        (var, *uid, debug.clone())
                     }
-                    Statement::VarDef { var, uid, .. } => {
-                        (var, *uid)
+                    Statement::VarDef { var, uid, debug, .. } => {
+                        (var, *uid, debug.clone())
                     }
                 };
                 if let Some(item) = consts.get_constant_value(target) {
                     // insert data blob
-                    let pos = SrcPos::default();
-                    let src = inline_code!("todo");
-                    let scope = ScopeId::rand();
-
-                    let expr_id = self.expressions.insert_data(item.clone().into_mir(pos, src, scope));
-                    *statement = Statement::VarDef { var: *target, value: expr_id, uid };
+                    let expr_id = self.expressions.insert_data(item.clone().into_mir());
+                    *statement = Statement::VarDef { var: *target, value: expr_id, uid, debug };
                 }
             }
         }
@@ -451,6 +447,8 @@ impl MirFlowGraph {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
             // check parameters
+            let debug = DebugSymbols { pos: block.pos.clone() };
+
             let mut statements = params
                 .iter()
                 .filter_map(|val| consts.get_constant_value(val)
@@ -459,11 +457,8 @@ impl MirFlowGraph {
                     Statement::VarDef {
                         uid: block.new_uid(),
                         var: val,
-                        value: self.expressions.insert_data(data.clone().into_mir(
-                            block.pos.clone(),
-                            block.src.clone(),
-                            block.scope,
-                        )),
+                        value: self.expressions.insert_data(data.clone().into_mir()),
+                        debug: debug.clone(),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -495,14 +490,14 @@ impl MirFlowGraph {
             }
 
             match &mut block.seal {
-                Seal::Jump(call) => {
+                Seal::Jump(call, _debug) => {
                     transfer_parameters(call, &retain_list);
                 },
-                Seal::Cond { cond: _, then_target, else_target } => {
+                Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
                     transfer_parameters(then_target, &retain_list);
                     transfer_parameters(else_target, &retain_list);
                 },
-                Seal::Switch { cond: _, targets, default } => {
+                Seal::Switch { cond: _, targets, default, debug: _ } => {
                     targets.iter_mut().for_each(|target| {
                         transfer_parameters(&mut target.block_call, &retain_list);
                     });
@@ -516,25 +511,25 @@ impl MirFlowGraph {
     fn reduce_const_branching(&mut self, consts: &ConstEval) {
         'outer: for block in self.blocks.iter_mut() {
             match &block.seal {
-                Seal::Cond { cond, then_target, else_target } => {
+                Seal::Cond { cond, then_target, else_target, debug } => {
                     if let Some(c) = consts.get_constant_value(cond) {
                         if unsafe { c.clone().into::<bool>() } {
-                            block.seal = Seal::Jump(then_target.clone());
+                            block.seal = Seal::Jump(then_target.clone(), debug.clone());
                         } else {
-                            block.seal = Seal::Jump(else_target.clone());
+                            block.seal = Seal::Jump(else_target.clone(), debug.clone());
                         }
                     }
                 }
-                Seal::Switch { cond, targets, default } => {
+                Seal::Switch { cond, targets, default, debug } => {
                     if let Some(c) = consts.get_constant_value(cond) {
                         for target in targets.iter() {
                             let match_value = consts.get_constant_value(&target.match_value).unwrap();
                             if match_value == c {
-                                block.seal = Seal::Jump(target.block_call.clone());
+                                block.seal = Seal::Jump(target.block_call.clone(), debug.clone());
                                 break 'outer;
                             }
                         }
-                        block.seal = Seal::Jump(default.clone());
+                        block.seal = Seal::Jump(default.clone(), debug.clone());
                     }
                 }
                 _ => ()
@@ -610,19 +605,19 @@ impl MirFlowGraph {
                 self.blocks[current_block.0].eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
                 // jump to other block using sealing statement
                 match &self.blocks[current_block.0].seal {
-                    Seal::Return(_value) => {
+                    Seal::Return(_value, _debug) => {
                         // println!("returning from execution in a branch of const evaluation");
                         break;
                     }
-                    Seal::Panic(_value) => {
+                    Seal::Panic(_value, _debug) => {
                         // println!("panic possible in const evaluation");
                         break;
                     }
-                    Seal::Jump(target) => {
+                    Seal::Jump(target, _debug) => {
                         const_eval.transfer_block_call(target, self, vm, stack_frame, reg);
                         current_block = target.target;
                     }
-                    Seal::Cond { cond, then_target, else_target } => {
+                    Seal::Cond { cond, then_target, else_target, debug: _ } => {
                         if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
                             // condition of conditional jump is known at compile time
                             let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
@@ -656,7 +651,7 @@ impl MirFlowGraph {
                             break;
                         }
                     }
-                    Seal::Switch { cond, targets, default } => {
+                    Seal::Switch { cond, targets, default, debug: _ } => {
                         // if the condition is known at compile time, we can execute the jump directly
                         if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
                             // condition is known at comptime
@@ -746,8 +741,8 @@ impl Statement {
         const_eval: &mut ConstEval,
     ) {
         match self {
-            Self::VarMove { var, value, uid: _ }
-                | Self::VarCopy { var, value, uid: _ } => {
+            Self::VarMove { var, value, uid: _, debug: _ }
+                | Self::VarCopy { var, value, uid: _, debug: _ } => {
                 // check if value exists
                 if const_eval.block_frame.avail.contains(value) {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
@@ -756,7 +751,7 @@ impl Statement {
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
                 }
             }
-            Self::VarDef { var, value, uid: _ } => {
+            Self::VarDef { var, value, uid: _, debug: _ } => {
                 // check if the expression can be executed in comptime
                 if cfg.expressions.is_comptime(*value, backend, &const_eval.block_frame, &const_eval.borrow_graph) {
                     cfg.expressions.execute(vm, stack_frame, *value, var, reg, backend);

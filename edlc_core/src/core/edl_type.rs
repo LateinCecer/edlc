@@ -24,7 +24,7 @@ use crate::core::edl_param_env::{AdaptOther, AdaptOtherWithStack, Adaptable, Ada
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
 use crate::core::edl_type::anon::AnonymousTypes;
 pub use crate::core::edl_type::type_def::{EdlEnumVariant, EdlRepresentation, EdlStructVariant, EdlTypeState, EdlTypeInitError};
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::index_map::{IndexMap, IndexMapIter, IndexMapViewMut};
 use crate::documentation::{DocCompilerState, DocConstValue, DocElement, TypeDoc, TypeNameSegmentDoc};
 use crate::file::ModuleSrc;
@@ -271,6 +271,15 @@ impl FmtType for EdlTypeInstance {
                 write!(fmt, "[")?;
                 self.param.params[0].fmt_type(fmt, types)?;
                 return write!(fmt, "]");
+            }
+            t if t == EDL_REF => {
+                write!(fmt, "&")?;
+                if matches!(self.get_ref_mutability(), Ok(EdlConstValue::Literal(EdlLiteralValue::Bool(true)))) {
+                    write!(fmt, "mut ")?;
+                } else {
+                    write!(fmt, " ")?;
+                }
+                return self.param.params[0].fmt_type(fmt, types);
             }
             _ => (),
         }

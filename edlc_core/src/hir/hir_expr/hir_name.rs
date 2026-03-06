@@ -31,7 +31,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{MirRef, MirValue};
+use crate::mir::mir_expr::{DebugSymbols, MirRef, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::resolver::ScopeId;
@@ -542,22 +542,31 @@ impl MakeGraph for HirName {
                         var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
                         let expr_id = graph.graph.expressions.insert_variable(var);
                         graph.graph.insert_def(
-                            graph.current_block, ref_value, expr_id, &graph.mir_phase.types);
+                            graph.current_block,
+                            ref_value,
+                            expr_id,
+                            &graph.mir_phase.types,
+                            DebugSymbols { pos: self.pos },
+                        );
 
                         graph.graph.def_deref(
                             graph.current_block,
                             ref_value,
                             target,
                             &graph.mir_phase.types,
-                            self.pos,
-                            self.src.clone(),
+                            DebugSymbols { pos: self.pos },
                         );
                         Ok(())
                     } else {
                         // is local variable
                         let var_value = *graph.var_mapper.get(v)
                             .expect("variable does not have MIR value mapping");
-                        graph.graph.insert_move(graph.current_block, var_value, target);
+                        graph.graph.insert_move(
+                            graph.current_block,
+                            var_value,
+                            target,
+                            DebugSymbols { pos: self.pos },
+                        );
                         Ok(())
                     }
                 } else {
@@ -583,7 +592,7 @@ impl MakeGraph for HirName {
                         var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
                         let expr_id = graph.graph.expressions.insert_variable(var);
                         graph.graph.insert_def(
-                            graph.current_block, target, expr_id, &graph.mir_phase.types);
+                            graph.current_block, target, expr_id, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
                         Ok(())
                     } else {
                         // create a reference to a local variable
@@ -595,8 +604,6 @@ impl MakeGraph for HirName {
                                 target_ty,
                                 &graph.graph,
                                 &graph.mir_phase.types,
-                                self.pos,
-                                self.src.clone(),
                             ))
                         } else {
                             graph.graph.expressions.insert_ref(MirRef::shared(
@@ -604,11 +611,15 @@ impl MakeGraph for HirName {
                                 target_ty,
                                 &graph.graph,
                                 &graph.mir_phase.types,
-                                self.pos,
-                                self.src.clone(),
                             ))
                         };
-                        graph.graph.insert_def(graph.current_block, target, ref_expr, &graph.mir_phase.types);
+                        graph.graph.insert_def(
+                            graph.current_block,
+                            target,
+                            ref_expr,
+                            &graph.mir_phase.types,
+                            DebugSymbols { pos: self.pos },
+                        );
                         Ok(())
                     }
                 }
@@ -625,9 +636,6 @@ impl MakeGraph for HirName {
 
                 let expr_id = graph.graph.expressions
                     .insert_constants(MirConstant {
-                        pos: self.pos,
-                        src: self.src.clone(),
-                        scope: self.scope,
                         ty: mir_val_ty,
                         value: val,
                         id: graph.mir_phase.new_id(),
@@ -644,6 +652,7 @@ impl MakeGraph for HirName {
                         tmp_value,
                         expr_id,
                         &graph.mir_phase.types,
+                        DebugSymbols { pos: self.pos },
                     );
 
                     // create shared reference
@@ -652,8 +661,7 @@ impl MakeGraph for HirName {
                         tmp_value,
                         target,
                         &graph.mir_phase.types,
-                        self.pos,
-                        self.src.clone(),
+                        DebugSymbols { pos: self.pos },
                     );
                     Ok(())
                 } else {
@@ -664,6 +672,7 @@ impl MakeGraph for HirName {
                         target,
                         expr_id,
                         &graph.mir_phase.types,
+                        DebugSymbols { pos: self.pos },
                     );
                     Ok(())
                 }

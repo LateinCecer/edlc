@@ -23,7 +23,7 @@ use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::prelude::type_analysis::NodeId;
@@ -211,7 +211,7 @@ impl MakeGraph for HirContinue {
         let target_ty = graph.graph.get_var_type(&target);
         assert_eq!(*target_ty, graph.mir_phase.types.empty());
 
-        graph.graph.insert_jump(graph.current_block, *header);
+        graph.graph.insert_jump(graph.current_block, *header, DebugSymbols { pos: self.pos });
         Ok(())
     }
 

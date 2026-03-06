@@ -17,22 +17,22 @@ use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
+use crate::core::type_analysis::*;
 use crate::core::{edl_type, NumberLiteral};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
+use crate::prelude::mir_expr::DebugSymbols;
+use crate::prelude::report_infer_error;
 use crate::resolver::ScopeId;
 use std::error::Error;
-use crate::core::type_analysis::*;
-use crate::mir::mir_expr::MirValue;
-use crate::mir::mir_type::MirTypeId;
-use crate::prelude::report_infer_error;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -336,25 +336,16 @@ impl MakeGraph for HirLiteral {
     {
         let val = match &self.value {
             LiteralValue::Bool(val) => MirLiteral {
-                pos: self.pos,
-                scope: self.scope,
-                src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Bool(*val),
                 ty: graph.mir_phase.types.bool(),
             },
             LiteralValue::Str(val) => MirLiteral {
-                pos: self.pos,
-                scope: self.scope,
-                src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Str(val.clone()),
                 ty: graph.mir_phase.types.str(),
             },
             LiteralValue::Char(val) => MirLiteral {
-                pos: self.pos,
-                scope: self.scope,
-                src: self.src.clone(),
                 id: graph.mir_phase.new_id(),
                 value: MirLiteralValue::Char(*val),
                 ty: graph.mir_phase.types.char(),
@@ -388,9 +379,6 @@ impl MakeGraph for HirLiteral {
                 };
 
                 MirLiteral {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
                     id: graph.mir_phase.new_id(),
                     value: val,
                     ty: mir_id,
@@ -398,7 +386,13 @@ impl MakeGraph for HirLiteral {
             }
         };
         let expr_id = graph.graph.expressions.insert_literal(val);
-        graph.graph.insert_def(graph.current_block, target, expr_id, &graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            expr_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

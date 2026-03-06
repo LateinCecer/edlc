@@ -35,7 +35,7 @@ use crate::mir::MirPhase;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
 use crate::core::binop::BinaryOp::Mul;
-use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,7 +449,6 @@ impl MakeGraph for HirLet {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let ty = self.mir_type(graph)?;
         // only implement local variable definitions here, as global definitions are handled
         // separately in an isolated environment that snatches the value directly from the [HirLet]
         // without calling this function.
@@ -474,8 +473,14 @@ impl MakeGraph for HirLet {
         }
 
         let empty_id = graph.graph.expressions
-            .insert_empty(&graph.mir_phase.types, self.src.clone(), self.pos, self.scope);
-        graph.graph.insert_def(graph.current_block, target, empty_id, &graph.mir_phase.types);
+            .insert_empty(&graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            empty_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
         Ok(())
     }
 

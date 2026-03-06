@@ -14,11 +14,11 @@ use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
-use edlc_core::prelude::mir_expr::{process_comptime_functions, process_function_mir_pass, AsciPrinter, Context, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_expr::{process_comptime_functions, process_function_mir_pass, AsciPrinter, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
-use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
+use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
 use edlc_core::prelude::mir_str::FatPtr;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
@@ -175,7 +175,7 @@ impl TestCompiler {
             hir.write_to_graph(&mut graph_writer, ret_value)?;
             graph_writer.current_block
         };
-        body.insert_return(current_block, ret_value);
+        body.insert_return(current_block, ret_value, DebugSymbols { pos: hir.pos().clone() });
         body.seal();
 
         // body.constant_analysis()?;

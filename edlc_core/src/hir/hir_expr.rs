@@ -317,23 +317,21 @@ pub trait DefaultMut: ResolveTypes + SourceObject {
         let m = self.mutability(&mut infer);
         let pos = self.pos();
         let src = self.src();
-        let changed = match process(m, &pos, src, &mut infer) {
+        let mut changed = match process(m, &pos, src, &mut infer) {
             Ok(v) => v,
             Err(err) => return Err(report_infer_error(err, infer_state, phase)),
         };
 
         // check return value for references
-        // let ty = self.get_type_uid(&mut infer);
-        // if matches!(infer.find_type(ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
-        //     dbg!(ty);
-        //
-        //     let m: ExtConstUid = infer.get_generic_const(ty, 1).unwrap().into();
-        //     let src = self.src();
-        //     changed |= match process(m, &pos, src, &mut infer) {
-        //         Ok(v) => v,
-        //         Err(err) => return Err(report_infer_error(err, infer_state, phase)),
-        //     };
-        // }
+        let ty = self.get_type_uid(&mut infer);
+        if matches!(infer.find_type(ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
+            let m: ExtConstUid = infer.get_generic_const(ty, 1).unwrap().into();
+            let src = self.src();
+            changed |= match process(m, &pos, src, &mut infer) {
+                Ok(v) => v,
+                Err(err) => return Err(report_infer_error(err, infer_state, phase)),
+            };
+        }
 
         if changed {
             self.resolve_types(phase, infer_state)?;
