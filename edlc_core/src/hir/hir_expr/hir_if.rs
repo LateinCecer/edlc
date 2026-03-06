@@ -742,6 +742,7 @@ impl MakeGraph for HirIf {
         let merge_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)
+            .with_source(self.src.clone(), self.pos.clone(), self.scope)
             .build();
 
         let mut early_exit = false;
@@ -749,10 +750,14 @@ impl MakeGraph for HirIf {
             let then_block = graph.graph
                 .create_block()
                 .with_parent(graph.current_block)
+                .with_source(self.src.clone(), self.pos.clone(), self.scope)
+                .create_scope()
                 .build();
             let else_block = graph.graph
                 .create_block()
                 .with_parent(graph.current_block)
+                .with_source(self.src.clone(), block.pos.clone(), block.scope)
+                .create_scope()
                 .build();
 
             let cond_ty = cond.mir_deref_type(graph)?;
@@ -767,7 +772,7 @@ impl MakeGraph for HirIf {
                 graph.current_block, then_block, else_block, cond_value, DebugSymbols { pos: self.pos });
             // write then block
             graph.current_block = then_block;
-            block.write_to_graph(graph, target)?;
+            block.write_to_graph_plane(graph, target)?;
             if !graph.is_current_sealed() {
                 // only insert jump if the block does not exit early
                 graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
@@ -779,7 +784,7 @@ impl MakeGraph for HirIf {
         if !early_exit {
             // compile final `else` block
             if let Some(fin) = self.else_block.as_ref() {
-                fin.write_to_graph(graph, target)?;
+                fin.write_to_graph_plane(graph, target)?;
             } else {
                 let empty_id = graph.graph.expressions
                     .insert_empty(&graph.mir_phase.types);

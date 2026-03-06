@@ -517,7 +517,7 @@ impl Seal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Context {
     Comptime,
     MaybeComptime,
@@ -1069,10 +1069,8 @@ pub struct BlockBuilder<'graph> {
     graph: &'graph mut MirFlowGraph,
     parent: Option<MirBlockRef>,
     create_scope: bool,
-    ctx: Context,
-    src: Option<ModuleSrc>,
-    pos: Option<SrcPos>,
-    scope: Option<ScopeId>,
+    ctx: Option<Context>,
+    src: Option<(ModuleSrc, SrcPos, ScopeId)>,
 }
 
 impl<'a> BlockBuilder<'a> {
@@ -1087,7 +1085,12 @@ impl<'a> BlockBuilder<'a> {
     }
 
     pub fn with_context(mut self, ctx: Context) -> Self {
-        self.ctx = ctx;
+        self.ctx = Some(ctx);
+        self
+    }
+
+    pub fn with_source(mut self, src: ModuleSrc, pos: SrcPos, frontend_scope: ScopeId) -> Self {
+        self.src = Some((src, pos, frontend_scope));
         self
     }
 
@@ -1102,23 +1105,28 @@ impl<'a> BlockBuilder<'a> {
             vec![self.graph.new_scope()]
         };
 
-        let src_info = if let Some(parent) = self.parent {
-            let parent = &self.graph.blocks[parent.0];
-            (
-                self.src.unwrap_or_else(|| parent.src.clone()),
-                self.pos.unwrap_or_else(|| parent.pos.clone()),
-                self.scope.unwrap_or_else(|| parent.scope),
-            )
+        let src_info = if let Some(src) = self.src {
+            src
         } else {
-            (self.src.unwrap(), self.pos.unwrap(), self.scope.unwrap())
+            if let Some(parent) = self.parent {
+                let parent = &self.graph.blocks[parent.0];
+                (parent.src.clone(), parent.pos.clone(), parent.scope)
+            } else {
+                panic!("no source information available");
+            }
         };
+
+        let ctx = self.ctx.unwrap_or_else(|| {
+            let parent = &self.graph.blocks[self.parent.unwrap().0];
+            parent.ctx
+        });
 
         self.graph.blocks.push(Block {
             statements: vec![],
             active_scopes,
             parameters: vec![],
             seal: Seal::None,
-            ctx: self.ctx,
+            ctx,
             src: src_info.0,
             pos: src_info.1,
             scope: src_info.2,
@@ -1408,10 +1416,8 @@ impl MirFlowGraph {
             graph: self,
             create_scope: false,
             parent: None,
-            ctx: Context::default(),
+            ctx: None,
             src: None,
-            pos: None,
-            scope: None,
         }
     }
 

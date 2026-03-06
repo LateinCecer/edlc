@@ -689,6 +689,11 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
         std::print(data.age);
         std::print("\n");
 
+        arr[3] = data.age;
+        std::print("array index access after Ferris: ");
+        std::print(arr[3]);
+        std::print("\n");
+
         plot({ x: 0.0, y: 1.0, line_thickness: 1.0 });
 
         let dict = {

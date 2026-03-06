@@ -29,7 +29,7 @@ use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
@@ -468,8 +468,10 @@ impl EdlFnArgument for HirBlock {
     }
 }
 
-impl MakeGraph for HirBlock {
-    fn write_to_graph<B: Backend>(
+impl HirBlock {
+    /// Writes the contents of the HIR block into the MIR flow graph.
+    /// Unlike [HirBlock::write_to_graph], this function does not create a new MIR block.
+    pub(super) fn write_to_graph_plane<B: Backend>(
         &self,
         graph: &mut MirGraph<B>,
         target: MirValue,
@@ -500,6 +502,33 @@ impl MakeGraph for HirBlock {
             );
         }
         Ok(())
+    }
+}
+
+impl MakeGraph for HirBlock {
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        // block in HIR always create a new MIR block too;
+        // this makes tracking of debugging information easier and provides an attachment point for
+        // block contexts
+        let mut new_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .create_scope();
+        if self.comptime {
+            new_block = new_block.with_context(Context::Comptime);
+        }
+
+        let new_block = new_block.build();
+        graph.graph.insert_jump(graph.current_block, new_block, DebugSymbols { pos: self.pos });
+        graph.current_block = new_block;
+        self.write_to_graph_plane(graph, target)
     }
 
     fn mir_type<B: Backend>(

@@ -258,6 +258,8 @@ impl MakeGraph for HirLoop {
         let header_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)
+            .with_source(self.src.clone(), self.pos.clone(), self.scope)
+            .create_scope()
             .build();
         let merge_block = graph.graph
             .create_block()
@@ -275,7 +277,7 @@ impl MakeGraph for HirLoop {
         // compile block and write value to temp variable (never read)
         let block_ty = self.block.mir_type(graph)?;
         let block_value = graph.graph.create_temp_variable(block_ty);
-        self.block.write_to_graph(graph, block_value)?;
+        self.block.write_to_graph_plane(graph, block_value)?;
 
         // seal loop body by inserting a jump instruction back to the head of the loop and continue
         // writing in the merge block after the loop.
