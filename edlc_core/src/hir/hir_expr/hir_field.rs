@@ -99,12 +99,16 @@ impl HirField {
                 format_args!("LHS of field expression must be fully resolved")
             )
         })?;
-        let EdlMaybeType::Fixed(mut lhs_ty) = lhs_ty else {
+        let EdlMaybeType::Fixed(lhs_ty) = lhs_ty else {
             return Err(HirError {
                 pos: self.pos,
                 ty: Box::new(HirErrorType::TypeNotResolvable),
             });
         };
+        let mut lhs_ty = lhs_ty
+            .get_ref_type()
+            .map_err(|err| HirError::new_edl(self.pos, err))?
+            .clone();
 
         // find field
         let state = match phase.types.get_type(lhs_ty.ty)

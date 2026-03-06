@@ -640,6 +640,15 @@ fn test_function(val: f32) -> f32 {
 fn some_hybrid(y: f32, comptime x: f32) -> i32 {
     (transform(x) + y) as i32
 }
+
+type MyData = struct {
+    name: str,
+    age: i32,
+};
+
+fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
+
+}
     "#))?;
 
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
@@ -670,6 +679,23 @@ fn some_hybrid(y: f32, comptime x: f32) -> i32 {
         std::print("array index access: ");
         std::print(arr[2]);
         std::print("\n");
+
+        let data = MyData {
+            name: "Ferris",
+            age: 27,
+        };
+        std::print(data.name);
+        std::print(" ");
+        std::print(data.age);
+        std::print("\n");
+
+        plot({ x: 0.0, y: 1.0, line_thickness: 1.0 });
+
+        let dict = {
+            x: 0.01_f64,
+            y: 0.03_f64,
+            z: 0.2_f64,
+        };
 
         loop {
             if y == std::input() { break; }
