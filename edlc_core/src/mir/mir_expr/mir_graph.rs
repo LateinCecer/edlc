@@ -21,6 +21,8 @@ pub mod lifetime_analysis;
 mod sese;
 mod const_eval;
 mod borrow;
+mod scope_check;
+mod drop_check;
 
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;

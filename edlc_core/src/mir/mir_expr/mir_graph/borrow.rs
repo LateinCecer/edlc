@@ -32,7 +32,7 @@ use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElemen
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::{mem, ops};
+use std::{collections, mem, ops};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
 
@@ -47,7 +47,7 @@ enum BorrowType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct OwnerData(usize);
+pub struct OwnerData(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BorrowSource {
@@ -178,13 +178,15 @@ struct BorrowTreeBranch {
     partial: MemberOffset,
 }
 
-struct BorrowTree {
+pub struct BorrowTree {
     /// Number of root children
     root_children: usize,
     /// Number of root leaves
     root_leaves: usize,
     leaves: Vec<MirValue>,
     node: Vec<BorrowTreeBranch>,
+    /// Indices into the `leaves` pool containing all root leaves *own the source*
+    owners: Vec<usize>,
 }
 
 impl BorrowTree {
@@ -243,12 +245,45 @@ impl BorrowTree {
             }
         }
 
+        // find root leaves that do not borrow from any variable / own the source during their
+        // lifetime
+        let mut owners = Vec::new();
+        for (idx, leave) in leaves[..root_leaves].iter().enumerate() {
+            let Some(state) = data.get(leave) else {
+                continue;
+            };
+            if state.is_owner() {
+                owners.push(idx);
+            }
+        }
+
         BorrowTree {
             root_children,
             root_leaves,
             node: nodes,
             leaves,
+            owners,
         }
+    }
+
+    /// Returns if the borrow tree contains any actual borrows.
+    /// Technically, all leaves in a borrow tree can just be values that own the source data value
+    /// at some point in its lifetime, without any actual references ever being constructed from
+    /// it.
+    /// If this is the case, the number of owner values in the tree is equal to the total number of
+    /// leave nodes in the tree.
+    /// In this case, the tree does not actually have any real borrows and this method returns
+    /// `false`.
+    /// If there is at least one real borrow in tree, this method returns `true`.
+    fn has_borrows(&self) -> bool {
+        self.leaves.len() > self.owners.len()
+    }
+
+    /// Returns the owners of the value
+    fn get_owners(&self) -> impl DoubleEndedIterator<Item = &MirValue> {
+        self.owners
+            .iter()
+            .map(|idx| &self.leaves[*idx])
     }
 
     /// Gets the partial offset sequence that yields the specified node.
@@ -573,6 +608,10 @@ impl BorrowForest {
             .get(&path.source)
             .map(|tree| tree.iter_non_diverging(&path.stack.stack[..]))
     }
+
+    fn iter(&self) -> collections::hash_map::Iter<'_, BorrowSource, BorrowTree> {
+        self.trees.iter()
+    }
 }
 
 impl Index<BorrowSource> for BorrowForest {
@@ -712,6 +751,45 @@ impl BorrowGraph {
                 iter.for_each(|v| f(v));
             }
         })
+    }
+
+    /// Returns `true` only if `value` owns its contents in all cases.
+    pub fn is_owner(&self, value: &MirValue) -> bool {
+        let state = self.graph
+            .get(value)
+            .expect("borrow state not recorded for value");
+        state.is_owner()
+    }
+
+    /// Iterates all owner data instances that are owned by `value`.
+    pub fn iter_owner_data(&self, value: &MirValue) -> collections::hash_set::Iter<'_, OwnerData> {
+        let state = self.graph
+            .get(value)
+            .expect("borrow state not recorded for value");
+        state.owners.iter()
+    }
+
+    pub fn is_global_borrowed(&self, value: &EdlVarId) -> bool {
+        self.forest.trees
+            .get(&BorrowSource::Global(*value))
+            .map(|tree| tree.has_borrows())
+            .unwrap_or(false)
+    }
+
+    /// Returns if a value is ever borrowed
+    pub fn is_borrowed(&self, value: &MirValue) -> bool {
+        let Some(state) = self.graph.get(value) else {
+            return false;
+        };
+        state.owners
+            .iter()
+            .any(|owner| {
+                if let Some(tree) = self.forest.trees.get(&BorrowSource::Local(*owner)) {
+                    tree.has_borrows()
+                } else {
+                    false
+                }
+            })
     }
 
     /// Checks if `value` borrows from the borrow path `path`.
@@ -1038,6 +1116,18 @@ impl BorrowState {
         }
     }
 
+    /// Returns if this borrow state is actually referencing the reflected data source, or if it is
+    /// the owner of the data.
+    /// If it is a reference, then `true` is returned, otherwise this method returns `false`.
+    fn is_reference(&self) -> bool {
+        !self.set.is_empty()
+    }
+
+    /// The exact opposite of [Self::is_reference].
+    fn is_owner(&self) -> bool {
+        self.set.is_empty()
+    }
+
     #[inline(always)]
     /// Extends the borrow state with the specified partial borrow.
     /// In the case of a complete borrow, we can just clone the entire borrow state.
@@ -1309,7 +1399,12 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirRef {
             },
             _ => {
                 // offset is zero, so we actually create a new reference
-                let mut state = BorrowState::raw_data(ctx.get_owner_data(target), self.mutable);
+                let mut state = input
+                    .element_value(&self.value)
+                    .extend(*target, ctx.get_owner_data(target), None, self.mutable)?;
+                // NOTE: in this case, we borrow all sources from both the original borrow paths
+                //       that `self.value` may have borrowed, as well as the data owner values in
+                //       which `self.value` is saved
                 let lhs_state = input.element_value(&self.value);
                 for owner in lhs_state.owners.iter() {
                     state.set.insert(BorrowPath {
