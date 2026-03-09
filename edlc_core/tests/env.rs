@@ -7,7 +7,8 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use std::thread::current;
 use anyhow::anyhow;
@@ -178,10 +179,23 @@ impl TestCompiler {
         body.insert_return(current_block, ret_value, DebugSymbols { pos: hir.pos().clone() });
         body.seal();
 
+        // write MIR code to file for debugging
+        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir")?);
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(&body)?;
+        out.flush()?;
+
+
+        // do scope checking
+        let borrow_graph = body.borrows(&self.compiler.mir_phase.types)?;
+        let report = body.check_scopes(&borrow_graph);
+        report.print();
+
         // body.constant_analysis()?;
         // println!("doing lifetime analysis");
         let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
         // println!("done with lifetime analysis");
+
 
         let deconstruction = body.deconstruct(&lifeness)?;
         // deconstruction.print_ranges();
@@ -218,10 +232,11 @@ impl TestCompiler {
         process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
 
         // print result
-        let mut out = std::io::stdout();
-        out.write_all(b"MIR CFG for expression eval:\n")?;
+        // write MIR code to file for debugging
+        let mut out = BufWriter::new(File::create("../test_mir/optimized.mir")?);
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&body)?;
+        out.flush()?;
 
         vm.alloc_stack_frame(&mut stack_frame);
         let res = body

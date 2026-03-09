@@ -26,7 +26,7 @@ use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_expr::{DebugSymbols, MirValue, ValueScope};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{edl_type, report_infer_error, HirErrorType};
@@ -739,6 +739,8 @@ impl MakeGraph for HirIf {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        let scope = graph.graph.get_block_scope(&graph.current_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
         let merge_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)

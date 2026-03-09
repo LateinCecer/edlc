@@ -84,6 +84,7 @@ impl MirFlowGraph {
                 if updated_sealing_statements.contains(&sealing_hash) {
                     continue; // the block already has the parameter in its sealing statements
                 }
+                updated_sealing_statements.insert(sealing_hash);
                 if let Some(val) = created_vars.get(dominator.0) {
                     // we have already visited this node
                     self.blocks[dominator.0].add_sealing_parameter_unchecked(&block_ref, index, *val);
@@ -115,11 +116,14 @@ impl MirFlowGraph {
         value: &MirValue,
         borrow_graph: &BorrowGraph,
     ) -> usize {
-
-
-        todo!()
+        assert!(self.find_data_owner(block, src, borrow_graph).is_none());
+        let block = &mut self.blocks[block.0];
+        let idx = block.parameters.len();
+        block.parameters.push(*value);
+        idx
     }
 
+    /// Finds the [MirValue] that owns the data source `owner_data` within the block.
     fn find_data_owner(
         &self,
         block_ref: &MirBlockRef,
@@ -149,6 +153,7 @@ impl MirFlowGraph {
 impl Block {
     fn add_sealing_parameter_unchecked(&mut self, target: &MirBlockRef, index: usize, val: MirValue) {
         match &mut self.seal {
+
             Seal::Jump(call, _) => {
                 if &call.target == target {
                     call.params.insert(index, val);

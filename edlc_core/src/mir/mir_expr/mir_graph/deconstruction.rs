@@ -554,7 +554,21 @@ impl TransferCopy<PartialSsaDeconstruction> for DataOrigin {
         Ok(input.replace(target, DataOrigin::from_source(ctx.get_source(loc))))
     }
 }
-impl TransferMove<PartialSsaDeconstruction> for DataOrigin {}
+
+impl TransferMove<PartialSsaDeconstruction> for DataOrigin {
+    /// To keep consistent with borrow analysis results, we need to assume that the move expression
+    /// can move data to a new location, like the copy location would - fundamentally they behave
+    /// in the same way, except that a move consumes the source data, while a copy does not.
+    fn transfer_move(
+        _value: &MirValue,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut PartialSsaDeconstruction,
+        loc: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, DeconstructionConflict> {
+        Ok(input.replace(target, DataOrigin::from_source(ctx.get_source(loc))))
+    }
+}
 
 impl ExprEval<DataOrigin, PartialSsaDeconstruction> for MirArrayInit {
     fn eval(

@@ -25,7 +25,7 @@ use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_expr::{DebugSymbols, MirValue, ValueScope};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::error::Error;
@@ -255,6 +255,9 @@ impl MakeGraph for HirLoop {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        let scope = graph.graph.get_block_scope(&graph.current_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
+
         let header_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)

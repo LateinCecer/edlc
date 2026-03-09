@@ -314,10 +314,15 @@ impl MakeGraph for HirBreak {
         assert_eq!(*target_ty, graph.mir_phase.types.empty());
 
         // write value if break statement
+        // NOTE: we must make sure that MIR knows that the return value of the loop is moved out of
+        //       its context. so, we write it to a temporary value here and then move that to the
+        //       loop value to ensure consistency in borrow analysis.
         let loop_value = *graph.loop_mapper.value(loop_id)
             .expect("loop flow manager is missing a loop");
+        let loop_value_ty = *graph.graph.get_var_type(&loop_value);
+        let tmp_value = graph.graph.create_temp_variable(loop_value_ty);
         if let Some(value) = self.val.as_ref() {
-            value.write_to_graph(graph, loop_value)?;
+            value.write_to_graph(graph, tmp_value)?;
             if graph.is_current_sealed() {
                 return Ok(()); // value results in early return
             }
@@ -326,12 +331,14 @@ impl MakeGraph for HirBreak {
                 .insert_empty(&graph.mir_phase.types);
             graph.graph.insert_def(
                 graph.current_block,
-                loop_value,
+                tmp_value,
                 empty_id,
                 &graph.mir_phase.types,
                 DebugSymbols { pos: self.pos },
             );
         }
+        graph.graph.insert_move(
+            graph.current_block, tmp_value, loop_value, DebugSymbols { pos: self.pos });
 
         // seal block with jump to merger
         graph.graph.insert_jump(

@@ -63,7 +63,7 @@ use crate::resolver::ScopeId;
 pub struct MirBlockRef(pub(super) usize);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Scope(usize);
+pub struct Scope(usize);
 
 /// Implements a temporary variable.
 /// This kind of variable does not actually exist as a variable, but will likely be passed using
@@ -183,6 +183,46 @@ impl DefPoint {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValueScope {
+    Function,
+    Global,
+    Block(Scope),
+    #[default]
+    Local,
+}
+
+impl ValueScope {
+    pub fn try_join(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Local, other) => Some(other),
+            (s, Self::Local) => Some(s),
+            (Self::Function, Self::Function) => Some(Self::Function),
+            (Self::Global, Self::Global) => Some(Self::Global),
+            (Self::Block(s1), Self::Block(s2)) if s1 == s2 => Some(Self::Block(s1)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct ValueScopeList {
+    scopes: Vec<ValueScope>,
+}
+
+impl ValueScopeList {
+    pub fn get(&self, value: &MirValue) -> ValueScope {
+        self.scopes.get(value.0).cloned().unwrap_or_default()
+    }
+
+    pub fn set(&mut self, value: &MirValue, scope: ValueScope) {
+        while self.scopes.len() <= value.0 {
+            self.scopes.push(ValueScope::default());
+        }
+        self.scopes[value.0] = scope;
+    }
+}
+
 /// A MIR flow graph essentially encodes executable code on the MIR level in a control flow graph.
 #[derive(Clone, PartialEq, Debug)]
 pub struct MirFlowGraph {
@@ -191,6 +231,7 @@ pub struct MirFlowGraph {
     scope_counter: usize,
     return_type: MirTypeId,
     temp_vars: Vec<TempVarData>,
+    pub var_scopes: ValueScopeList,
 
     /// The backlinks encode a reverse jump mapping, i.e. for each block there is a list of blocks
     /// that can lead to that block.
@@ -1172,9 +1213,10 @@ impl MirFlowGraph {
             return_type,
             temp_vars: vec![],
             backlinks: vec![],
+            var_scopes: ValueScopeList::default(),
         };
         let scope = out.new_scope();
-        let parameters = parameters
+        let parameters: Vec<MirValue> = parameters
             .map(|(ty)| {
                 out.temp_vars.push(TempVarData {
                     ty,
@@ -1182,6 +1224,10 @@ impl MirFlowGraph {
                 MirValue(out.temp_vars.len() - 1)
             })
             .collect();
+        for param in parameters.iter() {
+            out.var_scopes.set(param, ValueScope::Function);
+        }
+
         out.blocks.push(Block {
             statements: vec![],
             active_scopes: vec![scope],
@@ -1193,6 +1239,10 @@ impl MirFlowGraph {
             scope: scope_id,
         });
         out
+    }
+
+    pub fn get_root_scope(&self) -> Scope {
+        self.blocks[self.root().0].active_scopes[0]
     }
 
     /// The block parameters that the root block takes.
@@ -1278,6 +1328,11 @@ impl MirFlowGraph {
                 Seal::None => panic!("block is not sealed!"),
             }
         }
+    }
+
+    /// Returns the most recent scope of the block.
+    pub fn get_block_scope(&self, block: &MirBlockRef) -> Scope {
+        *self.blocks[block.0].active_scopes.last().unwrap()
     }
 
     pub fn is_block_sealed(&self, block: &MirBlockRef) -> bool {
@@ -1949,7 +2004,7 @@ impl MirFlowGraph {
         let borrow_state = BorrowContext::new(mir_types, self);
         let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
         WorkListFixpointForward.solve(self, &mut state, BorrowState::upper)?;
-        let graph = BorrowGraph::new(state.0.map);
+        let graph = BorrowGraph::new(state.0.map, state.1);
 
         // println!("result of borrow state analysis:");
         // graph.print();

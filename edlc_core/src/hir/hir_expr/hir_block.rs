@@ -29,7 +29,7 @@ use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{Context, DebugSymbols, MirValue};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirValue, ValueScope};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::MirTypeId;
 use crate::mir::MirPhase;
@@ -489,7 +489,13 @@ impl HirBlock {
         }
 
         if let Some(ret) = self.ret.as_ref() {
-            ret.write_to_graph(graph, target)?;
+            // we are passing the return value by value here. make sure MIR knows that the value
+            // is moved
+            let target_ty = *graph.graph.get_var_type(&target);
+            let tmp = graph.graph.create_temp_variable(target_ty);
+            ret.write_to_graph(graph, tmp)?;
+            graph.graph.insert_move(
+                graph.current_block, tmp, target, DebugSymbols { pos: self.pos });
         } else {
             let empty = graph.graph.expressions
                 .insert_empty(&graph.mir_phase.types);
@@ -514,6 +520,9 @@ impl MakeGraph for HirBlock {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        // make sure to record that `target` lives outside the new block we are about to create
+        let scope = graph.graph.get_block_scope(&graph.current_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
         // block in HIR always create a new MIR block too;
         // this makes tracking of debugging information easier and provides an attachment point for
         // block contexts

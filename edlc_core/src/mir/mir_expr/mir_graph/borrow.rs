@@ -26,7 +26,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
+use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirRef, MirValue, ValueScope};
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
 use std::cmp::Ordering;
@@ -50,7 +50,7 @@ enum BorrowType {
 pub struct OwnerData(usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum BorrowSource {
+pub enum BorrowSource {
     Local(OwnerData),
     Global(EdlVarId),
 }
@@ -187,10 +187,24 @@ pub struct BorrowTree {
     node: Vec<BorrowTreeBranch>,
     /// Indices into the `leaves` pool containing all root leaves *own the source*
     owners: Vec<usize>,
+    scope: ValueScope,
+}
+
+pub enum ScopeCheck {
+    /// Is life in a target block
+    Block(MirBlockRef),
+    /// Is life in the caller
+    Caller,
+    /// Is life globally
+    Global,
 }
 
 impl BorrowTree {
-    fn build(source: &BorrowSource, data: &HashMap<MirValue, BorrowState>) -> Self {
+    fn build(
+        source: &BorrowSource,
+        data: &HashMap<MirValue, BorrowState>,
+        ctx: &BorrowContext,
+    ) -> Self {
         let mut paths = HashMap::<PartialBorrowStack, HashSet<MirValue>>::new();
         for (var, state) in data.iter() {
             for path in state.set.iter() {
@@ -247,14 +261,30 @@ impl BorrowTree {
 
         // find root leaves that do not borrow from any variable / own the source during their
         // lifetime
+        let mut scope = ValueScope::default();
         let mut owners = Vec::new();
-        for (idx, leave) in leaves[..root_leaves].iter().enumerate() {
-            let Some(state) = data.get(leave) else {
+        for (idx, leaf) in leaves[..root_leaves].iter().enumerate() {
+            let Some(state) = data.get(leaf) else {
                 continue;
             };
             if state.is_owner() {
                 owners.push(idx);
+                let leaf_scope = ctx.cfg.var_scopes.get(leaf);
+                scope = leaf_scope.try_join(scope).expect("invalid scoping for owner data");
             }
+        }
+
+        // if the scope is still `Local` then we find the scope in which the data was originally
+        // defined
+        if scope == ValueScope::Local {
+            scope = if let BorrowSource::Local(var) = source {
+                let def = ctx.owner_reverse[var.0];
+                let block_ref = ctx.cfg.find_block(&def)
+                    .expect("variable is not defined anywhere");
+                ValueScope::Block(ctx.cfg.get_block_scope(&block_ref))
+            } else {
+                ValueScope::Global
+            };
         }
 
         BorrowTree {
@@ -263,6 +293,21 @@ impl BorrowTree {
             node: nodes,
             leaves,
             owners,
+            scope,
+        }
+    }
+
+    /// Checks if the data source of this borrow tree is life at the specified point in the program.
+    fn source_alive_in(&self, scope: &ScopeCheck, cfg: &MirFlowGraph) -> bool {
+        match scope {
+            ScopeCheck::Global => self.scope == ValueScope::Global,
+            ScopeCheck::Caller => self.scope == ValueScope::Function || self.scope == ValueScope::Global,
+            ScopeCheck::Block(_) if self.scope == ValueScope::Function || self.scope == ValueScope::Global => true,
+            ScopeCheck::Block(scope) => match &self.scope {
+                ValueScope::Global | ValueScope::Function => true,
+                ValueScope::Block(source_scope) => cfg.blocks[scope.0].active_scopes.contains(source_scope),
+                ValueScope::Local => unreachable!(),
+            }
         }
     }
 
@@ -587,7 +632,10 @@ pub struct BorrowForest {
 }
 
 impl BorrowForest {
-    fn new(graph: &HashMap<MirValue, BorrowState>) -> Self {
+    fn new(
+        graph: &HashMap<MirValue, BorrowState>,
+        ctx: &BorrowContext,
+    ) -> Self {
         // collect all sources
         let mut sources = HashSet::new();
         graph.iter().for_each(|(_, state)| {
@@ -595,10 +643,18 @@ impl BorrowForest {
         });
         let mut trees = HashMap::new();
         for source in sources.iter() {
-            let tree = BorrowTree::build(source, graph);
+            let tree = BorrowTree::build(source, graph, ctx);
             trees.insert(*source, tree);
         }
         BorrowForest { trees }
+    }
+
+    /// Checks if the data source is alive in the specified scope check.
+    fn is_source_alive_at(&self, src: &BorrowSource, check: &ScopeCheck, cfg: &MirFlowGraph) -> bool {
+        self.trees
+            .get(src)
+            .map(|tree| tree.source_alive_in(check, cfg))
+            .unwrap_or(false)
     }
 
     /// Iterate over all leaves that have a path that is not fully divergent from the specified
@@ -693,14 +749,42 @@ impl<V> ReferenceStateForest<V> {
 pub struct BorrowGraph {
     graph: HashMap<MirValue, BorrowState>,
     pub forest: BorrowForest,
+    /// Contains the OwnerData for each MIR value that _created_ the owner value.
+    /// The transitive properties of [OwnerData] are not recorded in here.
+    owner_references: IndexMap<OwnerData>,
+    owner_reverse: IndexMap<MirValue>,
+}
+
+pub struct LivenessReport {
+    dep_not_alive: Vec<BorrowSource>,
+}
+
+impl IntoIterator for LivenessReport {
+    type Item = BorrowSource;
+    type IntoIter = std::vec::IntoIter<BorrowSource>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.dep_not_alive.into_iter()
+    }
 }
 
 impl BorrowGraph {
-    pub fn new(graph: HashMap<MirValue, BorrowState>) -> Self {
+    pub fn new(
+        graph: HashMap<MirValue, BorrowState>,
+        ctx: BorrowContext,
+    ) -> Self {
         BorrowGraph {
-            forest: BorrowForest::new(&graph),
+            forest: BorrowForest::new(&graph, &ctx),
             graph,
+            owner_references: ctx.owner_references,
+            owner_reverse: ctx.owner_reverse,
         }
+    }
+
+    /// Returns the scope of the borrow source.
+    pub fn get_scope(&self, data: &BorrowSource) -> Option<&ValueScope> {
+        self.forest.trees.get(data)
+            .map(|tree| &tree.scope)
     }
 
     /// Executes the operator `f` for all [MirValue]s that are not fully divergent in the borrow
@@ -753,6 +837,13 @@ impl BorrowGraph {
         })
     }
 
+    /// Returns the MIR value that created the owner data.
+    /// Even though an [OwnerData] may be contained in multiple different MIR values, it is only
+    /// ever created in a single MIR value.
+    pub fn owner_data_creator(&self, data: &OwnerData) -> Option<&MirValue> {
+        self.owner_reverse.get(data.0)
+    }
+
     /// Returns `true` only if `value` owns its contents in all cases.
     pub fn is_owner(&self, value: &MirValue) -> bool {
         let state = self.graph
@@ -767,6 +858,33 @@ impl BorrowGraph {
             .get(value)
             .expect("borrow state not recorded for value");
         state.owners.iter()
+    }
+
+    /// A value can be alive at a certain point exactly when all values that it borrows from can
+    /// outlive the specified scope.
+    pub fn is_alive_at(&self, value: &MirValue, check: &ScopeCheck, cfg: &MirFlowGraph) -> Result<(), LivenessReport> {
+        let Some(state) = self.graph.get(value) else {
+            return Err(LivenessReport { dep_not_alive: vec![] });
+        };
+
+        let mut not_alive = vec![];
+        for path in state.set.iter() {
+            if !self.forest.is_source_alive_at(&path.source, check, cfg) {
+                not_alive.push(path.source.clone());
+            }
+        }
+        if not_alive.is_empty() {
+            Ok(())
+        } else {
+            Err(LivenessReport { dep_not_alive: not_alive })
+        }
+    }
+
+    /// Iterators over all borrow paths that this value depends on
+    pub fn iter_paths(&self, value: &MirValue) -> Option<collections::hash_set::Iter<'_, BorrowPath>> {
+        self.graph
+            .get(value)
+            .map(|val| val.set.iter())
     }
 
     pub fn is_global_borrowed(&self, value: &EdlVarId) -> bool {
@@ -1265,7 +1383,22 @@ impl<'reg> TransferCopy<BorrowContext<'reg>> for BorrowState {
     }
 }
 
-impl<'reg> TransferMove<BorrowContext<'reg>> for BorrowState {}
+impl<'reg> TransferMove<BorrowContext<'reg>> for BorrowState {
+    /// When moving a value, we ultimately create a new owner value;
+    /// any references that referred to the old owner value should not also refer to the new
+    /// owner value!
+    fn transfer_move(
+        value: &MirValue,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut BorrowContext<'reg>,
+        _loc: &MirGraphLoc,
+        target: &MirValue,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.replace(target, input
+            .element_value(value)
+            .copy_reference(*target, ctx.get_owner_data(target))))
+    }
+}
 
 impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirArrayInit {
     fn eval(
