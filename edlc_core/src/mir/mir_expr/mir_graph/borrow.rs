@@ -26,15 +26,16 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirRef, MirValue, ValueScope};
+use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirRef, MirValue, ValueScope};
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
-use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
+use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement, LogicSolver, WorkListFixpointForward};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::{collections, mem, ops};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
+use crate::prelude::mir_type::MirTypeId;
 
 /// The type of borrow.
 /// A borrow can be either complete or partial.
@@ -188,6 +189,7 @@ pub struct BorrowTree {
     /// Indices into the `leaves` pool containing all root leaves *own the source*
     owners: Vec<usize>,
     scope: ValueScope,
+    pub(crate) src_type: MirTypeId,
 }
 
 pub enum ScopeCheck {
@@ -263,11 +265,19 @@ impl BorrowTree {
         // lifetime
         let mut scope = ValueScope::default();
         let mut owners = Vec::new();
+        let mut ty = None;
         for (idx, leaf) in leaves[..root_leaves].iter().enumerate() {
             let Some(state) = data.get(leaf) else {
                 continue;
             };
             if state.is_owner() {
+                let var_ty = *ctx.cfg.get_var_type(leaf);
+                if let Some(ty) = ty.as_ref() {
+                    assert_eq!(*ty, var_ty);
+                } else {
+                    ty = Some(var_ty);
+                }
+
                 owners.push(idx);
                 let leaf_scope = ctx.cfg.var_scopes.get(leaf);
                 scope = leaf_scope.try_join(scope).expect("invalid scoping for owner data");
@@ -294,6 +304,7 @@ impl BorrowTree {
             leaves,
             owners,
             scope,
+            src_type: ty.unwrap(),
         }
     }
 
@@ -325,7 +336,7 @@ impl BorrowTree {
     }
 
     /// Returns the owners of the value
-    fn get_owners(&self) -> impl DoubleEndedIterator<Item = &MirValue> {
+    pub fn get_owners(&self) -> impl DoubleEndedIterator<Item = &MirValue> {
         self.owners
             .iter()
             .map(|idx| &self.leaves[*idx])
@@ -665,7 +676,7 @@ impl BorrowForest {
             .map(|tree| tree.iter_non_diverging(&path.stack.stack[..]))
     }
 
-    fn iter(&self) -> collections::hash_map::Iter<'_, BorrowSource, BorrowTree> {
+    pub fn iter(&self) -> collections::hash_map::Iter<'_, BorrowSource, BorrowTree> {
         self.trees.iter()
     }
 }
@@ -753,6 +764,7 @@ pub struct BorrowGraph {
     /// The transitive properties of [OwnerData] are not recorded in here.
     owner_references: IndexMap<OwnerData>,
     owner_reverse: IndexMap<MirValue>,
+    owner_counter: usize,
 }
 
 pub struct LivenessReport {
@@ -778,7 +790,43 @@ impl BorrowGraph {
             graph,
             owner_references: ctx.owner_references,
             owner_reverse: ctx.owner_reverse,
+            owner_counter: ctx.owner_counter,
         }
+    }
+
+    /// Performs an update on the borrowing graph.
+    /// The graph is updated to the newest version of the CFG without a total recomputation from the
+    /// ground up.
+    /// This is only possible if there are only additions to the CFG, no deletions!
+    pub fn partial_update(
+        &mut self,
+        cfg: &MirFlowGraph,
+        mir_types: &MirTypeRegistry,
+    ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
+        let mut owner_references = IndexMap::default();
+        let mut owner_reverse = IndexMap::default();
+        mem::swap(&mut self.owner_references, &mut owner_references);
+        mem::swap(&mut self.owner_reverse, &mut owner_reverse);
+
+        let borrow_state = BorrowContext {
+            cfg,
+            reg: mir_types,
+            owner_counter: self.owner_counter,
+            owner_references,
+            owner_reverse,
+        };
+
+        let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
+        mem::swap(&mut state.0.map, &mut self.graph);
+        WorkListFixpointForward.solve(cfg, &mut state, BorrowState::upper)?;
+        // swap values back into self
+        mem::swap(&mut state.0.map, &mut self.graph);
+        mem::swap(&mut state.1.owner_references, &mut self.owner_references);
+        mem::swap(&mut state.1.owner_reverse, &mut self.owner_reverse);
+        self.owner_counter = state.1.owner_counter;
+
+        // TODO update borrow forest
+        Ok(())
     }
 
     /// Returns the scope of the borrow source.
@@ -850,6 +898,13 @@ impl BorrowGraph {
             .get(value)
             .expect("borrow state not recorded for value");
         state.is_owner()
+    }
+
+    pub fn is_reference(&self, value: &MirValue) -> bool {
+        let state = self.graph
+            .get(value)
+            .expect("borrow state not recorded for value");
+        state.is_reference()
     }
 
     /// Iterates all owner data instances that are owned by `value`.
@@ -1109,7 +1164,7 @@ impl PartialBorrowStack {
 /// Specifically, it can be used to analyse the transitive states of asynchronous data.
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 pub struct BorrowPath {
-    source: BorrowSource,
+    pub(crate) source: BorrowSource,
     stack: PartialBorrowStack,
     path: Vec<MirValue>,
 }

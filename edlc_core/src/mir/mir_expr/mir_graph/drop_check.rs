@@ -16,13 +16,13 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::collections::{HashMap, HashSet};
 use crate::core::index_map::IndexMap;
-use crate::mir::mir_expr::{BlockCall, MirBlockRef, MirFlowGraph, MirValue};
 use crate::mir::mir_expr::lifetime_analysis::RegionLifenessList;
-use crate::mir::mir_expr::mir_graph::borrow::OwnerData;
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowSource, OwnerData};
 use crate::mir::mir_expr::mir_graph::{Block, BorrowGraph, Seal};
-use crate::mir::mir_type::MirTypeId;
+use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use std::collections::HashSet;
 
 impl MirFlowGraph {
     /// Inserts manual drops for all values that need dropping.
@@ -43,6 +43,36 @@ impl MirFlowGraph {
         lifetimes: &RegionLifenessList,
     ) {
         todo!()
+    }
+
+    pub fn route_owner_data(
+        &mut self,
+        borrow_graph: &mut BorrowGraph,
+        reg: &MirTypeRegistry,
+    ) {
+        for block_index in 0..self.blocks.len() {
+            let block_ref = MirBlockRef(block_index);
+            let block = &self.blocks[block_index];
+
+            let mut vars_used = HashSet::new();
+            block.iter_value_uses(block_ref, &self.expressions, |u| {
+                vars_used.insert(*u.temp_var());
+            });
+            for var in vars_used.into_iter() {
+                let Some(sources) = borrow_graph.get_paths(&var) else {
+                    continue;
+                };
+                for path in sources.iter() {
+                    let BorrowSource::Local(owner_data) = path.source else {
+                        continue; // skip non-local sources
+                    };
+                    let ty = borrow_graph.forest[path.source].src_type;
+                    self.route_data(&owner_data, ty, block_ref, borrow_graph);
+                    // borrow_graph.partial_update(self, reg).unwrap();
+                    // TODO update borrow graph
+                }
+            }
+        }
     }
 
     /// Routes a single value to the place were it is dropped.
@@ -99,11 +129,11 @@ impl MirFlowGraph {
                 let val = self.create_temp_variable(ty);
                 self.blocks[dominator.0].add_sealing_parameter_unchecked(&block_ref, index, val);
                 created_vars.view_mut(dominator.0).set(val);
-                worklist.push((dominator, val));
+                if !worklist.contains(&(dominator, val)) {
+                    worklist.push((dominator, val));
+                }
             }
-
         }
-
         output_value
     }
 
