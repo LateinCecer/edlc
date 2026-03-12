@@ -187,9 +187,10 @@ impl TestCompiler {
 
 
         // do scope checking
-        let borrow_graph = body.borrows(&self.compiler.mir_phase.types)?;
+        let mut borrow_graph = body.borrows(&self.compiler.mir_phase.types)?;
         let report = body.check_scopes(&borrow_graph);
         report.print();
+        body.route_owner_data(&mut borrow_graph, &self.compiler.mir_phase.types)?;
 
         // body.constant_analysis()?;
         // println!("doing lifetime analysis");

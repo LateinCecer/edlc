@@ -18,11 +18,23 @@
  */
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::lifetime_analysis::RegionLifenessList;
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowSource, OwnerData};
-use crate::mir::mir_expr::mir_graph::{Block, BorrowGraph, Seal};
-use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowSource, OwnerData};
+use crate::mir::mir_expr::mir_graph::{Block, BorrowGraph, Seal, Statement, VarUse};
+use crate::mir::mir_expr::{BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirFlowGraph, MirValue};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use std::collections::HashSet;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LocalVarUsage {
+    Statement(BlockLocalStatementUid),
+    Seal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum LocalVarDef {
+    Definition(BlockLocalStatementUid),
+    Parameter(BlockParameterIndex),
+}
 
 impl MirFlowGraph {
     /// Inserts manual drops for all values that need dropping.
@@ -42,6 +54,7 @@ impl MirFlowGraph {
         borrow_graph: &BorrowGraph,
         lifetimes: &RegionLifenessList,
     ) {
+
         todo!()
     }
 
@@ -49,30 +62,38 @@ impl MirFlowGraph {
         &mut self,
         borrow_graph: &mut BorrowGraph,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), BorrowConflict> {
         for block_index in 0..self.blocks.len() {
             let block_ref = MirBlockRef(block_index);
             let block = &self.blocks[block_index];
 
-            let mut vars_used = HashSet::new();
-            block.iter_value_uses(block_ref, &self.expressions, |u| {
-                vars_used.insert(*u.temp_var());
-            });
-            for var in vars_used.into_iter() {
-                let Some(sources) = borrow_graph.get_paths(&var) else {
-                    continue;
+            let var_uses = block.collect_all_uses(block_ref, &self.expressions);
+            let mut requirements = HashSet::new();
+            for var_use in var_uses.into_iter() {
+                let (val, local_use) = match var_use {
+                    VarUse::Statement(_block, val, uid) => {
+                        (val, LocalVarUsage::Statement(uid))
+                    },
+                    VarUse::Seal(_block, val) => {
+                        (val, LocalVarUsage::Seal)
+                    },
                 };
-                for path in sources.iter() {
-                    let BorrowSource::Local(owner_data) = path.source else {
-                        continue; // skip non-local sources
-                    };
-                    let ty = borrow_graph.forest[path.source].src_type;
-                    self.route_data(&owner_data, ty, block_ref, borrow_graph);
-                    // borrow_graph.partial_update(self, reg).unwrap();
-                    // TODO update borrow graph
+                let ty = *self.get_var_type(&val);
+                if let Some(state) = borrow_graph.iter_paths(&val) {
+                    state.for_each(|path| {
+                        requirements.insert((path.source, local_use, ty));
+                    });
                 }
             }
+
+            // routing requirements collected. enforcing...
+            for (src, local_use, ty) in requirements.into_iter() {
+                self.route_data(&src, &local_use, ty, block_ref, borrow_graph);
+                borrow_graph.partial_update(self, reg)?;
+            }
         }
+        borrow_graph.update_forest(self, reg)?;
+        Ok(())
     }
 
     /// Routes a single value to the place were it is dropped.
@@ -85,7 +106,8 @@ impl MirFlowGraph {
     /// This method returns the [MirValue] representation of `data` in `start`.
     fn route_data(
         &mut self,
-        data: &OwnerData,
+        data: &BorrowSource,
+        point: &LocalVarUsage,
         ty: MirTypeId,
         start: MirBlockRef,
         borrow_graph: &BorrowGraph,
@@ -95,20 +117,20 @@ impl MirFlowGraph {
 
         // find usage point
         let mut worklist = vec![];
-        let output_value = if let Some(owner) = self
-            .find_data_owner(&start, data, borrow_graph) {
+        let output_value = if let Some((owner, _def_point)) = self
+            .find_data_owner(&start, data, point, borrow_graph) {
             // add to block calls in sealing statement
             return owner;
         } else {
             // create new value
             let value = self.create_temp_variable(ty);
-            worklist.push((start, value));
+            worklist.push((start, value, *point));
             value
         };
 
-        while let Some((block_ref, value)) = worklist.pop() {
+        while let Some((block_ref, value, use_point)) = worklist.pop() {
             let index = self
-                .add_block_parameter(&block_ref, data, &value, borrow_graph);
+                .add_block_parameter(&block_ref, data, &use_point, &value, borrow_graph);
             for dominator in self.backlinks[block_ref.0].clone().into_iter() {
                 let sealing_hash = (dominator, block_ref);
                 if updated_sealing_statements.contains(&sealing_hash) {
@@ -120,7 +142,7 @@ impl MirFlowGraph {
                     self.blocks[dominator.0].add_sealing_parameter_unchecked(&block_ref, index, *val);
                     continue;
                 }
-                if let Some(data) = self.find_data_owner(&dominator, data, borrow_graph) {
+                if let Some((data, _def_point)) = self.find_data_owner(&dominator, data, &use_point, borrow_graph) {
                     self.blocks[dominator.0].add_sealing_parameter_unchecked(&block_ref, index, data);
                     continue;
                 }
@@ -129,8 +151,8 @@ impl MirFlowGraph {
                 let val = self.create_temp_variable(ty);
                 self.blocks[dominator.0].add_sealing_parameter_unchecked(&block_ref, index, val);
                 created_vars.view_mut(dominator.0).set(val);
-                if !worklist.contains(&(dominator, val)) {
-                    worklist.push((dominator, val));
+                if !worklist.contains(&(dominator, val, LocalVarUsage::Seal)) {
+                    worklist.push((dominator, val, LocalVarUsage::Seal));
                 }
             }
         }
@@ -142,11 +164,12 @@ impl MirFlowGraph {
     fn add_block_parameter(
         &mut self,
         block: &MirBlockRef,
-        src: &OwnerData,
+        src: &BorrowSource,
+        point: &LocalVarUsage,
         value: &MirValue,
         borrow_graph: &BorrowGraph,
     ) -> usize {
-        assert!(self.find_data_owner(block, src, borrow_graph).is_none());
+        assert!(self.find_data_owner(block, src, point, borrow_graph).is_none());
         let block = &mut self.blocks[block.0];
         let idx = block.parameters.len();
         block.parameters.push(*value);
@@ -157,19 +180,12 @@ impl MirFlowGraph {
     fn find_data_owner(
         &self,
         block_ref: &MirBlockRef,
-        owner_data: &OwnerData,
+        owner_data: &BorrowSource,
+        point: &LocalVarUsage,
         borrow_graph: &BorrowGraph,
-    ) -> Option<MirValue> {
+    ) -> Option<(MirValue, LocalVarDef)> {
         let block = &self.blocks[block_ref.0];
-        let mut owner = None;
-        block.iter_value_defines(*block_ref, |_point, val| {
-            if borrow_graph.iter_owner_data(&val)
-                .find(|d| *d == owner_data)
-                .is_some() {
-                owner = Some(val);
-            }
-        });
-        owner
+        block.find_data_owner(owner_data, point, borrow_graph)
     }
 
     /// Makes sure that there are no loose ends for any data source.
@@ -181,6 +197,40 @@ impl MirFlowGraph {
 }
 
 impl Block {
+    fn find_data_owner(
+        &self,
+        owner_data: &BorrowSource,
+        point: &LocalVarUsage,
+        borrow_graph: &BorrowGraph,
+    ) -> Option<(MirValue, LocalVarDef)> {
+        let idx = match point {
+            LocalVarUsage::Statement(uid) => {
+                let idx = self
+                    .find_current_index(uid)
+                    .expect("block does not contain the specified block local uid!");
+                idx
+            },
+            LocalVarUsage::Seal => self.statements.len(),
+        };
+
+        for item in self.statements[..idx].iter().rev() {
+            if let Some(var) = item.defines_owner(owner_data, borrow_graph) {
+                return Some((*var, LocalVarDef::Definition(*item.uid())));
+            }
+        }
+
+        self.parameters
+            .iter()
+            .enumerate()
+            .find_map(|(idx, param_var)| {
+                if borrow_graph.borrows_from_source(param_var, owner_data) {
+                    Some((*param_var, LocalVarDef::Parameter(BlockParameterIndex(idx))))
+                } else {
+                    None
+                }
+            })
+    }
+
     fn add_sealing_parameter_unchecked(&mut self, target: &MirBlockRef, index: usize, val: MirValue) {
         match &mut self.seal {
 
@@ -206,6 +256,24 @@ impl Block {
                 }
             }
             _ => (),
+        }
+    }
+}
+
+impl Statement {
+    /// Checks if the statement defines a variable that owns `owner_data` in the specified
+    /// `borrow_graph`.
+    /// If that is the case, the MIR value is returned.
+    fn defines_owner(
+        &self,
+        owner_data: &BorrowSource,
+        borrow_graph: &BorrowGraph,
+    ) -> Option<&MirValue> {
+        let defines = self.get_defines()?;
+        if borrow_graph.borrows_from_source(defines, owner_data) {
+            Some(defines)
+        } else {
+            None
         }
     }
 }

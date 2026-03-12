@@ -35,6 +35,7 @@ use std::fmt::{Display, Formatter};
 use std::{collections, mem, ops};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
+use crate::ast::ast_expression::ast_block::BlockReason;
 use crate::prelude::mir_type::MirTypeId;
 
 /// The type of borrow.
@@ -798,34 +799,61 @@ impl BorrowGraph {
     /// The graph is updated to the newest version of the CFG without a total recomputation from the
     /// ground up.
     /// This is only possible if there are only additions to the CFG, no deletions!
+    ///
+    /// # Borrow Forest
+    ///
+    /// This method does not update the internal borrow forest – only the basic borrow graph.
     pub fn partial_update(
         &mut self,
         cfg: &MirFlowGraph,
         mir_types: &MirTypeRegistry,
     ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
+        let ctx = self.swap_out_borrow_ctx(cfg, mir_types);
+        let mut state = MirGraphState::<BorrowState, BorrowContext>::new(ctx);
+        mem::swap(&mut state.0.map, &mut self.graph);
+        WorkListFixpointForward.solve(cfg, &mut state, BorrowState::upper)?;
+        // swap values back into self
+        mem::swap(&mut state.0.map, &mut self.graph);
+        self.swap_in_borrow_ctx(state.1);
+        Ok(())
+    }
+
+    fn swap_out_borrow_ctx<'reg>(
+        &mut self,
+        cfg: &'reg MirFlowGraph,
+        mir_types: &'reg MirTypeRegistry,
+    ) -> BorrowContext<'reg> {
         let mut owner_references = IndexMap::default();
         let mut owner_reverse = IndexMap::default();
         mem::swap(&mut self.owner_references, &mut owner_references);
         mem::swap(&mut self.owner_reverse, &mut owner_reverse);
 
-        let borrow_state = BorrowContext {
+        BorrowContext {
             cfg,
             reg: mir_types,
             owner_counter: self.owner_counter,
             owner_references,
             owner_reverse,
-        };
+        }
+    }
 
-        let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
-        mem::swap(&mut state.0.map, &mut self.graph);
-        WorkListFixpointForward.solve(cfg, &mut state, BorrowState::upper)?;
-        // swap values back into self
-        mem::swap(&mut state.0.map, &mut self.graph);
-        mem::swap(&mut state.1.owner_references, &mut self.owner_references);
-        mem::swap(&mut state.1.owner_reverse, &mut self.owner_reverse);
-        self.owner_counter = state.1.owner_counter;
+    fn swap_in_borrow_ctx(
+        &mut self,
+        mut ctx: BorrowContext,
+    ) {
+        mem::swap(&mut ctx.owner_references, &mut self.owner_references);
+        mem::swap(&mut ctx.owner_reverse, &mut self.owner_reverse);
+        self.owner_counter = ctx.owner_counter;
+    }
 
-        // TODO update borrow forest
+    pub fn update_forest(
+        &mut self,
+        cfg: &MirFlowGraph,
+        mir_types: &MirTypeRegistry,
+    ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
+        let ctx = self.swap_out_borrow_ctx(cfg, mir_types);
+        self.forest = BorrowForest::new(&self.graph, &ctx);
+        self.swap_in_borrow_ctx(ctx);
         Ok(())
     }
 
@@ -980,6 +1008,15 @@ impl BorrowGraph {
 
     pub fn get_paths(&self, value: &MirValue) -> Option<&BorrowState> {
         self.graph.get(value)
+    }
+
+    /// Checks if a MIR value borrows from a borrowing source.
+    pub fn borrows_from_source(&self, value: &MirValue, src: &BorrowSource) -> bool {
+        if let Some(state) = self.graph.get(value) {
+            state.iter().any(|path| &path.source == src)
+        } else {
+            false
+        }
     }
 
     pub fn print(&self) {

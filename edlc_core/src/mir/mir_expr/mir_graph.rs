@@ -240,7 +240,7 @@ pub struct MirFlowGraph {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct BlockParameterIndex(usize);
+pub struct BlockParameterIndex(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockCall {
@@ -922,6 +922,14 @@ impl Block {
             if var_use.temp_var() == var {
                 collection.push(var_use);
             }
+        });
+        collection
+    }
+
+    fn collect_all_uses(&self, block_ref: MirBlockRef, expr_container: &MirExprContainer) -> Vec<VarUse> {
+        let mut collection = Vec::new();
+        self.iter_value_uses(block_ref, expr_container, |var_use| {
+            collection.push(var_use);
         });
         collection
     }
