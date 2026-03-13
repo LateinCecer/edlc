@@ -21,7 +21,7 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
@@ -36,6 +36,9 @@ use std::{collections, mem, ops};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
 use crate::ast::ast_expression::ast_block::BlockReason;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::prelude::mir_type::MirTypeId;
 
 /// The type of borrow.
@@ -50,6 +53,12 @@ enum BorrowType {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OwnerData(usize);
+
+impl Display for OwnerData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "$owner {:x}", self.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BorrowSource {
@@ -206,7 +215,11 @@ impl BorrowTree {
     fn build(
         source: &BorrowSource,
         data: &HashMap<MirValue, BorrowState>,
-        ctx: &BorrowContext,
+        owner_reverse: &IndexMap<MirValue>,
+        cfg: &MirFlowGraph,
+        reg: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
     ) -> Self {
         let mut paths = HashMap::<PartialBorrowStack, HashSet<MirValue>>::new();
         for (var, state) in data.iter() {
@@ -214,6 +227,11 @@ impl BorrowTree {
                 if &path.source == source {
                     // this path needs to be part of this tree
                     paths.entry(path.stack.clone()).or_insert_with(HashSet::new).insert(*var);
+                }
+            }
+            for owned in state.owners.iter() {
+                if matches!(source, BorrowSource::Local(s) if s == owned) {
+                    paths.entry(PartialBorrowStack::default()).or_insert_with(HashSet::new).insert(*var);
                 }
             }
         }
@@ -271,8 +289,8 @@ impl BorrowTree {
             let Some(state) = data.get(leaf) else {
                 continue;
             };
-            if state.is_owner() {
-                let var_ty = *ctx.cfg.get_var_type(leaf);
+            if state.owners.iter().any(|od| matches!(source, BorrowSource::Local(o) if o == od)) {
+                let var_ty = *cfg.get_var_type(leaf);
                 if let Some(ty) = ty.as_ref() {
                     assert_eq!(*ty, var_ty);
                 } else {
@@ -280,19 +298,25 @@ impl BorrowTree {
                 }
 
                 owners.push(idx);
-                let leaf_scope = ctx.cfg.var_scopes.get(leaf);
+                let leaf_scope = cfg.var_scopes.get(leaf);
                 scope = leaf_scope.try_join(scope).expect("invalid scoping for owner data");
             }
+        }
+
+        if let BorrowSource::Global(var_id) = source {
+            let var_ty = edl_vars.get_var_type(*var_id).unwrap();
+            let var_ty = reg.mir_id(var_ty, edl_types).unwrap();
+            ty = Some(var_ty);
         }
 
         // if the scope is still `Local` then we find the scope in which the data was originally
         // defined
         if scope == ValueScope::Local {
             scope = if let BorrowSource::Local(var) = source {
-                let def = ctx.owner_reverse[var.0];
-                let block_ref = ctx.cfg.find_block(&def)
+                let def = owner_reverse[var.0];
+                let block_ref = cfg.find_block(&def)
                     .expect("variable is not defined anywhere");
-                ValueScope::Block(ctx.cfg.get_block_scope(&block_ref))
+                ValueScope::Block(cfg.get_block_scope(&block_ref))
             } else {
                 ValueScope::Global
             };
@@ -376,7 +400,7 @@ impl BorrowTree {
 
     /// Performs a breath-first search on all leave nodes of the tree that are reachable from after
     /// the specified sequence of partial borrows.
-    fn traverse(&self, path: &[MemberOffset]) -> Option<TreeIter<'_>> {
+    pub(crate) fn traverse(&self, path: &[MemberOffset]) -> Option<TreeIter<'_>> {
         let mut children_range = 0..self.root_children;
         let mut leaves_range = 0..self.root_leaves;
         for segment in path {
@@ -399,7 +423,7 @@ impl BorrowTree {
 
     /// For the record, this effectively does the same thing as
     /// `BorrowTree::traverse(&[]).unwrap()`.
-    fn iter(&self) -> TreeIter<'_> {
+    pub(crate) fn iter(&self) -> TreeIter<'_> {
         TreeIter {
             stack: VecDeque::from_iter(0..self.root_children),
             leave_id: 0,
@@ -409,7 +433,7 @@ impl BorrowTree {
     }
 
     /// Iterates over all paths that are non-divergent from the specified partial borrowing path.
-    fn iter_non_diverging<'path>(&self, path: &'path [MemberOffset]) -> NonDivergentTreeIter<'_, 'path> {
+    pub(crate) fn iter_non_diverging<'path>(&self, path: &'path [MemberOffset]) -> NonDivergentTreeIter<'_, 'path> {
         NonDivergentTreeIter {
             stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
             leave_id: 0,
@@ -419,7 +443,7 @@ impl BorrowTree {
         }
     }
 
-    fn iter_nodes<'path>(&self, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+    pub(crate) fn iter_nodes<'path>(&self, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
         IterNonDivergentNodes {
             stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
             tree: self,
@@ -430,7 +454,7 @@ impl BorrowTree {
 
     /// Performs a breadth-first traversal through the nodes of the tree starting from `starting`
     /// while limiting the traversal to nodes that can be reached within `path`.
-    fn iter_nodes_after<'path>(&self, starting: NodeId, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+    pub(crate) fn iter_nodes_after<'path>(&self, starting: NodeId, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
         if starting == Self::root_node() {
             return self.iter_nodes(path);
         }
@@ -445,7 +469,7 @@ impl BorrowTree {
 
     /// Traverses the tree in reverse, starting from the `start` node and ending in the root node
     /// of the tree.
-    fn iter_rev(&self, start: NodeId) -> IterParents<'_> {
+    pub(crate) fn iter_rev(&self, start: NodeId) -> IterParents<'_> {
         IterParents {
             node: Some(start),
             tree: self,
@@ -515,7 +539,7 @@ impl Index<NodeId> for BorrowTree {
     }
 }
 
-struct TreeIter<'a> {
+pub struct TreeIter<'a> {
     tree: &'a BorrowTree,
     stack: VecDeque<usize>,
     leave_id: usize,
@@ -544,7 +568,7 @@ impl<'a> Iterator for TreeIter<'a> {
     }
 }
 
-struct NonDivergentTreeIter<'a, 'b> {
+pub struct NonDivergentTreeIter<'a, 'b> {
     tree: &'a BorrowTree,
     stack: VecDeque<(usize, usize)>,
     leave_id: usize,
@@ -646,7 +670,11 @@ pub struct BorrowForest {
 impl BorrowForest {
     fn new(
         graph: &HashMap<MirValue, BorrowState>,
-        ctx: &BorrowContext,
+        cfg: &MirFlowGraph,
+        owner_reverse: &IndexMap<MirValue>,
+        reg: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
     ) -> Self {
         // collect all sources
         let mut sources = HashSet::new();
@@ -655,7 +683,7 @@ impl BorrowForest {
         });
         let mut trees = HashMap::new();
         for source in sources.iter() {
-            let tree = BorrowTree::build(source, graph, ctx);
+            let tree = BorrowTree::build(source, graph, owner_reverse, cfg, reg, edl_types, edl_vars);
             trees.insert(*source, tree);
         }
         BorrowForest { trees }
@@ -679,6 +707,10 @@ impl BorrowForest {
 
     pub fn iter(&self) -> collections::hash_map::Iter<'_, BorrowSource, BorrowTree> {
         self.trees.iter()
+    }
+
+    pub fn get(&self, src: &BorrowSource) -> Option<&BorrowTree> {
+        self.trees.get(src)
     }
 }
 
@@ -784,14 +816,20 @@ impl IntoIterator for LivenessReport {
 impl BorrowGraph {
     pub fn new(
         graph: HashMap<MirValue, BorrowState>,
-        ctx: BorrowContext,
+        owner_references: IndexMap<OwnerData>,
+        owner_reverse: IndexMap<MirValue>,
+        owner_counter: usize,
+        cfg: &MirFlowGraph,
+        reg: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
     ) -> Self {
         BorrowGraph {
-            forest: BorrowForest::new(&graph, &ctx),
+            forest: BorrowForest::new(&graph, cfg, &owner_reverse, reg, edl_types, edl_vars),
             graph,
-            owner_references: ctx.owner_references,
-            owner_reverse: ctx.owner_reverse,
-            owner_counter: ctx.owner_counter,
+            owner_references,
+            owner_reverse,
+            owner_counter,
         }
     }
 
@@ -849,11 +887,11 @@ impl BorrowGraph {
     pub fn update_forest(
         &mut self,
         cfg: &MirFlowGraph,
-        mir_types: &MirTypeRegistry,
+        mir_types: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
     ) -> Result<(), <BorrowState as LatticeElement>::Conflict> {
-        let ctx = self.swap_out_borrow_ctx(cfg, mir_types);
-        self.forest = BorrowForest::new(&self.graph, &ctx);
-        self.swap_in_borrow_ctx(ctx);
+        self.forest = BorrowForest::new(&self.graph, cfg, &self.owner_reverse, mir_types, edl_types, edl_vars);
         Ok(())
     }
 
@@ -936,11 +974,10 @@ impl BorrowGraph {
     }
 
     /// Iterates all owner data instances that are owned by `value`.
-    pub fn iter_owner_data(&self, value: &MirValue) -> collections::hash_set::Iter<'_, OwnerData> {
-        let state = self.graph
+    pub fn iter_owner_data(&self, value: &MirValue) -> Option<collections::hash_set::Iter<'_, OwnerData>> {
+        self.graph
             .get(value)
-            .expect("borrow state not recorded for value");
-        state.owners.iter()
+            .map(|state| state.owners.iter())
     }
 
     /// A value can be alive at a certain point exactly when all values that it borrows from can
@@ -1020,11 +1057,22 @@ impl BorrowGraph {
     }
 
     pub fn print(&self) {
+        println!(" $  Borrowing-Graph  $");
         for (value, state) in self.graph.iter() {
             if state.is_default() {
                 continue;
             }
-            print!(" - ${} borrows {{", value.0);
+            print!(" - ${:x} (", value.0);
+            let mut first = true;
+            for owner in state.owners.iter() {
+                if first {
+                    first = false;
+                } else {
+                    print!(", ");
+                }
+                print!("{}", owner);
+            }
+            print!(") borrows {{");
             let mut first = true;
             for path in state.set.iter() {
                 if first {
@@ -1043,7 +1091,7 @@ impl Display for BorrowSource {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             BorrowSource::Local(val) => {
-                write!(f, "${:x}", val.0)
+                write!(f, "{}", val)
             }
             BorrowSource::Global(val) => {
                 write!(f, "$global {:x}", val.0)
@@ -1105,9 +1153,9 @@ impl Display for Borrow {
 pub struct BorrowContext<'reg> {
     reg: &'reg MirTypeRegistry,
     cfg: &'reg MirFlowGraph,
-    owner_counter: usize,
-    owner_references: IndexMap<OwnerData>,
-    owner_reverse: IndexMap<MirValue>,
+    pub(crate) owner_counter: usize,
+    pub(crate) owner_references: IndexMap<OwnerData>,
+    pub(crate) owner_reverse: IndexMap<MirValue>,
 }
 
 impl<'reg> BorrowContext<'reg> {
@@ -1253,7 +1301,7 @@ impl BorrowPath {
 
 impl Display for BorrowPath {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}[", self.source)?;
+        write!(f, "SRC = {}[", self.source)?;
         for (i, offset) in self.stack.stack.iter().enumerate() {
             if i > 0 {
                 write!(f, " -> ")?;
@@ -1274,7 +1322,7 @@ pub struct BorrowState {
 
 impl IsDefault for BorrowState {
     fn is_default(&self) -> bool {
-        self.set.is_empty()
+        self.set.is_empty() && self.owners.is_empty()
     }
 }
 
@@ -1489,6 +1537,30 @@ impl<'reg> TransferMove<BorrowContext<'reg>> for BorrowState {
         Ok(input.replace(target, input
             .element_value(value)
             .copy_reference(*target, ctx.get_owner_data(target))))
+    }
+}
+
+impl<'reg> TransferDrop<BorrowContext<'reg>> for BorrowState {}
+impl<'reg> TransferSync<BorrowContext<'reg>> for BorrowState {}
+impl<'reg> TransferRecord<BorrowContext<'reg>> for BorrowState {
+    /// Recording a synchronization event creates a new event value.
+    /// This cannot borrow from anything and, since the value is not available in the front-end
+    /// of the compiler at all, it can also not be referenced.
+    /// However, we still need to make sure that the event is available in the borrow tree as a
+    /// data source to keep consistent with SSA value deconstruction.
+    fn transfer_record(
+        event: &SyncEvent,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut BorrowContext<'reg>,
+        _loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.replace(
+            &event.internal_value,
+            BorrowState::raw_data(
+                ctx.get_owner_data(&event.internal_value),
+                true
+            ),
+        ))
     }
 }
 

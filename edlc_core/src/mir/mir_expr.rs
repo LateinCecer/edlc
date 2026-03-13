@@ -79,9 +79,7 @@ pub enum MirExprVariant {
     Variable,
     Constant,
     Assign,
-    Let,
     Data,
-    Offset,
     Init,
     Ref,
     Deref,
@@ -97,9 +95,7 @@ pub struct MirExprContainer {
     variables: Vec<MirGlobalVar>,
     constants: Vec<MirConstant>,
     assigns: Vec<MirAssign>,
-    lets: Vec<MirLet>,
     data: Vec<MirData>,
-    offsets: Vec<MirOffset>,
     type_inits: Vec<MirTypeInit>,
     refs: Vec<MirRef>,
     derefs: Vec<MirDeref>,
@@ -131,9 +127,7 @@ impl MirExprContainer {
             MirExprVariant::Variable => self.variables[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Constant => self.constants[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Assign => self.assigns[expr.id].execute(vm, stack_frame, target, reg),
-            MirExprVariant::Let => { todo!() }
             MirExprVariant::Data => self.data[expr.id].execute(vm, stack_frame, target, reg),
-            MirExprVariant::Offset => { todo!() }
             MirExprVariant::Init => self.type_inits[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Ref => self.refs[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::Deref => self.derefs[expr.id].execute(vm, stack_frame, target, reg),
@@ -156,9 +150,7 @@ impl MirExprContainer {
             MirExprVariant::Variable => self.variables[expr.id].is_comptime(),
             MirExprVariant::Constant => self.constants[expr.id].is_comptime(),
             MirExprVariant::Assign => self.assigns[expr.id].is_comptime(frame, graph),
-            MirExprVariant::Let => { todo!() },
             MirExprVariant::Data => self.data[expr.id].is_comptime(),
-            MirExprVariant::Offset => { todo!() },
             MirExprVariant::Init => self.type_inits[expr.id].is_comptime(frame, graph),
             MirExprVariant::Ref => self.refs[expr.id].is_comptime(frame, graph),
             MirExprVariant::Deref => self.derefs[expr.id].is_comptime(frame, graph),
@@ -176,9 +168,7 @@ impl MirExprContainer {
             MirExprVariant::Variable => self.variables[expr.id].collect_vars(),
             MirExprVariant::Constant => self.constants[expr.id].collect_vars(),
             MirExprVariant::Assign => self.assigns[expr.id].collect_vars(),
-            MirExprVariant::Let => self.lets[expr.id].collect_vars(),
             MirExprVariant::Data => self.data[expr.id].collect_vars(),
-            MirExprVariant::Offset => self.data[expr.id].collect_vars(),
             MirExprVariant::Init => self.type_inits[expr.id].collect_vars(),
             MirExprVariant::Ref => self.refs[expr.id].collect_vars(),
             MirExprVariant::Deref => self.derefs[expr.id].collect_vars(),
@@ -195,9 +185,7 @@ impl MirExprContainer {
             MirExprVariant::Variable => self.variables[expr.id].uses_var(val),
             MirExprVariant::Constant => self.constants[expr.id].uses_var(val),
             MirExprVariant::Assign => self.assigns[expr.id].uses_var(val),
-            MirExprVariant::Let => self.lets[expr.id].uses_var(val),
             MirExprVariant::Data => self.data[expr.id].uses_var(val),
-            MirExprVariant::Offset => self.data[expr.id].uses_var(val),
             MirExprVariant::Init => self.type_inits[expr.id].uses_var(val),
             MirExprVariant::Ref => self.refs[expr.id].uses_var(val),
             MirExprVariant::Deref => self.derefs[expr.id].uses_var(val),
@@ -216,9 +204,7 @@ impl MirExprContainer {
             MirExprVariant::Variable => self.variables[expr.id].replace_var(var, repl),
             MirExprVariant::Constant => self.constants[expr.id].replace_var(var, repl),
             MirExprVariant::Assign => self.assigns[expr.id].replace_var(var, repl),
-            MirExprVariant::Let => self.lets[expr.id].replace_var(var, repl),
             MirExprVariant::Data => self.data[expr.id].replace_var(var, repl),
-            MirExprVariant::Offset => self.data[expr.id].replace_var(var, repl),
             MirExprVariant::Init => self.type_inits[expr.id].replace_var(var, repl),
             MirExprVariant::Ref => self.refs[expr.id].replace_var(var, repl),
             MirExprVariant::Deref => self.derefs[expr.id].replace_var(var, repl),
@@ -306,27 +292,11 @@ impl MirExprContainer {
         }
     }
 
-    pub fn insert_let(&mut self, expr: MirLet) -> MirExprId {
-        self.lets.push(expr);
-        MirExprId {
-            id: self.lets.len() - 1,
-            ty: MirExprVariant::Let,
-        }
-    }
-
     pub fn insert_data(&mut self, expr: MirData) -> MirExprId {
         self.data.push(expr);
         MirExprId {
             id: self.data.len() - 1,
             ty: MirExprVariant::Data,
-        }
-    }
-
-    pub fn insert_offset(&mut self, expr: MirOffset) -> MirExprId {
-        self.offsets.push(expr);
-        MirExprId {
-            id: self.offsets.len() - 1,
-            ty: MirExprVariant::Offset,
         }
     }
 
@@ -372,14 +342,8 @@ impl MirExprContainer {
             MirExprVariant::Assign => {
                 reg.empty()
             }
-            MirExprVariant::Let => {
-                reg.empty()
-            }
             MirExprVariant::Data => {
                 self.data[expr.id].ty
-            }
-            MirExprVariant::Offset => {
-                self.offsets[expr.id].ty
             }
             MirExprVariant::Init => {
                 self.type_inits[expr.id].ty

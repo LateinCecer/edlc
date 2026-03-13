@@ -35,7 +35,7 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
@@ -46,6 +46,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{BitOr, Range};
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 
 /// Lifetime analysis data for a MIR call graph.
 /// Since we perform this lifetime analysis on SSA values that are not necessarily linked to
@@ -412,6 +413,41 @@ impl TransferMove<LifetimeAnalysis> for LifetimeSpan {
         let mut src_value = input.element_value(value);
         src_value.add_use(MirLoc::GraphLoc(*loc), *value);
         Ok(input.replace(value, src_value.union(&target_value)?))
+    }
+}
+
+impl TransferDrop<LifetimeAnalysis> for LifetimeSpan {
+    fn transfer_drop(
+        value: &MirValue,
+        input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut LifetimeAnalysis,
+        loc: &MirGraphLoc) -> Result<bool, Self::Conflict> {
+        Ok(input.element_value_mut(value).add_use(MirLoc::GraphLoc(*loc), *value))
+    }
+}
+
+impl TransferSync<LifetimeAnalysis> for LifetimeSpan {
+    fn transfer_sync(
+        event: &SyncEvent,
+        input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut LifetimeAnalysis,
+        loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.element_value_mut(&event.internal_value)
+            .add_use(MirLoc::GraphLoc(*loc), event.internal_value))
+    }
+}
+
+impl TransferRecord<LifetimeAnalysis> for LifetimeSpan {
+    /// We're just creating a value here, not using any value.
+    /// Following the logic for literals and constant data, this does not expand the life-span.
+    fn transfer_record(
+        _event: &SyncEvent,
+        _input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut LifetimeAnalysis,
+        _loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(false)
     }
 }
 

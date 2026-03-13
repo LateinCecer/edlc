@@ -180,6 +180,10 @@ impl<T> IndexMap<T> {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
+
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.data.len()

@@ -5,7 +5,7 @@ use std::ops;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferMove};
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue};
 use crate::mir::mir_expr::lifetime_analysis::{RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
@@ -14,6 +14,7 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
@@ -567,6 +568,22 @@ impl TransferMove<PartialSsaDeconstruction> for DataOrigin {
         target: &MirValue,
     ) -> Result<bool, DeconstructionConflict> {
         Ok(input.replace(target, DataOrigin::from_source(ctx.get_source(loc))))
+    }
+}
+
+impl TransferSync<PartialSsaDeconstruction> for DataOrigin {}
+impl TransferDrop<PartialSsaDeconstruction> for DataOrigin {}
+impl TransferRecord<PartialSsaDeconstruction> for DataOrigin {
+    /// Recording an event for synchronization yields a new event.
+    /// This equates to a new data source, even if this data source is not accessible on the
+    /// font-end of the compiler at all.
+    fn transfer_record(
+        event: &SyncEvent,
+        input: &mut HashNodeState<MirValue, Self>,
+        ctx: &mut PartialSsaDeconstruction,
+        loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(input.replace(&event.internal_value, DataOrigin::from_source(ctx.get_source(loc))))
     }
 }
 

@@ -20,6 +20,8 @@ use std::io::Write;
 use std::mem;
 use std::ops::Range;
 use crate::compiler::EdlCompiler;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
 use crate::inline_code;
 use crate::lexer::SrcPos;
@@ -28,8 +30,9 @@ use crate::mir::mir_expr::{AsciPrinter, BlockCall, DebugSymbols, ExecutionError,
 use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowContext, BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
+use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
@@ -427,6 +430,15 @@ impl MirFlowGraph {
                     Statement::VarDef { var, uid, debug, .. } => {
                         (var, *uid, debug.clone())
                     }
+                    Statement::Drop { .. } => {
+                        continue;
+                    },
+                    Statement::Sync { .. } => {
+                        continue;
+                    },
+                    Statement::Record { .. } => {
+                        continue;
+                    },
                 };
                 if let Some(item) = consts.get_constant_value(target) {
                     // insert data blob
@@ -577,10 +589,13 @@ impl MirFlowGraph {
         comptime_params: &[(MirValue, (Range<usize>, MirTypeId))],
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
-        reg: &MirTypeRegistry,
+        reg: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
         backend: &mut impl Backend,
     ) -> Result<ConstEval, ExecutionError> {
-        let bg = self.borrows(reg).expect("failed to build borrow graph for const evaluation");
+        let bg = self.borrows(reg, edl_types, edl_vars)
+            .expect("failed to build borrow graph for const evaluation");
         let mut const_eval = ConstEval::new(bg);
         let mut current_block = self.root();
         // transfer comptime parameters to block at the root
@@ -765,6 +780,10 @@ impl Statement {
                         &assign_expr.lhs, &assign_expr.rhs, &const_eval.borrow_graph);
                 }
             }
+            // for now, just don't look at these during const eval
+            Self::Drop { value: _, uid: _, debug: _ } => (),
+            Self::Sync { event: _, uid: _, debug: _ } => (),
+            Self::Record { event: _, uid: _, debug: _ } => (),
         }
     }
 }
@@ -776,6 +795,20 @@ pub enum OptimizationError {
     Lifetime(RegionError),
     Deconstruction(DeconstructionConflict),
     Other(String),
+    DropError(DropError),
+    BorrowConflict(BorrowConflict),
+}
+
+impl From<DropError> for OptimizationError {
+    fn from(value: DropError) -> Self {
+        Self::DropError(value)
+    }
+}
+
+impl From<BorrowConflict> for OptimizationError {
+    fn from(value: BorrowConflict) -> Self {
+        Self::BorrowConflict(value)
+    }
 }
 
 impl From<ConstError> for OptimizationError {
@@ -809,6 +842,8 @@ impl Display for OptimizationError {
             Self::Execution(err) => write!(f, "execution failed: {}", err),
             Self::Lifetime(err) => write!(f, "lifetime error: {}", err),
             Self::Deconstruction(err) => write!(f, "deconstruction conflict: {}", err),
+            Self::DropError(err) => write!(f, "drop error: {}", err),
+            Self::BorrowConflict(err) => write!(f, "borrow conflict: {}", err),
             Self::Other(err) => write!(f, "{}", err),
         }
     }
@@ -822,6 +857,21 @@ fn process_function(
     compiler: &mut EdlCompiler,
     backend: &mut impl Backend,
 ) -> Result<(), OptimizationError> {
+    let mut borrow_graph = body.body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    let report = body.body.check_scopes(&borrow_graph);
+    report.print();
+    body.body.route_owner_data(
+        &mut borrow_graph,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.body.insert_drops_with_dependencies(&borrow_graph)?;
+
     let lifeness = body.body.lifetimes(&mut compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
     // deconstruction.print_ranges();
@@ -831,21 +881,23 @@ fn process_function(
         store_plane: true,
         .. Default::default()
     };
-    let mut stack_frame = StackFrameLayout::new(
+    let stack_frame = StackFrameLayout::new(
         &deconstruction,
         options,
         &body.body,
         &compiler.mir_phase.types,
     );
-    vm.alloc_stack_frame(&mut stack_frame);
+    vm.alloc_stack_frame(&stack_frame);
     let const_eval = body.body.propagate_constants(
         &[],
         vm,
         &stack_frame,
-        &compiler.mir_phase.types,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
         backend,
     )?;
-    vm.pop_frame(&mut stack_frame);
+    vm.pop_frame(&stack_frame);
 
     // insert constant parameters for hybrid function calls
     {

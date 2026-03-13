@@ -180,17 +180,34 @@ impl TestCompiler {
         body.seal();
 
         // write MIR code to file for debugging
-        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir")?);
+        let mut out = BufWriter::new(File::create("../test_mir/raw.mir")?);
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&body)?;
         out.flush()?;
 
-
         // do scope checking
-        let mut borrow_graph = body.borrows(&self.compiler.mir_phase.types)?;
+        let mut borrow_graph = body.borrows(
+            &mut self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+            &self.compiler.phase.vars,
+        )?;
         let report = body.check_scopes(&borrow_graph);
         report.print();
-        body.route_owner_data(&mut borrow_graph, &self.compiler.mir_phase.types)?;
+        body.route_owner_data(
+            &mut borrow_graph,
+            &mut self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+            &self.compiler.phase.vars,
+        )?;
+
+        // borrow_graph.print();
+        body.insert_drops_with_dependencies(&borrow_graph)?;
+
+        // write MIR code to file for debugging
+        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir")?);
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(&body)?;
+        out.flush()?;
 
         // body.constant_analysis()?;
         // println!("doing lifetime analysis");
@@ -212,15 +229,17 @@ impl TestCompiler {
         };
         let mut stack_frame = StackFrameLayout::new(
             &deconstruction, options, &body, &self.compiler.mir_phase.types);
-        vm.alloc_stack_frame(&mut stack_frame);
+        vm.alloc_stack_frame(&stack_frame);
         let res = body.propagate_constants(
             &[],
             &mut vm,
             &stack_frame,
-            &self.compiler.mir_phase.types,
+            &mut self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+            &self.compiler.phase.vars,
             &mut self.backend,
         ).unwrap();
-        vm.pop_frame(&mut stack_frame);
+        vm.pop_frame(&stack_frame);
         // res.print();
 
         {

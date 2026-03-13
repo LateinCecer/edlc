@@ -23,6 +23,7 @@ mod const_eval;
 mod borrow;
 mod scope_check;
 mod drop_check;
+mod sync;
 
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
@@ -43,7 +44,9 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::{Deref, Range};
-
+use log::debug;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext};
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
@@ -57,6 +60,7 @@ pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unk
 pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -76,7 +80,7 @@ pub struct MirValue(pub(crate) usize);
 
 /// Indicates a specific position in the MIR flow graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirGraphLoc(MirBlockRef, BlockLocalStatementUid);
+pub struct MirGraphLoc(pub MirBlockRef, pub BlockLocalStatementUid);
 
 /// Is a location in a block that points either to a statement in the block or to the sealing
 /// identifier.
@@ -134,7 +138,7 @@ impl MirGraphLoc {
 pub struct BlockLocalStatementUid(usize);
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
-enum VarUse {
+pub enum VarUse {
     Statement(MirBlockRef, MirValue, BlockLocalStatementUid),
     Seal(MirBlockRef, MirValue),
 }
@@ -348,14 +352,43 @@ enum Statement {
         uid: BlockLocalStatementUid,
         debug: DebugSymbols
     },
+    Drop {
+        value: MirValue,
+        uid: BlockLocalStatementUid,
+        debug: DebugSymbols,
+    },
+    Sync {
+        event: SyncEvent,
+        uid: BlockLocalStatementUid,
+        debug: DebugSymbols,
+    },
+    Record {
+        event: SyncEvent,
+        uid: BlockLocalStatementUid,
+        debug: DebugSymbols,
+    },
 }
 
 impl Statement {
-    fn defines(&self) -> &MirValue {
+    fn debug(&self) -> &DebugSymbols {
         match self {
-            Self::VarDef { var, .. } => var,
-            Self::VarMove { var, .. } => var,
-            Self::VarCopy { var, .. } => var,
+            Statement::VarDef { debug, .. } => debug,
+            Statement::VarMove { debug, .. } => debug,
+            Statement::VarCopy { debug, .. } => debug,
+            Statement::Drop { debug, .. } => debug,
+            Statement::Sync { debug, .. } => debug,
+            Statement::Record { debug, .. } => debug,
+        }
+    }
+
+    fn defines(&self) -> Option<&MirValue> {
+        match self {
+            Self::VarDef { var, .. } => Some(var),
+            Self::VarMove { var, .. } => Some(var),
+            Self::VarCopy { var, .. } => Some(var),
+            Self::Drop { .. } => None,
+            Self::Sync { .. } => None,
+            Self::Record { event: SyncEvent { internal_value, .. }, .. } => Some(internal_value),
         }
     }
 
@@ -364,6 +397,9 @@ impl Statement {
             Self::VarDef { uid, .. } => &uid,
             Self::VarMove { uid, .. } => &uid,
             Self::VarCopy { uid, .. } => &uid,
+            Self::Drop { uid, .. } => &uid,
+            Self::Sync { uid, .. } => &uid,
+            Self::Record { uid, .. } => &uid,
         }
     }
 
@@ -385,6 +421,13 @@ impl Statement {
             Statement::VarDef { uid: _, value, var: _, debug: _ } => {
                 expressions.uses_var(*value, var)
             },
+            Statement::Drop { uid: _, value, .. } => {
+                value == var
+            },
+            Statement::Sync { uid: _, event: SyncEvent { internal_value }, .. } => {
+                internal_value == var
+            },
+            Statement::Record { .. } => false,
         }
     }
 
@@ -397,6 +440,12 @@ impl Statement {
                     *var = replacement;
                 }
             },
+            Statement::Record { event, .. } => {
+                if &event.internal_value == ori {
+                    event.internal_value = replacement;
+                }
+            },
+            Statement::Sync { .. } | Statement::Drop { .. } => (),
         }
     }
 
@@ -407,15 +456,8 @@ impl Statement {
             Self::VarDef { var, .. }
             | Self::VarMove { var, .. }
             | Self::VarCopy { var, .. } => variable == var,
-        }
-    }
-
-    /// If this statement defies a variable, the defined variable is returned.
-    fn get_defines(&self) -> Option<&MirValue> {
-        match self {
-            Self::VarDef { var, .. }
-            | Self::VarMove { var, .. }
-            | Self::VarCopy { var, .. } => Some(var),
+            | Self::Record { event: SyncEvent { internal_value, .. }, .. } => variable == internal_value,
+            _ => false,
         }
     }
 
@@ -436,6 +478,18 @@ impl Statement {
             }
             Self::VarDef { var, value, uid: _, debug: _ } => {
                 expr.execute(vm,  stack_frame, *value, var, reg, backend);
+            }
+            Self::Drop { value, uid: _, debug: _ } => {
+                debug!("dropping value {value:?}")
+                // TODO
+            }
+            Self::Record { event, uid: _, debug: _ } => {
+                debug!("recording event {event:?}");
+                // TODO
+            }
+            Self::Sync { event, uid: _, debug: _ } => {
+                debug!("synchronizing event {event:?}");
+                // TODO
             }
         }
     }
@@ -760,6 +814,19 @@ impl Block {
                     }
                     defined_vars.insert(*var);
                 }
+                Statement::Drop { value, .. } => {
+                    if !defined_vars.contains(value) {
+                        self.parameters.push(*value);
+                    }
+                },
+                Statement::Sync { event, .. } => {
+                    if !defined_vars.contains(&event.internal_value) {
+                        self.parameters.push(event.internal_value);
+                    }
+                },
+                Statement::Record { event, .. } => {
+                    defined_vars.insert(event.internal_value);
+                }
             }
         }
         // examine uses in sealing statement
@@ -887,10 +954,14 @@ impl Block {
             .for_each(|statement| match statement {
                 Statement::VarDef { var, value: _, uid, debug: _ } |
                 Statement::VarMove { var, value: _, uid, debug: _ } |
-                Statement::VarCopy { var, value: _, uid, debug: _ } => {
+                Statement::VarCopy { var, value: _, uid, debug: _ } |
+                Statement::Record { event: SyncEvent {
+                    internal_value: var, ..
+                }, uid, .. } => {
                     let def_point = DefPoint::Definition(MirGraphLoc(block_ref, *uid));
                     func(def_point, *var);
-                }
+                },
+                Statement::Sync { .. } | Statement::Drop { .. } => (),
             });
     }
 
@@ -909,10 +980,14 @@ impl Block {
             .for_each(|statement| match statement {
                 Statement::VarDef { var, value: _, uid, debug: _ } |
                 Statement::VarMove { var, value: _, uid, debug: _ } |
-                Statement::VarCopy { var, value: _, uid, debug: _ } => {
+                Statement::VarCopy { var, value: _, uid, debug: _ } |
+                Statement::Record { event: SyncEvent {
+                    internal_value: var, ..
+                }, uid, .. }=> {
                     let def_point = DefPoint::Definition(MirGraphLoc(block_ref, *uid));
                     *var = func(def_point, *var);
-                }
+                },
+                Statement::Sync { .. } | Statement::Drop { .. } => (),
             });
     }
 
@@ -934,6 +1009,8 @@ impl Block {
         collection
     }
 
+    /// Finds one use of a variable, starting from the front of the block.
+    /// Statements with a current index smaller or equal to `start` will not be considered.
     fn find_closest_use(
         &self,
         block_ref: MirBlockRef,
@@ -961,6 +1038,8 @@ impl Block {
         statement
     }
 
+    /// Finds one use of a variable, starting from the back of the block.
+    /// Statements with a current index smaller or equal to `start` will not be considered.
     fn find_furthest_use(
         &self,
         block_ref: MirBlockRef,
@@ -1004,10 +1083,13 @@ impl Block {
                         });
                 }
                 Statement::VarMove { var: _, value, uid, debug: _ } |
-                Statement::VarCopy { var: _, value, uid, debug: _ } => {
+                Statement::VarCopy { var: _, value, uid, debug: _ } |
+                Statement::Sync { event: SyncEvent { internal_value: value }, uid, .. } |
+                Statement::Drop { value, uid, .. } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
                     func(use_point);
                 }
+                Statement::Record { .. } => (),
             });
         self.seal.iter_value_uses(block_ref, &mut func);
     }
@@ -1032,10 +1114,13 @@ impl Block {
                         });
                 }
                 Statement::VarMove { var: _, value, uid, debug: _ } |
-                Statement::VarCopy { var: _, value, uid, debug: _ } => {
+                Statement::VarCopy { var: _, value, uid, debug: _ } |
+                Statement::Sync { event: SyncEvent { internal_value: value }, uid, .. } |
+                Statement::Drop { value, uid, .. } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
                     *value = func(use_point);
                 }
+                Statement::Record { .. } => (),
             });
         self.seal.iter_value_uses_mut(block_ref, &mut func);
     }
@@ -1403,6 +1488,7 @@ impl MirFlowGraph {
             .iter()
             .find(|statement| *statement.uid() == uid)
             .map(|statement| statement.defines())
+            .flatten()
     }
 
     #[inline(always)]
@@ -1679,6 +1765,9 @@ impl MirFlowGraph {
     }
 
     /// Bakes temporary variables into SSA variables in the entire flow graph.
+    /// This will only affect MIR values that life in two different blocks at the same time.
+    /// After this method is called, every MIR value can only exist in one block at most and only
+    /// actually be defined ONCE.
     ///
     /// # On SSA Variables
     ///
@@ -1777,9 +1866,11 @@ impl MirFlowGraph {
                 match cond {
                     Statement::VarDef { var, .. }
                     | Statement::VarMove { var, .. }
-                    | Statement::VarCopy { var, .. } => {
-                        required_parameters.retain(|work| work != var);
+                    | Statement::VarCopy { var, .. }
+                    | Statement::Record { event: SyncEvent { internal_value: var }, .. } => {
+                        required_parameters.remove(var);
                     },
+                    Statement::Drop { .. } | Statement::Sync { .. } => (),
                 }
             }
 
@@ -2007,12 +2098,23 @@ impl MirFlowGraph {
     /// Analyzes the borrow relations in the CFG.
     pub fn borrows(
         &self,
-        mir_types: &MirTypeRegistry,
+        mir_types: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        edl_vars: &EdlVarRegistry,
     ) -> Result<BorrowGraph, <BorrowState as LatticeElement>::Conflict> {
         let borrow_state = BorrowContext::new(mir_types, self);
         let mut state = MirGraphState::<BorrowState, BorrowContext>::new(borrow_state);
         WorkListFixpointForward.solve(self, &mut state, BorrowState::upper)?;
-        let graph = BorrowGraph::new(state.0.map, state.1);
+        let graph = BorrowGraph::new(
+            state.0.map,
+            state.1.owner_references,
+            state.1.owner_reverse,
+            state.1.owner_counter,
+            self,
+            mir_types,
+            edl_types,
+            edl_vars,
+        );
 
         // println!("result of borrow state analysis:");
         // graph.print();
@@ -2688,7 +2790,11 @@ impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowG
 where
     MirExprId: ExprTransfer<S, Context>,
     Seal: SealEval<S, Context>,
-    S: TransferCopy<Context> + TransferMove<Context>,
+    S: TransferCopy<Context>
+        + TransferMove<Context>
+        + TransferDrop<Context>
+        + TransferSync<Context>
+        + TransferRecord<Context>,
 {
     fn transfer(
         &self,
@@ -2710,7 +2816,11 @@ impl<S: LatticeElement + Clone + Default + Display, Context> TransferFn<MirFlowG
 where
     MirExprId: ExprTransfer<S, Context>,
     Seal: SealEval<S, Context>,
-    S: TransferCopy<Context> + TransferMove<Context>,
+    S: TransferCopy<Context>
+        + TransferMove<Context>
+        + TransferDrop<Context>
+        + TransferSync<Context>
+        + TransferRecord<Context>,
 {
     fn transfer(
         &self,
@@ -2751,6 +2861,39 @@ trait TransferMove<Context>: LatticeElement + IsDefault + Clone {
     }
 }
 
+trait TransferDrop<Context>: LatticeElement + IsDefault + Clone {
+    fn transfer_drop(
+        _value: &MirValue,
+        _input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut Context,
+        _loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(false)
+    }
+}
+
+trait TransferSync<Context>: LatticeElement + IsDefault + Clone {
+    fn transfer_sync(
+        _event: &SyncEvent,
+        _input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut Context,
+        _loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(false)
+    }
+}
+
+trait TransferRecord<Context>: LatticeElement + IsDefault + Clone {
+    fn transfer_record(
+        _event: &SyncEvent,
+        _input: &mut HashNodeState<MirValue, Self>,
+        _ctx: &mut Context,
+        _loc: &MirGraphLoc,
+    ) -> Result<bool, Self::Conflict> {
+        Ok(false)
+    }
+}
+
 impl Statement {
     /// Transfers the state of a DFG based on a statement.
     /// For this function to work, the transformation for the lattice element must be implemented
@@ -2765,7 +2908,11 @@ impl Statement {
     where
         MirExprId: ExprTransfer<S, Context>,
         MirFlowGraph: CfgLattice<S, MirGraphState<S, Context>>,
-        S: TransferCopy<Context> + TransferMove<Context> {
+        S: TransferCopy<Context>
+            + TransferMove<Context>
+            + TransferDrop<Context>
+            + TransferSync<Context>
+            + TransferRecord<Context> {
 
         match self {
             Statement::VarDef { value, var, uid, debug: _ } => {
@@ -2776,6 +2923,15 @@ impl Statement {
             }
             Statement::VarCopy { value, var, uid, debug: _ } => {
                 S::transfer_copy(value, input, ctx, &MirGraphLoc(block, *uid), var)
+            }
+            Statement::Drop { value, uid, debug: _ } => {
+                S::transfer_drop(value, input, ctx, &MirGraphLoc(block, *uid))
+            }
+            Statement::Sync { event, uid, debug: _ } => {
+                S::transfer_sync(event, input, ctx, &MirGraphLoc(block, *uid))
+            }
+            Statement::Record { event, uid, debug: _ } => {
+                S::transfer_record(event, input, ctx, &MirGraphLoc(block, *uid))
             }
         }
     }
@@ -2859,14 +3015,8 @@ where
             MirExprVariant::Assign => {
                 expressions.assigns[self.id].eval(input, ctx, loc, target)
             }
-            MirExprVariant::Let => {
-                panic!("deprecated")
-            }
             MirExprVariant::Data => {
                 expressions.data[self.id].eval(input, ctx, loc, target)
-            }
-            MirExprVariant::Offset => {
-                panic!("deprecated")
             }
             MirExprVariant::Init => {
                 expressions.type_inits[self.id].eval(input, ctx, loc, target)

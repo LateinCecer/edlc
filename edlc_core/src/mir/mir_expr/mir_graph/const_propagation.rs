@@ -28,6 +28,7 @@ use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, 
 use edlc_analysis::graph::{CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, TransferFn};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
+use crate::prelude::mir_expr::mir_graph::{TransferDrop, TransferRecord, TransferSync};
 use crate::prelude::mir_expr::MirGraphLoc;
 
 /// Lattice for Const analysis looks somewhat like this:
@@ -165,6 +166,10 @@ impl LatticeElement for ConstState {
 
 impl TransferCopy<ConstPropagation> for ConstState {}
 impl TransferMove<ConstPropagation> for ConstState {}
+impl TransferDrop<ConstPropagation> for ConstState {}
+impl TransferSync<ConstPropagation> for ConstState {}
+impl TransferRecord<ConstPropagation> for ConstState {}
+
 
 impl SealEval<ConstState, ConstPropagation> for Seal {
     fn transfer(

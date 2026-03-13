@@ -7,6 +7,7 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
@@ -177,14 +178,18 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
         write!(self.writer, "global ref {:?}", expr.var)
     }
 
+    fn write_event(&mut self, event: &SyncEvent) -> Result<(), std::io::Error> {
+        write!(self.writer, "event {:x}", event.internal_value.0)
+    }
+
     fn write_statement(&mut self, stat: &Statement, graph: &MirFlowGraph) -> Result<(), std::io::Error> {
         match stat {
             Statement::VarDef { var, value, .. } => {
                 self.write_value(var)?;
-                self.writer.write(b": ")?;
+                self.writer.write_all(b": ")?;
                 let ty = graph.get_var_type(var);
                 self.write_type(ty)?;
-                self.writer.write(b" = ")?;
+                self.writer.write_all(b" = ")?;
 
                 match &value.ty {
                     MirExprVariant::ArrayInit => {
@@ -208,14 +213,8 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
                     MirExprVariant::Assign => {
                         self.write_assign(&graph.expressions.assigns[value.id])
                     }
-                    MirExprVariant::Let => {
-                        todo!()
-                    }
                     MirExprVariant::Data => {
                         self.write_data(&graph.expressions.data[value.id])
-                    }
-                    MirExprVariant::Offset => {
-                        todo!()
                     }
                     MirExprVariant::Init => {
                         self.write_type_init(&graph.expressions.type_inits[value.id])
@@ -233,7 +232,7 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             }
             Statement::VarMove { var, value, .. } => {
                 self.write_value(var)?;
-                self.writer.write(b": ")?;
+                self.writer.write_all(b": ")?;
                 let ty = graph.get_var_type(var);
                 self.write_type(ty)?;
                 write!(self.writer, " = move ")?;
@@ -241,11 +240,23 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             }
             Statement::VarCopy { var, value, .. } => {
                 self.write_value(var)?;
-                self.writer.write(b": ")?;
+                self.writer.write_all(b": ")?;
                 let ty = graph.get_var_type(var);
                 self.write_type(ty)?;
                 write!(self.writer, " = copy ")?;
                 self.write_value(value)
+            }
+            Statement::Drop { value, .. } => {
+                write!(self.writer, "drop ")?;
+                self.write_value(value)
+            }
+            Statement::Sync { event, .. } => {
+                write!(self.writer, "sync ")?;
+                self.write_event(event)
+            }
+            Statement::Record { event, .. } => {
+                write!(self.writer, "record ")?;
+                self.write_event(event)
             }
         }
     }
@@ -316,16 +327,16 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             let ty = graph.get_var_type(param);
             self.write_type(ty)?;
         }
-        self.writer.write(b"):\n")?;
+        self.writer.write_all(b"):\n")?;
 
         // write body
-        const SPACER: &'static [u8] = b"    ";
+        const SPACER: &[u8] = b"    ";
         for statement in block.statements.iter() {
-            self.writer.write(SPACER)?;
+            self.writer.write_all(SPACER)?;
             self.write_statement(statement, graph)?;
-            self.writer.write(b"\n")?;
+            self.writer.write_all(b"\n")?;
         }
-        self.writer.write(SPACER)?;
+        self.writer.write_all(SPACER)?;
         self.write_seal(&block.seal, graph)
     }
 }
@@ -342,7 +353,7 @@ impl<'writer, W: Write> MirPrinter for AsciPrinter<'writer, W> {
         for (block_id, block) in graph.blocks.iter().enumerate() {
             let block_ref = MirBlockRef(block_id);
             self.write_block(block, &block_ref, graph)?;
-            self.writer.write(b"\n\n\n")?;
+            self.writer.write_all(b"\n\n\n")?;
         }
         Ok(())
     }
