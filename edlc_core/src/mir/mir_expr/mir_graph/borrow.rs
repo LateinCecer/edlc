@@ -1501,6 +1501,10 @@ impl BorrowState {
         }
         changed
     }
+
+    pub(crate) fn collective_path_length(&self) -> usize {
+        self.set.iter().map(|path| path.path.len()).sum()
+    }
 }
 
 impl LatticeElement for BorrowState {

@@ -237,15 +237,31 @@ impl DropAnalysis {
         cfg: &mut MirFlowGraph,
         borrow_graph: &BorrowGraph,
     ) -> Result<(), DropError> {
-        for (var_raw, last_mention) in self.last_point_alive.iter() {
-            let var = MirValue(var_raw);
+        // sort drop insertion order based on how many borrows are in a borrowing path
+        let mut sorted_mentions: Vec<(MirValue, DefPoint)> = self.last_point_alive
+            .iter()
+            .map(|(var_raw, last_mention)| {
+                (MirValue(var_raw), last_mention.clone())
+            })
+            .collect();
+        sorted_mentions.sort_by(|(lhs_val, _), (rhs_val, _)| {
+            let lhs_ordinal = borrow_graph.get_paths(lhs_val)
+                .map(|state| state.collective_path_length())
+                .unwrap_or(0);
+            let rhs_ordinal = borrow_graph.get_paths(rhs_val)
+                .map(|state| state.collective_path_length())
+                .unwrap_or(0);
+            lhs_ordinal.cmp(&rhs_ordinal).reverse()
+        });
+
+        for (var, last_mention) in sorted_mentions.into_iter() {
             let (block_ref, mut index) = match last_mention {
                 DefPoint::BlockParameter(block_ref, _idx) => {
-                    (*block_ref, 0)
+                    (block_ref, 0)
                 },
                 DefPoint::Definition(MirGraphLoc(block_ref, uid)) => {
-                    (*block_ref, cfg.blocks[block_ref.0]
-                        .find_current_index(uid)
+                    (block_ref, cfg.blocks[block_ref.0]
+                        .find_current_index(&uid)
                         .unwrap_or_else(|| cfg.blocks[block_ref.0].statements.len() - 1) + 1)
                 },
             };
