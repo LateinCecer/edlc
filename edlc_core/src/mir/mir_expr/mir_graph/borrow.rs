@@ -127,10 +127,10 @@ impl<V> ReferenceState<V> {
         v: V,
         graph: &BorrowTree,
         op: fn(lhs: &V, rhs: &V) -> Ordering,
-    ) {
+    )
+    where V: PartialEq + Eq {
         let node = graph.node_from_value(&value).unwrap();
-        let value_id = self.values.len();
-        self.values.push(v);
+        let value_id = self.insert_value_internal(v);
 
         // set the value of all child nodes directly, as the children definitely need to change
         // if the parent is overwritten
@@ -161,6 +161,63 @@ impl<V> ReferenceState<V> {
         }
     }
 
+    pub fn set_join_value(
+        &mut self,
+        value: MirValue,
+        v: V,
+        graph: &BorrowTree,
+    )
+    where V: JoinState + PartialEq + Eq {
+        let node = graph.node_from_value(&value).unwrap();
+        let value_id = self.insert_value_internal(v);
+
+        for child_id in graph.iter_nodes_after(node, &[]) {
+            self.states[child_id.0] = value_id;
+        }
+
+        let mut parent_iter = graph.iter_rev(node);
+        parent_iter.next();
+        for parent in parent_iter {
+            let mut max_value: Option<usize> = None;
+            for child in graph.get_child_branch_range(parent).unwrap() {
+                let child_node = NodeId(child + 1);
+                if let Some(max_value) = max_value.as_mut() {
+                    if let Some(ordering) = V::ordering(
+                        &self.values[self.states[child_node.0]],
+                        &self.values[*max_value],
+                    ) {
+                        if ordering.is_gt() {
+                            *max_value = self.states[child_node.0];
+                        }
+                    } else {
+                        let new_value = V::join(
+                            &self.values[self.states[child_node.0]],
+                            &self.values[*max_value],
+                        );
+                        *max_value = self.insert_value_internal(new_value);
+                    }
+                } else {
+                    max_value = Some(self.states[child_node.0]);
+                }
+            }
+            // if the children have a collective max value, then set that as the parent value
+            if let Some(max_value) = max_value {
+                self.states[parent.0] = max_value;
+            }
+        }
+    }
+
+    fn insert_value_internal(&mut self, v: V) -> usize
+    where V: PartialEq + Eq {
+        if let Some(idx) = self.values.iter().position(|x| x == &v) {
+            idx
+        } else {
+            let idx = self.values.len();
+            self.values.push(v);
+            idx
+        }
+    }
+
     pub fn get_value(
         &self,
         value: &MirValue,
@@ -171,6 +228,11 @@ impl<V> ReferenceState<V> {
             .and_then(|node| self.states.get(node.0))
             .and_then(|idx| self.values.get(*idx))
     }
+}
+
+pub trait JoinState {
+    fn ordering(&self, other: &Self) -> Option<Ordering>;
+    fn join(&self, other: &Self) -> Self;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
@@ -738,7 +800,7 @@ impl<V> ReferenceStateForest<V> {
     where V: Clone {
         let mut forest_state = HashMap::new();
         for (src, tree) in forest.trees.iter() {
-            forest_state.insert(src.clone(), ReferenceState::new(tree, base_value.clone()));
+            forest_state.insert(*src, ReferenceState::new(tree, base_value.clone()));
         }
         ReferenceStateForest { forest: forest_state }
     }
@@ -749,7 +811,7 @@ impl<V> ReferenceStateForest<V> {
         graph: &BorrowGraph,
         op: fn(lhs: &V, rhs: &V) -> Ordering,
     ) -> Option<&V> {
-        let mut out: Option<&V> = None;
+        let mut out_max: Option<&V> = None;
         let state = graph.graph.get(value)?;
         for path in state.set.iter() {
             // resolve that path
@@ -757,15 +819,15 @@ impl<V> ReferenceStateForest<V> {
             let state = self.forest.get(&path.source).unwrap();
 
             let v = state.get_value(value, tree).unwrap();
-            if let Some(out) = out.as_mut() {
+            if let Some(out) = out_max.as_mut() {
                 if op(v, out).is_gt() {
                     *out = v;
                 }
             } else {
-                out = Some(v);
+                out_max = Some(v);
             }
         }
-        out
+        out_max
     }
 
     pub fn set_value(
@@ -775,7 +837,7 @@ impl<V> ReferenceStateForest<V> {
         graph: &BorrowGraph,
         op: fn(lhs: &V, rhs: &V) -> Ordering,
     )
-    where V: Clone {
+    where V: Clone + PartialEq + Eq {
         let Some(state) = graph.graph.get(&value) else {
             return;
         };
@@ -1234,6 +1296,14 @@ impl PartialBorrowStack {
             }
         }
         false
+    }
+}
+
+impl Deref for PartialBorrowStack {
+    type Target = [MemberOffset];
+
+    fn deref(&self) -> &Self::Target {
+        &self.stack
     }
 }
 

@@ -97,7 +97,7 @@ impl MirConstant {
 
     #[inline(always)]
     /// A constant is always constant (duh)
-    pub fn is_comptime(
+    pub fn is_avail(
         &self,
     ) -> bool {
         true

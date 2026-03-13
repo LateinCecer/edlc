@@ -135,7 +135,7 @@ impl MirExprContainer {
         }
     }
 
-    fn is_comptime(
+    fn is_avail(
         &self,
         expr: MirExprId,
         backend: &impl Backend,
@@ -143,19 +143,29 @@ impl MirExprContainer {
         graph: &BorrowGraph,
     ) -> bool {
         match &expr.ty {
-            MirExprVariant::ArrayInit => self.array_inits[expr.id].is_comptime(frame, graph),
-            MirExprVariant::As => self.ases[expr.id].is_comptime(frame, graph),
-            MirExprVariant::Call => self.call[expr.id].is_comptime(backend, frame, graph),
-            MirExprVariant::Literal => self.literals[expr.id].is_comptime(),
-            MirExprVariant::Variable => self.variables[expr.id].is_comptime(),
-            MirExprVariant::Constant => self.constants[expr.id].is_comptime(),
-            MirExprVariant::Assign => self.assigns[expr.id].is_comptime(frame, graph),
-            MirExprVariant::Data => self.data[expr.id].is_comptime(),
-            MirExprVariant::Init => self.type_inits[expr.id].is_comptime(frame, graph),
-            MirExprVariant::Ref => self.refs[expr.id].is_comptime(frame, graph),
-            MirExprVariant::Deref => self.derefs[expr.id].is_comptime(frame, graph),
-            MirExprVariant::DowncastRef => self.downcasts[expr.id].is_comptime(frame, graph),
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].is_avail(frame, graph),
+            MirExprVariant::As => self.ases[expr.id].is_avail(frame, graph),
+            MirExprVariant::Call => self.call[expr.id].is_avail(backend, frame, graph),
+            MirExprVariant::Literal => self.literals[expr.id].is_avail(),
+            MirExprVariant::Variable => self.variables[expr.id].is_avail(),
+            MirExprVariant::Constant => self.constants[expr.id].is_avail(),
+            MirExprVariant::Assign => self.assigns[expr.id].is_avail(frame, graph),
+            MirExprVariant::Data => self.data[expr.id].is_avail(),
+            MirExprVariant::Init => self.type_inits[expr.id].is_avail(frame, graph),
+            MirExprVariant::Ref => self.refs[expr.id].is_avail(frame, graph),
+            MirExprVariant::Deref => self.derefs[expr.id].is_avail(frame, graph),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].is_avail(frame, graph),
         }
+    }
+
+    fn is_const(
+        &self,
+        expr: MirExprId,
+        backend: &impl Backend,
+        eval: &ConstEval,
+        graph: &BorrowGraph,
+    ) -> bool {
+        todo!()
     }
 
     /// Collects all values that are used by the expression.

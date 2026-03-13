@@ -54,7 +54,7 @@ impl MirData {
 
     /// A raw data set is by definition supposed to be constant.
     #[inline(always)]
-    pub fn is_comptime(
+    pub fn is_avail(
         &self,
     ) -> bool {
         true

@@ -47,6 +47,7 @@ use std::ops::{Deref, Range};
 use log::debug;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
+use crate::core::index_map::IndexMap;
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext};
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
@@ -56,7 +57,7 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
-pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame};
+pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame, ConstEval, ValueConstState};
 pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
@@ -2058,15 +2059,16 @@ impl MirFlowGraph {
 
     /// Performs constant analysis on the MIR data flow graph to figure out which MIR values can
     /// be treated as constants.
-    pub fn constant_analysis(&self) -> Result<(), <ConstState as LatticeElement>::Conflict> {
+    pub fn constant_analysis(
+        &self,
+    ) -> Result<IndexMap<ConstState>, <ConstState as LatticeElement>::Conflict> {
         let mut state = MirGraphState::default();
         WorkListFixpointForward.solve(self, &mut state, ConstState::upper)?;
-
-        // println!("result of const analysis:");
-        // for (node, const_state) in state.0.iter() {
-        //     println!("${:x}: {}", node.0, const_state);
-        // }
-        Ok(())
+        let mut out: IndexMap<ConstState> = IndexMap::default();
+        for (idx, value) in state.0.map.into_iter() {
+            out.view_mut(idx.0).set(value);
+        }
+        Ok(out)
     }
 
     /// Performs a non-lexical lifetime analysis on the call graph.

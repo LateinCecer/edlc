@@ -13,32 +13,29 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::compiler::EdlCompiler;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
+use crate::core::index_map::IndexMap;
+use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::lifetime_analysis::RegionError;
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowState, JoinState, ReferenceStateForest};
+use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
+use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
+use crate::mir::mir_expr::mir_graph::drop_check::DropError;
+use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, DebugSymbols, ExecutionError, MirBlockRef, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::prelude::mir_expr::MirFlowGraph;
+use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::mem;
-use std::ops::Range;
-use crate::compiler::EdlCompiler;
-use crate::core::edl_type::EdlTypeRegistry;
-use crate::core::edl_var::EdlVarRegistry;
-use crate::core::index_map::IndexMap;
-use crate::inline_code;
-use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, DebugSymbols, ExecutionError, MirBlockRef, MirExprContainer, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
-use crate::mir::mir_expr::lifetime_analysis::RegionError;
-use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowContext, BorrowForest, BorrowGraph, FlowState, ReferenceState, ReferenceStateForest};
-use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
-use crate::mir::mir_expr::mir_graph::drop_check::DropError;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::MirPhase;
-use crate::prelude::{AmorphusDataCopy, ExecutorVM};
-use crate::prelude::mir_expr::MirFlowGraph;
-use crate::resolver::ScopeId;
+use std::ops::{BitOr, Range};
 
 
 #[derive(Debug)]
@@ -50,6 +47,7 @@ enum ConstEvalState {
 /// Const eval data
 pub struct ConstEval {
     consts: IndexMap<ConstEvalState>,
+    const_states: IndexMap<ConstState>,
     block_frame: ConstFrame,
     borrow_graph: BorrowGraph,
 }
@@ -183,9 +181,17 @@ impl ConstFrame {
 }
 
 impl ConstEval {
-    pub fn new(borrow_graph: BorrowGraph) -> Self {
+    pub fn new(borrow_graph: BorrowGraph, const_states: IndexMap<ConstState>) -> Self {
+        let mut consts: IndexMap<ConstEvalState> = IndexMap::default();
+        for (idx, state) in const_states.iter() {
+            if !matches!(state, ConstState::Const(_)) {
+                consts.view_mut(idx).set(ConstEvalState::Runtime);
+            }
+        }
+
         ConstEval {
-            consts: IndexMap::default(),
+            consts,
+            const_states,
             block_frame: ConstFrame {
                 avail: HashSet::new(),
                 references: ReferenceStateForest::new(&borrow_graph.forest, FlowState::Fixed),
@@ -360,6 +366,74 @@ impl ConstEval {
             ConstEvalState::Runtime => None,
             ConstEvalState::Known(c) => Some(c),
         })
+    }
+
+    pub fn is_const(
+        &self,
+        value: &MirValue,
+    ) -> ConstState {
+        self.const_states
+            .get(value.0)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ValueConstState {
+    Runtime,
+    Comptime,
+    #[default]
+    Unknown,
+}
+
+impl ValueConstState {
+    fn maybe_comptime(&self) -> bool {
+        matches!(self, ValueConstState::Comptime | ValueConstState::Unknown)
+    }
+}
+
+impl BitOr for ValueConstState {
+    type Output = ValueConstState;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (ValueConstState::Runtime, _) => ValueConstState::Runtime,
+            (_, ValueConstState::Runtime) => ValueConstState::Runtime,
+            (ValueConstState::Unknown, other) => other,
+            (other, ValueConstState::Unknown) => other,
+            (ValueConstState::Comptime, ValueConstState::Comptime) => ValueConstState::Comptime,
+        }
+    }
+}
+
+impl JoinState for ValueConstState {
+    fn ordering(&self, other: &Self) -> Option<Ordering> {
+        Self::partial_cmp(self, other)
+    }
+
+    fn join(&self, other: &Self) -> Self {
+        *self | *other
+    }
+}
+
+impl PartialOrd for ValueConstState {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ValueConstState {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (ValueConstState::Runtime, ValueConstState::Runtime) => Ordering::Equal,
+            (ValueConstState::Comptime, ValueConstState::Comptime) => Ordering::Equal,
+            (ValueConstState::Unknown, ValueConstState::Unknown) => Ordering::Equal,
+            (ValueConstState::Runtime, _) => Ordering::Greater,
+            (_, ValueConstState::Runtime) => Ordering::Less,
+            (ValueConstState::Unknown, _) => Ordering::Less,
+            (_, ValueConstState::Unknown) => Ordering::Greater,
+        }
     }
 }
 
@@ -594,9 +668,13 @@ impl MirFlowGraph {
         edl_vars: &EdlVarRegistry,
         backend: &mut impl Backend,
     ) -> Result<ConstEval, ExecutionError> {
+        let const_state = self.constant_analysis()
+            .expect("failed const propagation analysis");
         let bg = self.borrows(reg, edl_types, edl_vars)
             .expect("failed to build borrow graph for const evaluation");
-        let mut const_eval = ConstEval::new(bg);
+        let mut const_eval = ConstEval::new(bg, const_state);
+
+        #[allow(unused_assignments)]
         let mut current_block = self.root();
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
@@ -768,7 +846,12 @@ impl Statement {
             }
             Self::VarDef { var, value, uid: _, debug: _ } => {
                 // check if the expression can be executed in comptime
-                if cfg.expressions.is_comptime(*value, backend, &const_eval.block_frame, &const_eval.borrow_graph) {
+                if cfg.expressions.is_avail(
+                    *value,
+                    backend,
+                    &const_eval.block_frame,
+                    &const_eval.borrow_graph,
+                ) {
                     cfg.expressions.execute(vm, stack_frame, *value, var, reg, backend);
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
                 }

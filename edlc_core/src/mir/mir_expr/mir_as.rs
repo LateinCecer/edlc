@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstEval, ConstFrame, ValueConstState};
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
@@ -162,7 +162,7 @@ impl MirAs {
         }
     }
 
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,

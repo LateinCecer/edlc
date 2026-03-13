@@ -137,7 +137,7 @@ impl MirCall {
 
     /// A [MirCall] is executable at compile-time of all parameters are available at compile time
     /// and if the function itself is marked as `comptime` or `?comptime`.
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         backend: &impl Backend,
         frame: &ConstFrame,

@@ -101,7 +101,7 @@ impl MirLiteral {
 
     /// A literal is always known at compile times.
     #[inline(always)]
-    pub fn is_comptime(
+    pub fn is_avail(
         &self,
     ) -> bool {
         true

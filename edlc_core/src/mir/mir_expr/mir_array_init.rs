@@ -15,7 +15,7 @@
  */
 
 use crate::core::edl_value::EdlConstValue;
-use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstEval, ConstFrame, ValueConstState};
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
@@ -69,7 +69,7 @@ impl MirArrayInit {
 
     /// Array init operator is comptime when all elements in the init list are also known at
     /// the time of execution
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,

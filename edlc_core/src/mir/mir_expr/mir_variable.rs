@@ -82,7 +82,7 @@ impl MirGlobalVar {
 
     /// For now, we will say that globals are always available at compile time.
     #[inline(always)]
-    pub fn is_comptime(
+    pub fn is_avail(
         &self,
     ) -> bool {
         true

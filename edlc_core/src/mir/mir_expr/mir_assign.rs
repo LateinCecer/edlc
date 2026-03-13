@@ -50,7 +50,7 @@ impl MirAssign {
         }
     }
 
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,

@@ -463,7 +463,7 @@ impl MirRef {
         }
     }
 
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,
@@ -582,7 +582,7 @@ impl MirDeref {
         }
     }
 
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,
@@ -642,7 +642,7 @@ impl MirDowncastRef {
         vm.memcpy_slice(&[*target], &[self.value], stack_frame);
     }
 
-    pub(super) fn is_comptime(
+    pub(super) fn is_avail(
         &self,
         frame: &ConstFrame,
         graph: &BorrowGraph,
