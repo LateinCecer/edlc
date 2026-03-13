@@ -24,13 +24,13 @@ use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, DebugSymbols, ExecutionError, MirBlockRef, MirExprVariant, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprVariant, MirGraphLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
@@ -278,6 +278,137 @@ impl ConstEval {
         }
     }
 
+    /// Removes unused constant expressions from the MIR flow graph.
+    /// Please note that drops do not count has uses.
+    fn remove_unused_consts(&self, cfg: &mut MirFlowGraph) {
+        struct Info {
+            init: DefPoint,
+            drop: Option<VarUse>,
+            in_use: bool,
+        }
+
+        impl Info {
+            fn new(p: DefPoint) -> Self {
+                Info {
+                    init: p,
+                    drop: None,
+                    in_use: false,
+                }
+            }
+
+            fn def(block_ref: MirBlockRef, uid: BlockLocalStatementUid) -> Self {
+                Self::new(DefPoint::Definition(MirGraphLoc(block_ref, uid)))
+            }
+
+            fn param(block_ref: MirBlockRef, idx: BlockParameterIndex) -> Self {
+                Self::new(DefPoint::BlockParameter(block_ref, idx))
+            }
+
+            fn insert_move(&mut self, u: VarUse) {
+                self.in_use = true;
+                self.drop = Some(u);
+            }
+
+            fn insert_copy(&mut self, u: VarUse) {
+                self.in_use = true;
+                self.drop = Some(u);
+            }
+
+            fn insert_drop(&mut self, u: VarUse) {
+                self.drop = Some(u);
+            }
+        }
+
+        let mut buf: IndexMap<Info> = IndexMap::default();
+
+        fn insert_call(call: &BlockCall, block_ref: MirBlockRef, buf: &mut IndexMap<Info>) {
+            call.params.iter()
+                .for_each(|param| buf.get_mut(param.0).unwrap()
+                    .insert_move(VarUse::Seal(block_ref, *param)));
+        }
+
+        for (block_ref, block) in cfg.blocks.iter().enumerate() {
+            // find all constant, unused values
+            let block_ref = MirBlockRef(block_ref);
+            // iterate value uses
+            for (idx, param) in block.parameters.iter().enumerate() {
+                buf.view_mut(param.0)
+                    .set(Info::param(block_ref, BlockParameterIndex(idx)));
+            }
+            for statement in block.statements.iter() {
+                match statement {
+                    Statement::VarDef { var, value, uid, debug: _ } => {
+                        buf.view_mut(var.0).set(Info::def(block_ref, *uid));
+                        for u in cfg.expressions.collect_vars(*value) {
+                            buf.get_mut(u.0).unwrap().in_use = true;
+                        }
+                    }
+                    Statement::VarMove { var, value, uid, debug: _ } => {
+                        buf.view_mut(var.0).set(Info::def(block_ref, *uid));
+                        buf.get_mut(value.0).unwrap()
+                            .insert_move(VarUse::Statement(block_ref, *value, *uid));
+                    }
+                    Statement::VarCopy { var, value, uid, debug: _ } => {
+                        buf.view_mut(var.0).set(Info::def(block_ref, *uid));
+                        buf.get_mut(value.0).unwrap()
+                            .insert_copy(VarUse::Statement(block_ref, *value, *uid));
+                    }
+                    Statement::Drop { value, uid, debug: _ } => {
+                        buf.get_mut(value.0).unwrap()
+                            .insert_drop(VarUse::Statement(block_ref, *value, *uid));
+                    }
+                    Statement::Sync { event, uid, debug: _ } => {
+                        buf.get_mut(event.internal_value.0).unwrap()
+                            .insert_drop(VarUse::Statement(block_ref, event.internal_value, *uid));
+                    }
+                    Statement::Record { event, uid, debug: _ } => {
+                        buf.view_mut(event.internal_value.0).set(Info::def(block_ref, *uid));
+                    }
+                }
+            }
+            match &block.seal {
+                Seal::Jump(target, _) => {
+                    insert_call(target, block_ref, &mut buf);
+                },
+                Seal::Cond { cond, then_target, else_target, debug: _ }  => {
+                    buf.get_mut(cond.0).unwrap()
+                        .insert_move(VarUse::Seal(block_ref, *cond));
+                    insert_call(then_target, block_ref, &mut buf);
+                    insert_call(else_target, block_ref, &mut buf);
+                }
+                Seal::Switch { cond, targets, default, debug: _ } => {
+                    buf.get_mut(cond.0).unwrap()
+                        .insert_move(VarUse::Seal(block_ref, *cond));
+                    targets.iter().for_each(|target| {
+                        buf.get_mut(target.match_value.0).unwrap()
+                            .insert_move(VarUse::Seal(block_ref, target.match_value));
+                        insert_call(&target.block_call, block_ref, &mut buf);
+                    });
+                    insert_call(default, block_ref, &mut buf);
+                }
+                Seal::Return(value, _) => {
+                    buf.get_mut(value.0).unwrap()
+                        .insert_move(VarUse::Seal(block_ref, *value));
+                }
+                Seal::Panic(value, _) => {
+                    buf.get_mut(value.0).unwrap()
+                        .insert_move(VarUse::Seal(block_ref, *value));
+                }
+                Seal::None => unreachable!()
+            }
+        }
+
+        // remove all values that we can consider to be dropped
+        for (val_raw, info) in buf.iter() {
+            if !info.in_use && matches!(self.const_states.get(val_raw), Some(ConstState::Const(_))) {
+                cfg.remove_def(&info.init);
+                if let Some(drop) = info.drop.as_ref() {
+                    cfg.remove_use(drop);
+                }
+            }
+        }
+    }
+
     /// Merges the states of the block call parameter values into the target block parameters.
     /// If any of the target block parameters changed as a result of this operation, `true` is
     /// returned.
@@ -487,6 +618,7 @@ impl MirFlowGraph {
         self.reduce_const_branching(consts);
         self.replace_constant_parameters(consts);
         self.replace_constant_statements(consts);
+        consts.remove_unused_consts(self);
     }
 
     fn replace_constant_statements(&mut self, consts: &ConstEval) {
@@ -527,13 +659,13 @@ impl MirFlowGraph {
     /// graph.
     /// To keep the CFG consistent, this includes updating *all* block calls within the flow_graph.
     fn replace_constant_parameters(&mut self, consts: &ConstEval) {
-        let mut retain_list = vec![]; // for each block, maintaine a list of block parameter
+        let mut retain_list = vec![]; // for each block, maintain a list of block parameter
         // indices that we *want to keep*
         for block in self.blocks.iter_mut() {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
             // check parameters
-            let debug = DebugSymbols { pos: block.pos.clone() };
+            let debug = DebugSymbols { pos: block.pos };
 
             let mut statements = params
                 .iter()
@@ -621,6 +753,7 @@ impl MirFlowGraph {
                 _ => ()
             }
         }
+        self.build_reverse_jump_list();
     }
 
     /// Resolves the comptime call parameters in all function calls.
@@ -955,16 +1088,13 @@ fn process_function(
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
 
-    let lifeness = body.body.lifetimes(&mut compiler.mir_phase.types)?;
+    let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
-    // deconstruction.print_ranges();
-    // deconstruction.print_mapping(&body.body);
-
     let options = StackFrameOptions {
         store_plane: true,
         .. Default::default()
     };
-    let stack_frame = StackFrameLayout::new(
+    let mut stack_frame = StackFrameLayout::new(
         &deconstruction,
         options,
         &body.body,
@@ -990,7 +1120,34 @@ fn process_function(
 
     // insert constant eval results where possible
     body.body.include_constants(&const_eval);
-    // TODO validate
+    let mut borrow_graph = body.body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    let report = body.body.check_scopes(&borrow_graph);
+    report.print();
+    body.body.route_owner_data(
+        &mut borrow_graph,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.body.insert_drops_with_dependencies(&borrow_graph)?;
+
+    let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
+    let deconstruction = body.body.deconstruct(&lifeness)?;
+    let options = StackFrameOptions {
+        store_plane: true,
+        .. Default::default()
+    };
+    stack_frame = StackFrameLayout::new(
+        &deconstruction,
+        options,
+        &body.body,
+        &compiler.mir_phase.types,
+    );
+
     body.stack_frame_layout = Some(stack_frame); // save stack frame for future reference
     Ok(())
 }

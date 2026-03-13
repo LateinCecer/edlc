@@ -42,7 +42,7 @@ use crate::prelude::{AmorphusDataCopy, ExecutorVM, ModuleSrc};
 use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, LogicSolver, TransferFn, WorkListFixpointBackward, WorkListFixpointForward};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fmt::{Debug, Display};
+use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Deref, Range};
 use log::debug;
 use crate::core::edl_type::EdlTypeRegistry;
@@ -78,6 +78,12 @@ pub struct Scope(usize);
 ///       variables and are moved on use, instead of copied!
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirValue(pub(crate) usize);
+
+impl Display for MirValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${:x}", self.0)
+    }
+}
 
 /// Indicates a specific position in the MIR flow graph.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -254,6 +260,22 @@ pub struct BlockCall {
 }
 
 impl BlockCall {
+    fn find_idx(&self, target: &MirBlockRef, value: &MirValue) -> Option<BlockParameterIndex> {
+        if &self.target == target {
+            self.params.iter().position(|x| x == value).map(BlockParameterIndex)
+        } else {
+            None
+        }
+    }
+
+    fn remove_param(&mut self, target: &MirBlockRef, idx: &BlockParameterIndex) -> Option<MirValue> {
+        if target == &self.target {
+            Some(self.params.remove(idx.0))
+        } else {
+            None
+        }
+    }
+
     fn uses_var(&self, temp_var: &MirValue) -> bool {
         self.params.contains(temp_var)
     }
@@ -496,6 +518,55 @@ impl Statement {
     }
 }
 
+struct SealLinks<'a> {
+    index: usize,
+    seal: &'a Seal,
+}
+
+impl<'a> Iterator for SealLinks<'a> {
+    type Item = &'a BlockCall;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.seal {
+            Seal::Jump(target, _) => {
+                if self.index == 0 {
+                    self.index += 1;
+                    Some(target)
+                } else {
+                    None
+                }
+            }
+            Seal::Return(_, _) => None,
+            Seal::Cond { then_target, else_target, .. } => {
+                match self.index {
+                    0 => {
+                        self.index += 1;
+                        Some(then_target)
+                    }
+                    1 => {
+                        self.index += 1;
+                        Some(else_target)
+                    }
+                    _ => None
+                }
+            }
+            Seal::Switch { targets, default, .. } => {
+                if let Some(arm) = targets.get(self.index) {
+                    self.index += 1;
+                    Some(&arm.block_call)
+                } else if self.index == targets.len() {
+                    self.index += 1;
+                    Some(default)
+                } else {
+                    None
+                }
+            }
+            Seal::Panic(_, _) => None,
+            Seal::None => None,
+        }
+    }
+}
+
 #[derive(Default, Clone, PartialEq, Debug)]
 enum Seal {
     /// An unconditional to another block where the specified expression is used as the return
@@ -535,6 +606,56 @@ enum Seal {
 }
 
 impl Seal {
+    fn links(&self) -> SealLinks<'_> {
+        SealLinks {
+            seal: self,
+            index: 0,
+        }
+    }
+
+    fn find_idx(&self, target: &MirBlockRef, val: &MirValue) -> Option<BlockParameterIndex> {
+        match self {
+            Self::Jump(call, _) => call.find_idx(target, val),
+            Self::Cond { then_target, else_target, .. } => {
+                if let Some(idx) = then_target.find_idx(target, val) {
+                    return Some(idx);
+                }
+                if let Some(idx) = else_target.find_idx(target, val) {
+                    return Some(idx);
+                }
+                None
+            }
+            Self::Switch { targets, default, .. } => {
+                for arm in targets.iter() {
+                    if let Some(idx) = arm.block_call.find_idx(target, val) {
+                        return Some(idx);
+                    }
+                }
+                default.find_idx(target, val)
+            }
+            _ => None
+        }
+    }
+
+    fn remove_param(&mut self, target: &MirBlockRef, idx: &BlockParameterIndex) {
+        match self {
+            Self::Jump(call, _) => {
+                call.remove_param(target, idx);
+            }
+            Self::Cond { then_target, else_target, .. } => {
+                then_target.remove_param(target, idx);
+                else_target.remove_param(target, idx);
+            }
+            Self::Switch { targets, default, .. } => {
+                targets.iter_mut().for_each(|call| {
+                    call.block_call.remove_param(target, idx);
+                });
+                default.remove_param(target, idx);
+            }
+            _ => (),
+        }
+    }
+
     fn uses_var(&self, var: &MirValue) -> bool {
          match self {
             Self::Return(return_value, _) => return_value == var,
@@ -2182,6 +2303,40 @@ impl MirFlowGraph {
         ExitBlockIter {
             cfg: self,
             index: 0,
+        }
+    }
+
+    pub fn remove_def(&mut self, point: &DefPoint) {
+        match point {
+            DefPoint::Definition(MirGraphLoc(block_ref, uid)) => {
+                let Some(idx) = self.blocks[block_ref.0].find_current_index(uid) else {
+                    return;
+                };
+                self.blocks[block_ref.0]
+                    .statements
+                    .remove(idx);
+            }
+            DefPoint::BlockParameter(block_ref, idx) => {
+                self.blocks[block_ref.0].parameters.remove(idx.0);
+                for parent in self.backlinks[block_ref.0].iter() {
+                    let seal = &mut self.blocks[parent.0].seal;
+                    seal.remove_param(block_ref, idx);
+                }
+            }
+        }
+    }
+
+    pub fn remove_use(&mut self, point: &VarUse) {
+        match point {
+            VarUse::Statement(block_ref, _value, uid) => {
+                let Some(idx) = self.blocks[block_ref.0].find_current_index(uid) else {
+                    return;
+                };
+                self.blocks[block_ref.0]
+                    .statements
+                    .remove(idx);
+            }
+            VarUse::Seal(_block_ref, _val) => unimplemented!()
         }
     }
 }

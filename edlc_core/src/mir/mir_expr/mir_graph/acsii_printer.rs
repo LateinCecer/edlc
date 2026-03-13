@@ -56,6 +56,14 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             }
             self.write_value(params)?;
         }
+        for param in expr.comptime_args.iter() {
+            if first {
+                first = false;
+            } else {
+                write!(self.writer, ", ")?;
+            }
+            self.write_value(&param.value_expr)?;
+        }
         write!(self.writer, ")")
     }
 

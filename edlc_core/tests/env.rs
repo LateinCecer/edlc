@@ -211,18 +211,13 @@ impl TestCompiler {
 
         // body.constant_analysis()?;
         // println!("doing lifetime analysis");
-        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
-        // println!("done with lifetime analysis");
-
-
-        let deconstruction = body.deconstruct(&lifeness)?;
-        // deconstruction.print_ranges();
-        // deconstruction.print_mapping(&body);
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
 
         // create stack frame
+        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        let deconstruction = body.deconstruct(&lifeness)?;
         let options = StackFrameOptions {
             store_plane: true,
             .. Default::default()
@@ -248,6 +243,25 @@ impl TestCompiler {
         }
         body.include_constants(&res); // includes the compile-time analysis results into the
         // CFG for optimization
+        // After after all modifications to the CFG, run final verification steps
+        borrow_graph = body.borrows(
+            &mut self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+            &self.compiler.phase.vars,
+        )?;
+        let report = body.check_scopes(&borrow_graph);
+        report.print();
+        body.insert_drops_with_dependencies(&borrow_graph)?;
+
+        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        let deconstruction = body.deconstruct(&lifeness)?;
+        let options = StackFrameOptions {
+            store_plane: true,
+            .. Default::default()
+        };
+        stack_frame = StackFrameLayout::new(
+            &deconstruction, options, &body, &self.compiler.mir_phase.types);
+
 
         process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
 
@@ -258,7 +272,7 @@ impl TestCompiler {
         writer.print(&body)?;
         out.flush()?;
 
-        vm.alloc_stack_frame(&mut stack_frame);
+        vm.alloc_stack_frame(&stack_frame);
         let res = body
             .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
         match res {
