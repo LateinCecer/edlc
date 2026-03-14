@@ -230,6 +230,7 @@ impl ExprEval<ConstState, ConstPropagation> for MirAssign {
         _log: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, ConstPropagationError> {
+        // TODO workout borrow graph for const-checking through reference graph
         Ok(input.replace(target, input.element_value(&self.rhs)))
     }
 }
@@ -305,11 +306,7 @@ impl ExprEval<ConstState, ConstPropagation> for MirRef {
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, ConstPropagationError> {
-        if self.mutable {
-            Ok(input.replace(target, ConstState::Runtime))
-        } else {
-            Ok(input.replace(target, input.element_value(&self.value)))
-        }
+        Ok(input.replace(target, input.element_value(&self.value)))
     }
 }
 

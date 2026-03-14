@@ -179,6 +179,9 @@ impl TestCompiler {
         body.insert_return(current_block, ret_value, DebugSymbols { pos: hir.pos().clone() });
         body.seal();
 
+        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        body.promote_moves_with_lifetimes(&lifeness);
+
         // write MIR code to file for debugging
         let mut out = BufWriter::new(File::create("../test_mir/raw.mir")?);
         let mut writer = AsciPrinter::new(&mut out);
@@ -724,10 +727,13 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
 
         // create an array to test internal references
         let mut arr = [1_i32, 2, 4, 8, 16, 32];
-        arr[2] = 6;
+        arr[2] = std::input();
         std::print("array index access: ");
         std::print(arr[2]);
         std::print("\n");
+
+        // copy arr to somewhere else
+        let second_array = arr;
 
         let data = MyData {
             name: "Ferris",
@@ -738,9 +744,9 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
         std::print(data.age);
         std::print("\n");
 
-        arr[3] = data.age;
+        arr[2] = data.age;
         std::print("array index access after Ferris: ");
-        std::print(arr[3]);
+        std::print(arr[2]);
         std::print("\n");
 
         plot({ x: 0.0, y: 1.0, line_thickness: 1.0 });

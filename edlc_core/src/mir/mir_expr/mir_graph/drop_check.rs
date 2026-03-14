@@ -34,6 +34,7 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
+use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 
@@ -521,6 +522,25 @@ impl AnalyseDrop for MirRef {
         uid: &BlockLocalStatementUid,
         state: &mut DropAnalysis,
     ) -> Result<(), DropError> {
+        match &self.offset {
+            RefOffset::Entire => (),
+            RefOffset::Const(_) => (),
+            RefOffset::ArrayIndex { index, .. } => {
+                state.register_drop(VarUse::Statement(*block_ref, *index, *uid))?;
+            }
+            RefOffset::SliceIndex { index, .. } => {
+                state.register_drop(VarUse::Statement(*block_ref, *index, *uid))?;
+            }
+            RefOffset::ArrayRange { start, end, .. } => {
+                state.register_drop(VarUse::Statement(*block_ref, *start, *uid))?;
+                state.register_drop(VarUse::Statement(*block_ref, *end, *uid))?;
+            }
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
+                state.register_drop(VarUse::Statement(*block_ref, *start, *uid))?;
+                state.register_drop(VarUse::Statement(*block_ref, *end, *uid))?;
+                state.register_drop(VarUse::Statement(*block_ref, *slice_size, *uid))?;
+            }
+        }
         state.register_non_drop_mention(
             self.value, DefPoint::Definition(MirGraphLoc::new(*block_ref, *uid)))
     }

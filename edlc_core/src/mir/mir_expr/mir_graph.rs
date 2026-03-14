@@ -1857,7 +1857,7 @@ impl MirFlowGraph {
         self.build_reverse_jump_list();
         self.route_variables();
         self.bake_ssa_variables();
-        self.promote_moves();
+        // self.promote_moves();
     }
 
     /// Generates the reverse jump list that is used as a quick lookup table by other algorithms
@@ -2114,6 +2114,48 @@ impl MirFlowGraph {
                 if block.find_closest_use(block_ref, &self.expressions, idx + 1, value).is_some() {
                     let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value, debug: debug.clone() };
                     block.statements[idx] = new_statement;
+                }
+            }
+        }
+    }
+
+    /// Checks all move statements in the CFG for cases in which the moved value is still alive
+    /// after the move, as analyzed by a lifetime-analysis pre-pass.
+    /// In all cases in which this is the case, the move statement is replaced with a copy
+    /// statement.
+    /// If `core::Copy` is not implemented for the type, this will lead to an error during later
+    /// stages of MIR transformation and validation.
+    ///
+    /// # References
+    ///
+    /// It should be noted that, if lifetime tracking is done right, this method will correctly
+    /// identify scenarios in which a reference to a value is still live after the value is moved.
+    /// Thus, after this pass, in theory we can be sure that no value is moved as long as it is
+    /// still being referenced somewhere, as in that case, a copy will be made instead of a move.
+    pub fn promote_moves_with_lifetimes(&mut self, lifetimes: &RegionLifenessList) {
+        for block_index in 0..self.blocks.len() {
+            let block_ref = MirBlockRef(block_index);
+            for idx in 0..self.blocks[block_index].statements.len() {
+                let Statement::VarMove {
+                    var,
+                    uid,
+                    value,
+                    debug
+                } = &self.blocks[block_index].statements[idx] else {
+                    continue;
+                };
+                if lifetimes.is_alive_after(
+                    value,
+                    &MirLoc::GraphLoc(MirGraphLoc(block_ref, *uid)),
+                    self
+                ) {
+                    let new_statement = Statement::VarCopy {
+                        var: *var,
+                        uid: *uid,
+                        value: *value,
+                        debug: debug.clone()
+                    };
+                    self.blocks[block_index].statements[idx] = new_statement;
                 }
             }
         }

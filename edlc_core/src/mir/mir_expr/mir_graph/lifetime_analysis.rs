@@ -238,8 +238,24 @@ impl RegionLifenessList {
         self.regions[lhs.0].overlaps_non_equal(&self.regions[rhs.0], &self.scopes)
     }
 
-    pub fn is_alive_at(&self, value: &MirValue, loc: &MirLoc, cfg: &MirFlowGraph) -> bool {
+    pub fn is_alive_at(
+        &self,
+        value: &MirValue,
+        loc: &MirLoc,
+        cfg: &MirFlowGraph,
+    ) -> bool {
         let (block, current_index) = cfg.current_index(loc).unwrap();
+        self.regions[value.0].contains(&(block, current_index..(current_index + 1)), &self.scopes)
+    }
+
+    pub fn is_alive_after(
+        &self,
+        value: &MirValue,
+        loc: &MirLoc,
+        cfg: &MirFlowGraph,
+    ) -> bool {
+        let (block, mut current_index) = cfg.current_index(loc).unwrap();
+        current_index += 1;
         self.regions[value.0].contains(&(block, current_index..(current_index + 1)), &self.scopes)
     }
 }
@@ -405,14 +421,19 @@ impl TransferMove<LifetimeAnalysis> for LifetimeSpan {
     fn transfer_move(
         value: &MirValue,
         input: &mut HashNodeState<MirValue, Self>,
-        _ctx: &mut LifetimeAnalysis,
+        ctx: &mut LifetimeAnalysis,
         loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, Self::Conflict> {
-        let target_value = input.element_value(target);
-        let mut src_value = input.element_value(value);
-        src_value.add_use(MirLoc::GraphLoc(*loc), *value);
-        Ok(input.replace(value, src_value.union(&target_value)?))
+        if ctx.is_reference(target) {
+            // if the target is a reference, then the source must outlive the target
+            let target_value = input.element_value(target);
+            let mut src_value = input.element_value(value);
+            src_value.add_use(MirLoc::GraphLoc(*loc), *value);
+            Ok(input.replace(value, src_value.union(&target_value)?))
+        } else {
+            Ok(input.element_value_mut(value).add_use(MirLoc::GraphLoc(*loc), *value))
+        }
     }
 }
 
@@ -601,7 +622,10 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirCall {
                     continue;
                 }
                 let arg_value = input.element_value(&comptime_arg.value_expr);
-                changed |= input.replace(&comptime_arg.value_expr, arg_value.union(&target_value)?);
+                changed |= input.replace(
+                    &comptime_arg.value_expr,
+                    arg_value.union(&target_value)?
+                );
             }
             Ok(changed)
         } else {
@@ -677,7 +701,7 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirDeref {
             .add_use(MirLoc::GraphLoc(*loc), self.value);
         if ctx.is_reference(target) {
             // if the target value is a reference, then the source must outlive the target
-            let target_region = input.element_value(&target);
+            let target_region = input.element_value(target);
             let value_region = input.element_value(&self.value);
             changed |= input.replace(
                 &self.value, value_region.union(&target_region)?);
@@ -697,7 +721,7 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirDowncastRef {
         target: &MirValue,
     ) -> Result<bool, RegionError> {
         let val = input.element_value(&self.value).union(&input.element_value(target))?;
-        Ok(input.replace(target, val.clone()) | input.replace(&self.value, val))
+        Ok(input.replace(&self.value, val))
     }
 }
 

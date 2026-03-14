@@ -280,11 +280,13 @@ impl ConstEval {
 
     /// Removes unused constant expressions from the MIR flow graph.
     /// Please note that drops do not count has uses.
-    fn remove_unused_consts(&self, cfg: &mut MirFlowGraph) {
+    fn remove_unused_consts(&self, cfg: &mut MirFlowGraph) -> usize {
+        #[derive(Debug)]
         struct Info {
             init: DefPoint,
             drop: Option<VarUse>,
             in_use: bool,
+            remove_allowed: bool,
         }
 
         impl Info {
@@ -293,6 +295,7 @@ impl ConstEval {
                     init: p,
                     drop: None,
                     in_use: false,
+                    remove_allowed: true,
                 }
             }
 
@@ -332,13 +335,19 @@ impl ConstEval {
             let block_ref = MirBlockRef(block_ref);
             // iterate value uses
             for (idx, param) in block.parameters.iter().enumerate() {
-                buf.view_mut(param.0)
-                    .set(Info::param(block_ref, BlockParameterIndex(idx)));
+                let mut info = Info::param(block_ref, BlockParameterIndex(idx));
+                info.remove_allowed = false; // don't remove any block parameters for now
+                buf.view_mut(param.0).set(info);
             }
             for statement in block.statements.iter() {
                 match statement {
                     Statement::VarDef { var, value, uid, debug: _ } => {
-                        buf.view_mut(var.0).set(Info::def(block_ref, *uid));
+                        let mut info = Info::def(block_ref, *uid);
+                        // nothing should have side effects, except for runtime calls
+                        info.remove_allowed = !matches!(value.ty, MirExprVariant::Call)
+                            || matches!(self.const_states.get(var.0), Some(ConstState::Const(_)));
+
+                        buf.view_mut(var.0).set(info);
                         for u in cfg.expressions.collect_vars(*value) {
                             buf.get_mut(u.0).unwrap().in_use = true;
                         }
@@ -362,7 +371,9 @@ impl ConstEval {
                             .insert_drop(VarUse::Statement(block_ref, event.internal_value, *uid));
                     }
                     Statement::Record { event, uid, debug: _ } => {
-                        buf.view_mut(event.internal_value.0).set(Info::def(block_ref, *uid));
+                        let mut info = Info::def(block_ref, *uid);
+                        info.remove_allowed = false;
+                        buf.view_mut(event.internal_value.0).set(info);
                     }
                 }
             }
@@ -399,14 +410,22 @@ impl ConstEval {
         }
 
         // remove all values that we can consider to be dropped
+        let mut remove_counter = 0;
         for (val_raw, info) in buf.iter() {
-            if !info.in_use && matches!(self.const_states.get(val_raw), Some(ConstState::Const(_))) {
+            if val_raw == 0x3a {
+                dbg!(info);
+            }
+
+            // if !info.in_use && (info.is_const || matches!(self.const_states.get(val_raw), Some(ConstState::Const(_)))) {
+            if !info.in_use && info.remove_allowed {
                 cfg.remove_def(&info.init);
                 if let Some(drop) = info.drop.as_ref() {
                     cfg.remove_use(drop);
                 }
+                remove_counter += 1;
             }
         }
+        remove_counter
     }
 
     /// Merges the states of the block call parameter values into the target block parameters.
@@ -618,7 +637,7 @@ impl MirFlowGraph {
         self.reduce_const_branching(consts);
         self.replace_constant_parameters(consts);
         self.replace_constant_statements(consts);
-        consts.remove_unused_consts(self);
+        while consts.remove_unused_consts(self) > 0 {}
     }
 
     fn replace_constant_statements(&mut self, consts: &ConstEval) {
@@ -1073,6 +1092,9 @@ fn process_function(
     compiler: &mut EdlCompiler,
     backend: &mut impl Backend,
 ) -> Result<(), OptimizationError> {
+    let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
+    body.body.promote_moves_with_lifetimes(&lifeness);
+
     let mut borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
         &compiler.phase.types,
