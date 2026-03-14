@@ -227,11 +227,13 @@ impl ExprEval<ConstState, ConstPropagation> for MirAssign {
         &self,
         input: &mut HashNodeState<MirValue, ConstState>,
         _ctx: &mut ConstPropagation,
-        _log: &MirGraphLoc,
+        _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, ConstPropagationError> {
         // TODO workout borrow graph for const-checking through reference graph
-        Ok(input.replace(target, input.element_value(&self.rhs)))
+        input.replace(target, input.element_value(&self.rhs)
+            .lower(input.element_value(&self.lhs))?);
+        Ok(input.replace(&self.lhs, input.element_value(&self.rhs)))
     }
 }
 

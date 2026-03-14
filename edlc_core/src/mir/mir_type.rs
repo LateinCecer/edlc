@@ -394,6 +394,12 @@ pub struct MemberOffset {
     pub align: usize,
 }
 
+impl MemberOffset {
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.offset < other.offset + other.size && other.offset < self.offset + self.size
+    }
+}
+
 impl Display for MemberOffset {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:08x} ({:08x} bytes)", self.offset, self.size)

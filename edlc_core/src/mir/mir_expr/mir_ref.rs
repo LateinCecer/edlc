@@ -587,7 +587,7 @@ impl MirDeref {
         frame: &ConstFrame,
         graph: &BorrowGraph,
     ) -> bool {
-        frame.is_avail(&self.value, graph)
+        frame.is_deref_avail(&self.value, graph)
     }
 }
 

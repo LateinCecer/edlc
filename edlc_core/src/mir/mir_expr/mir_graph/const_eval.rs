@@ -47,7 +47,7 @@ enum ConstEvalState {
 /// Const eval data
 pub struct ConstEval {
     consts: IndexMap<ConstEvalState>,
-    const_states: IndexMap<ConstState>,
+    // const_states: IndexMap<ConstState>,
     block_frame: ConstFrame,
     borrow_graph: BorrowGraph,
 }
@@ -166,32 +166,46 @@ impl CallParameterCopy {
 
 impl ConstFrame {
     pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
-        self.avail.contains(value) && self.references.get_max(value, graph, FlowState::cmp)
+        self.avail.contains(value) && self.references.get_max_for_owners(value, graph, FlowState::cmp)
             .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
     }
 
-    pub fn assign(&mut self, target: &MirValue, src: &MirValue, graph: &BorrowGraph) {
-        let state = if self.is_avail(src, graph) {
-            FlowState::Fixed
-        } else {
-            FlowState::Floating
-        };
-        self.references.set_value(*target, state, graph, FlowState::cmp);
+    pub fn is_deref_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
+        self.avail.contains(value) && self.references.get_max_for_deref(value, graph, FlowState::cmp)
+            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
+    }
+
+    pub fn set_avail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        self.avail.insert(*value);
+        self.references.set_owner_value(*value, FlowState::Fixed, graph, FlowState::cmp);
+    }
+
+    pub fn set_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        self.avail.remove(value);
+        self.references.set_owner_value(*value, FlowState::Floating, graph, FlowState::cmp);
+    }
+
+    pub fn set_deref_avail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        self.references.set_deref_value(*value, FlowState::Fixed, graph, FlowState::cmp);
+    }
+
+    pub fn set_deref_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        self.references.set_deref_value(*value, FlowState::Floating, graph, FlowState::cmp);
     }
 }
 
 impl ConstEval {
     pub fn new(borrow_graph: BorrowGraph, const_states: IndexMap<ConstState>) -> Self {
         let mut consts: IndexMap<ConstEvalState> = IndexMap::default();
-        for (idx, state) in const_states.iter() {
-            if !matches!(state, ConstState::Const(_)) {
-                consts.view_mut(idx).set(ConstEvalState::Runtime);
-            }
-        }
+        // for (idx, state) in const_states.iter() {
+        //     if !matches!(state, ConstState::Const(_)) {
+        //         consts.view_mut(idx).set(ConstEvalState::Runtime);
+        //     }
+        // }
 
         ConstEval {
             consts,
-            const_states,
+            // const_states,
             block_frame: ConstFrame {
                 avail: HashSet::new(),
                 references: ReferenceStateForest::new(&borrow_graph.forest, FlowState::Fixed),
@@ -226,7 +240,10 @@ impl ConstEval {
                 let src = stack_frame.get_offset(caller_value, vm).unwrap();
                 let dst = stack_frame.get_offset(callee_value, vm).unwrap();
                 vm.memcpy(&dst, &src);
-                self.block_frame.avail.insert(*callee_value);
+
+                self.block_frame.set_avail(callee_value, &self.borrow_graph);
+            } else {
+                self.block_frame.set_unavail(callee_value, &self.borrow_graph);
             }
             self.merge_parameter_const_state(cfg, caller_value, callee_value, reg, Some(&block_frame));
         }
@@ -242,19 +259,37 @@ impl ConstEval {
         vm: &ExecutorVM,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> bool {
+        Self::insert_const_value_internal(
+            &mut self.block_frame, &mut self.consts, &self.borrow_graph, cfg, value, vm, stack_frame, reg)
+    }
+
+    /// Inserts a constant value to the pool of constant values in the evaluator.
+    /// If there is more than one unique value for the same [MirValue], then we must assume that
+    /// the value is only known at runtime.
+    fn insert_const_value_internal(
+        block_frame: &mut ConstFrame,
+        consts: &mut IndexMap<ConstEvalState>,
+        borrow_graph: &BorrowGraph,
+        cfg: &MirFlowGraph,
+        value: &MirValue,
+        vm: &ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) -> bool {
         // in the current execution frame, the value is definitely known at this point
-        self.block_frame.avail.insert(*value);
+        block_frame.set_avail(value, borrow_graph);
 
         // outside the current frame, it depends on a few factors:
         //  1. does the value have different definitions at different points of execution?
         //  2. is the value a reference (references are *not* compiled as constants, since the
         //     target location of that reference might/will probably change after code gen)
-        let mut view = self.consts.view_mut(value.0);
+        let mut view = consts.view_mut(value.0);
         let ty = cfg.get_var_type(value);
         if reg.is_ref(ty) {
+            let changed = !matches!(view.get(), Some(ConstEvalState::Runtime));
             view.set(ConstEvalState::Runtime);
-            return;
+            return changed;
         }
 
         // is not a reference, so see if there is a competing version registered already
@@ -266,16 +301,70 @@ impl ConstEval {
                     if value != prev.as_data() {
                         // value is not eval (direct byte comparison)
                         // assume that the value can only be known at runtime
+                        let changed = matches!(view.get(), Some(ConstEvalState::Runtime));
                         view.set(ConstEvalState::Runtime);
+                        changed
+                    } else {
+                        false
                     }
                 }
-                ConstEvalState::Runtime => (), // do nothing in this case
+                ConstEvalState::Runtime => {
+                    // do nothing in this case
+                    false
+                },
             }
         } else {
             let range = stack_frame.get_offset(value, vm).unwrap();
             let value = vm.get_data(range.0, range.1).get_copy(reg);
-            view.set(ConstEvalState::Known(value))
+            view.set(ConstEvalState::Known(value));
+            true
         }
+    }
+
+    fn insert_const_behind_ref(
+        &mut self,
+        cfg: &MirFlowGraph,
+        value: &MirValue,
+        vm: &ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) -> bool {
+        self.block_frame.set_deref_avail(value, &self.borrow_graph);
+        let Some(state) = self.borrow_graph.get_paths(value) else {
+            return false;
+        };
+        let mut changed = false;
+        for path in state.iter() {
+            let Some(tree) = self.borrow_graph.forest.get(&path.source) else {
+                continue;
+            };
+            for other in tree.get_owners() {
+                changed |= Self::insert_const_value_internal(
+                    &mut self.block_frame, &mut self.consts, &self.borrow_graph, cfg, other, vm, stack_frame, reg);
+            }
+        }
+        changed
+    }
+
+    fn mark_runtime_behind_ref(
+        &mut self,
+        value: &MirValue,
+    ) -> bool {
+        let Some(state) = self.borrow_graph.get_paths(value) else {
+            return false;
+        };
+        let mut changed = false;
+        for path in state.iter() {
+            let Some(tree) = self.borrow_graph.forest.get(&path.source) else {
+                continue;
+            };
+            for other in tree.get_owners() {
+                let mut view = self.consts.view_mut(other.0);
+                changed |= !matches!(view.get(), Some(ConstEvalState::Runtime));
+                view.set(ConstEvalState::Runtime);
+            }
+        }
+        changed
     }
 
     /// Removes unused constant expressions from the MIR flow graph.
@@ -344,8 +433,9 @@ impl ConstEval {
                     Statement::VarDef { var, value, uid, debug: _ } => {
                         let mut info = Info::def(block_ref, *uid);
                         // nothing should have side effects, except for runtime calls
-                        info.remove_allowed = !matches!(value.ty, MirExprVariant::Call)
-                            || matches!(self.const_states.get(var.0), Some(ConstState::Const(_)));
+                        // info.remove_allowed = !matches!(value.ty, MirExprVariant::Assign) &&
+                        //     (!matches!(value.ty, MirExprVariant::Call) || matches!(self.const_states.get(var.0), Some(ConstState::Const(_))));
+                        info.remove_allowed = !matches!(value.ty, MirExprVariant::Assign | MirExprVariant::Call);
 
                         buf.view_mut(var.0).set(info);
                         for u in cfg.expressions.collect_vars(*value) {
@@ -518,15 +608,15 @@ impl ConstEval {
         })
     }
 
-    pub fn is_const(
-        &self,
-        value: &MirValue,
-    ) -> ConstState {
-        self.const_states
-            .get(value.0)
-            .cloned()
-            .unwrap_or_default()
-    }
+    // pub fn is_const(
+    //     &self,
+    //     value: &MirValue,
+    // ) -> ConstState {
+    //     self.const_states
+    //         .get(value.0)
+    //         .cloned()
+    //         .unwrap_or_default()
+    // }
 }
 
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
@@ -652,7 +742,10 @@ impl MirFlowGraph {
                     Statement::VarMove { var, uid, debug, .. } => {
                         (var, *uid, debug.clone())
                     }
-                    Statement::VarDef { var, uid, debug, .. } => {
+                    Statement::VarDef { var, value, uid, debug, .. } => {
+                        if value.ty == MirExprVariant::Assign {
+                            continue;
+                        }
                         (var, *uid, debug.clone())
                     }
                     Statement::Drop { .. } => {
@@ -847,7 +940,8 @@ impl MirFlowGraph {
                 // }
                 // visit.update(|val| *val += 1, || 0);
 
-                self.blocks[current_block.0].eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
+                self.blocks[current_block.0]
+                    .eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
                 // jump to other block using sealing statement
                 match &self.blocks[current_block.0].seal {
                     Seal::Return(_value, _debug) => {
@@ -960,6 +1054,7 @@ pub(crate) fn report_comptime_unknown(value: MirValue) {
 }
 
 impl Block {
+    #[must_use]
     fn eval_consts(
         &self,
         cfg: &MirFlowGraph,
@@ -968,14 +1063,19 @@ impl Block {
         reg: &MirTypeRegistry,
         backend: &impl Backend,
         const_eval: &mut ConstEval,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         for statement in self.statements.iter() {
-            statement.eval_consts(cfg, vm, stack_frame, reg, backend, const_eval);
+            changed |= statement.eval_consts(cfg, vm, stack_frame, reg, backend, const_eval);
         }
+        changed
     }
 }
 
 impl Statement {
+    #[must_use]
+    /// Evaluates a statement, if all conditions for the evaluation of that statement are present.
+    /// The method will return `true`, if the constant evaluation have been made.
     fn eval_consts(
         &self,
         cfg: &MirFlowGraph,
@@ -984,7 +1084,7 @@ impl Statement {
         reg: &MirTypeRegistry,
         backend: &impl Backend,
         const_eval: &mut ConstEval,
-    ) {
+    ) -> bool {
         match self {
             Self::VarMove { var, value, uid: _, debug: _ }
                 | Self::VarCopy { var, value, uid: _, debug: _ } => {
@@ -993,11 +1093,14 @@ impl Statement {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
                     vm.memcpy(&dst, &src);
-                    const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+                    const_eval.insert_const_value(cfg, var, vm, stack_frame, reg)
+                } else {
+                    const_eval.mark_runtime(var)
                 }
             }
             Self::VarDef { var, value, uid: _, debug: _ } => {
                 // check if the expression can be executed in comptime
+                let mut changed = false;
                 if cfg.expressions.is_avail(
                     *value,
                     backend,
@@ -1005,20 +1108,83 @@ impl Statement {
                     &const_eval.borrow_graph,
                 ) {
                     cfg.expressions.execute(vm, stack_frame, *value, var, reg, backend);
-                    const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+                    changed |= const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+
+                    // assigns and calls have the power to change values behind references
+                    match value.ty {
+                        MirExprVariant::Assign => {
+                            let assign = &cfg.expressions.assigns[value.id];
+                            changed |= const_eval.insert_const_behind_ref(
+                                cfg,
+                                &assign.lhs,
+                                vm,
+                                stack_frame,
+                                reg,
+                            );
+                        }
+                        MirExprVariant::Call => {
+                            let call = &cfg.expressions.call[value.id];
+                            for param in call.args.iter() {
+                                let ty = cfg.get_var_type(param);
+                                if reg.is_ref(ty) && reg.is_ref_mutable(ty) {
+                                    changed |= const_eval.insert_const_behind_ref(
+                                        cfg,
+                                        param,
+                                        vm,
+                                        stack_frame,
+                                        reg,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    changed
+                } else {
+                    // assigns and calls have the power to change values behind references
+                    let mut changed = false;
+                    match value.ty {
+                        MirExprVariant::Assign => {
+                            let assign = &cfg.expressions.assigns[value.id];
+                            const_eval.block_frame.set_deref_unavail(
+                                &assign.lhs, &const_eval.borrow_graph);
+                            changed |= const_eval.mark_runtime_behind_ref(
+                                &assign.lhs,
+                            );
+                        }
+                        MirExprVariant::Call => {
+                            let call = &cfg.expressions.call[value.id];
+                            for param in call.args.iter() {
+                                let ty = cfg.get_var_type(param);
+                                if reg.is_ref(ty) && reg.is_ref_mutable(ty) {
+                                    const_eval.block_frame.set_deref_unavail(
+                                        param, &const_eval.borrow_graph,
+                                    );
+                                    changed |= const_eval.mark_runtime_behind_ref(
+                                        param,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    changed |= const_eval.mark_runtime(var);
+                    changed
                 }
 
                 // deal with assigns separately
-                if value.ty == MirExprVariant::Assign {
-                    let assign_expr = &cfg.expressions.assigns[value.id];
-                    const_eval.block_frame.assign(
-                        &assign_expr.lhs, &assign_expr.rhs, &const_eval.borrow_graph);
-                }
+                // if value.ty == MirExprVariant::Assign {
+                //     let assign_expr = &cfg.expressions.assigns[value.id];
+                //     const_eval.block_frame.assign(
+                //         &assign_expr.lhs, &assign_expr.rhs, &const_eval.borrow_graph);
+                // }
             }
             // for now, just don't look at these during const eval
-            Self::Drop { value: _, uid: _, debug: _ } => (),
-            Self::Sync { event: _, uid: _, debug: _ } => (),
-            Self::Record { event: _, uid: _, debug: _ } => (),
+            Self::Drop { value: _, uid: _, debug: _ } => false,
+            Self::Sync { event: _, uid: _, debug: _ } => false,
+            Self::Record { event, uid: _, debug: _ } => {
+                const_eval.mark_runtime(&event.internal_value)
+            },
         }
     }
 }

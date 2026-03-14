@@ -13,6 +13,8 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
 use crate::core::EdlVarId;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
@@ -21,6 +23,7 @@ use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
+use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
@@ -28,18 +31,14 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirRef, MirValue, ValueScope};
 use crate::mir::mir_type::{MemberOffset, MirTypeRegistry};
+use crate::prelude::mir_type::MirTypeId;
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement, LogicSolver, WorkListFixpointForward};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
-use std::{collections, mem, ops};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
-use crate::ast::ast_expression::ast_block::BlockReason;
-use crate::core::edl_type::EdlTypeRegistry;
-use crate::core::edl_var::EdlVarRegistry;
-use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
-use crate::prelude::mir_type::MirTypeId;
+use std::{collections, mem, ops};
 
 /// The type of borrow.
 /// A borrow can be either complete or partial.
@@ -131,6 +130,7 @@ impl<V> ReferenceState<V> {
     where V: PartialEq + Eq {
         let node = graph.node_from_value(&value).unwrap();
         let value_id = self.insert_value_internal(v);
+        self.states[node.0] = value_id;
 
         // set the value of all child nodes directly, as the children definitely need to change
         // if the parent is overwritten
@@ -170,6 +170,7 @@ impl<V> ReferenceState<V> {
     where V: JoinState + PartialEq + Eq {
         let node = graph.node_from_value(&value).unwrap();
         let value_id = self.insert_value_internal(v);
+        self.states[node.0] = value_id;
 
         for child_id in graph.iter_nodes_after(node, &[]) {
             self.states[child_id.0] = value_id;
@@ -248,7 +249,7 @@ struct BorrowTreeBranch {
     children: ops::Range<usize>,
     parent: Option<usize>,
     leaves: ops::Range<usize>,
-    partial: MemberOffset,
+    partial: BorrowStackElement,
 }
 
 pub struct BorrowTree {
@@ -317,6 +318,7 @@ impl BorrowTree {
                     false
                 }
             });
+
             // writing the children with the worklist like this ensures that all children of a node
             // are in a contiguous region in the `nodes` pool
             let mut children_range = nodes.len()..nodes.len();
@@ -430,7 +432,7 @@ impl BorrowTree {
     }
 
     /// Gets the partial offset sequence that yields the specified node.
-    fn path_from_node(&self, node: &NodeId) -> Vec<MemberOffset> {
+    fn path_from_node(&self, node: &NodeId) -> Vec<BorrowStackElement> {
         let mut offset = vec![];
         if node == &Self::root_node() {
             offset
@@ -462,12 +464,18 @@ impl BorrowTree {
 
     /// Performs a breath-first search on all leave nodes of the tree that are reachable from after
     /// the specified sequence of partial borrows.
-    pub(crate) fn traverse(&self, path: &[MemberOffset]) -> Option<TreeIter<'_>> {
+    pub(crate) fn traverse(&self, path: &[BorrowStackElement]) -> Option<TreeIter<'_>> {
+        Self::check_path(path);
+
         let mut children_range = 0..self.root_children;
         let mut leaves_range = 0..self.root_leaves;
         for segment in path {
+            if segment.is_undetermined_offset() {
+                break; // matches with all children in the current node
+            }
+
             if let Some(branch_id) = children_range
-                .find(|s| &self.node[*s].partial == segment) {
+                .find(|s| self.node[*s].partial.overlaps(segment)) {
 
                 leaves_range = self.node[branch_id].leaves.clone();
                 children_range = self.node[branch_id].children.clone();
@@ -495,7 +503,8 @@ impl BorrowTree {
     }
 
     /// Iterates over all paths that are non-divergent from the specified partial borrowing path.
-    pub(crate) fn iter_non_diverging<'path>(&self, path: &'path [MemberOffset]) -> NonDivergentTreeIter<'_, 'path> {
+    pub(crate) fn iter_non_diverging<'path>(&self, path: &'path [BorrowStackElement]) -> NonDivergentTreeIter<'_, 'path> {
+        Self::check_path(path);
         NonDivergentTreeIter {
             stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
             leave_id: 0,
@@ -505,7 +514,8 @@ impl BorrowTree {
         }
     }
 
-    pub(crate) fn iter_nodes<'path>(&self, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+    pub(crate) fn iter_nodes<'path>(&self, path: &'path [BorrowStackElement]) -> IterNonDivergentNodes<'_, 'path> {
+        Self::check_path(path);
         IterNonDivergentNodes {
             stack: VecDeque::from_iter((0..self.root_children).map(|idx| (idx, 0))),
             tree: self,
@@ -516,16 +526,31 @@ impl BorrowTree {
 
     /// Performs a breadth-first traversal through the nodes of the tree starting from `starting`
     /// while limiting the traversal to nodes that can be reached within `path`.
-    pub(crate) fn iter_nodes_after<'path>(&self, starting: NodeId, path: &'path [MemberOffset]) -> IterNonDivergentNodes<'_, 'path> {
+    pub(crate) fn iter_nodes_after<'path>(&self, starting: NodeId, path: &'path [BorrowStackElement]) -> IterNonDivergentNodes<'_, 'path> {
         if starting == Self::root_node() {
             return self.iter_nodes(path);
         }
+        Self::check_path(path);
 
         IterNonDivergentNodes {
             stack: VecDeque::from_iter(self.node[starting.0 - 1].children.clone().map(|idx| (idx, 0))),
             tree: self,
             node_id: Some(starting),
             partial: path,
+        }
+    }
+
+    fn check_path(path: &[BorrowStackElement]) {
+        let n_undetermined = path.iter()
+            .filter(|el| el.is_undetermined_offset())
+            .count();
+        if n_undetermined > 1 {
+            panic!("borrow stack elements after undetermined element found!");
+        } else if n_undetermined == 1 {
+            assert!(
+                matches!(path.last(), Some(BorrowStackElement::Undetermined)),
+                "borrow stack elements after undetermined element found!",
+            );
         }
     }
 
@@ -635,7 +660,7 @@ pub struct NonDivergentTreeIter<'a, 'b> {
     stack: VecDeque<(usize, usize)>,
     leave_id: usize,
     leave_end: usize,
-    partial: &'b [MemberOffset],
+    partial: &'b [BorrowStackElement],
 }
 
 impl<'a, 'b> Iterator for NonDivergentTreeIter<'a, 'b> {
@@ -660,14 +685,16 @@ impl<'a, 'b> Iterator for NonDivergentTreeIter<'a, 'b> {
                 // there is more of the partial borrowing path to explore
                 for child_id in node.children.clone() {
                     let child = &self.tree.node[child_id];
-                    if &child.partial == next_offset {
+                    if child.partial.overlaps(next_offset) {
                         self.stack.push_back((child_id, next_depth + 1));
                     }
                 }
             } else {
                 // we have reached the end of the partial borrowing path; everything from here on
                 // out can be considered to be non-divergent from the path
-                node.children.clone().for_each(|idx| self.stack.push_back((idx, next_depth + 1)));
+                node.children.clone().for_each(|idx| {
+                    self.stack.push_back((idx, next_depth + 1))
+                });
             }
         }
     }
@@ -677,7 +704,7 @@ struct IterNonDivergentNodes<'tree, 'members> {
     tree: &'tree BorrowTree,
     stack: VecDeque<(usize, usize)>,
     node_id: Option<NodeId>,
-    partial: &'members [MemberOffset],
+    partial: &'members [BorrowStackElement],
 }
 
 impl<'tree, 'members> Iterator for IterNonDivergentNodes<'tree, 'members> {
@@ -694,12 +721,14 @@ impl<'tree, 'members> Iterator for IterNonDivergentNodes<'tree, 'members> {
         if let Some(next_offset) = self.partial.get(next_depth) {
             for child_id in node.children.clone() {
                 let child = &self.tree.node[child_id];
-                if &child.partial == next_offset {
+                if child.partial.overlaps(next_offset) {
                     self.stack.push_back((child_id, next_depth + 1));
                 }
             }
         } else {
-            node.children.clone().for_each(|idx| self.stack.push_back((idx, next_depth + 1)));
+            node.children.clone().for_each(|idx| {
+                self.stack.push_back((idx, next_depth + 1))
+            });
         }
         let out = self.node_id;
         self.node_id = Some(NodeId(next_branch + 1));
@@ -805,7 +834,7 @@ impl<V> ReferenceStateForest<V> {
         ReferenceStateForest { forest: forest_state }
     }
 
-    pub fn get_max(
+    pub fn get_max_for_deref(
         &self,
         value: &MirValue,
         graph: &BorrowGraph,
@@ -830,7 +859,37 @@ impl<V> ReferenceStateForest<V> {
         out_max
     }
 
-    pub fn set_value(
+    pub fn get_max_for_owners(
+        &self,
+        value: &MirValue,
+        graph: &BorrowGraph,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    ) -> Option<&V> {
+        let mut out_max: Option<&V> = None;
+        let state = graph.graph.get(value)?;
+        for owner in state.owners.iter() {
+            // resolve tree
+            let Some(tree) = graph.forest.trees.get(&BorrowSource::Local(*owner)) else {
+                continue;
+            };
+            let state = self.forest.get(&BorrowSource::Local(*owner)).unwrap();
+
+            let v = state.get_value(value, tree).unwrap();
+            if let Some(out) = out_max.as_mut() {
+                if op(v, out).is_gt() {
+                    *out = v;
+                }
+            } else {
+                out_max = Some(v);
+            }
+        }
+        out_max
+    }
+
+    /// Updates the value behind a reference.
+    /// If `partial_update` is true, the source node will only be updated if `v` >= the current
+    /// value.
+    pub fn set_deref_value(
         &mut self,
         value: MirValue,
         v: V,
@@ -845,6 +904,30 @@ impl<V> ReferenceStateForest<V> {
             let tree = graph.forest.trees.get(&path.source).unwrap();
             let state = self.forest.get_mut(&path.source).unwrap();
 
+            state.set_value(value, v.clone(), tree, op);
+        }
+    }
+
+    /// Updates the owner data for `value`.
+    /// If `partial_update` is true, the source node will only be updated if `v` >= the current
+    /// value.
+    pub fn set_owner_value(
+        &mut self,
+        value: MirValue,
+        v: V,
+        graph: &BorrowGraph,
+        op: fn(lhs: &V, rhs: &V) -> Ordering,
+    )
+    where V: Clone + PartialEq + Eq {
+        let Some(state) = graph.graph.get(&value) else {
+            return;
+        };
+        for path in state.owners.iter() {
+            let src = BorrowSource::Local(*path);
+            let Some(tree) = graph.forest.trees.get(&src) else {
+                continue;
+            };
+            let state = self.forest.get_mut(&src).unwrap();
             state.set_value(value, v.clone(), tree, op);
         }
     }
@@ -1257,11 +1340,36 @@ impl<'reg> BorrowContext<'reg> {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Hash)]
+pub enum BorrowStackElement {
+    Known(MemberOffset),
+    /// The offset or size of the member element is unknown at compile-time.
+    /// This can be the case for array index or range operations with indices or sizes that are
+    /// only available at runtime.
+    ///
+    /// In this case any update to the member may affect any part of the parent and thus any and all
+    /// sibling nodes.
+    Undetermined,
+}
+
+impl BorrowStackElement {
+    pub fn overlaps(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Known(offset), Self::Known(other)) => offset.overlaps(other),
+            _ => true,
+        }
+    }
+
+    fn is_undetermined_offset(&self) -> bool {
+        matches!(self, Self::Undetermined)
+    }
+}
+
 /// The borrow stack is a series of partial borrows that are executed in order to arrive at the
 /// borrow state target.
 #[derive(PartialEq, Eq, Debug, Default, Clone, Hash)]
-struct PartialBorrowStack {
-    stack: Vec<MemberOffset>,
+pub struct PartialBorrowStack {
+    stack: Vec<BorrowStackElement>,
 }
 
 impl PartialBorrowStack {
@@ -1271,7 +1379,7 @@ impl PartialBorrowStack {
         }
         for (lhs, rhs) in self.stack.iter()
             .zip(other.stack[..self.stack.len()].iter()) {
-            if lhs != rhs {
+            if !lhs.overlaps(rhs) {
                 return false;
             }
         }
@@ -1291,7 +1399,7 @@ impl PartialBorrowStack {
         for (lhs, rhs) in self.stack[..len]
             .iter()
             .zip(other.stack[..len].iter()) {
-            if lhs != rhs {
+            if !lhs.overlaps(rhs) {
                 return true;
             }
         }
@@ -1300,7 +1408,7 @@ impl PartialBorrowStack {
 }
 
 impl Deref for PartialBorrowStack {
-    type Target = [MemberOffset];
+    type Target = [BorrowStackElement];
 
     fn deref(&self) -> &Self::Target {
         &self.stack
@@ -1320,12 +1428,12 @@ impl Deref for PartialBorrowStack {
 #[derive(PartialEq, Eq, Debug, Clone, Hash)]
 pub struct BorrowPath {
     pub(crate) source: BorrowSource,
-    stack: PartialBorrowStack,
-    path: Vec<MirValue>,
+    pub(crate) stack: PartialBorrowStack,
+    pub(crate) path: Vec<MirValue>,
 }
 
 impl BorrowPath {
-    fn new(source: BorrowSource, ref_value: MirValue, offset: Option<MemberOffset>) -> Self {
+    fn new(source: BorrowSource, ref_value: MirValue, offset: Option<BorrowStackElement>) -> Self {
         if let Some(offset) = offset {
             Self { source, stack: PartialBorrowStack { stack: vec![offset] }, path: vec![ref_value] }
         } else {
@@ -1338,14 +1446,21 @@ impl BorrowPath {
     /// data flow graph, as well as an optional offset into the parent borrow, in case of a partial
     /// borrow.
     /// If `offset` is `None`, the borrow is considered to be a full borrow of the entire value.
-    fn extend(&mut self, value: MirValue, offset: Option<MemberOffset>) {
+    ///
+    /// If the last element in the borrow stack is an undetermined offset, then we don't add any
+    /// more partial borrows to the stack.
+    /// Any offset following an unknown offset, is, by definition, unknown relative to the absolute
+    /// starting position in the source data.
+    fn extend(&mut self, value: MirValue, offset: Option<BorrowStackElement>) {
         if !self.path.contains(&value) {
             // if the value has already been visited, we don't need to record it again, as at this
             // point, the path must form a closed loop
             self.path.push(value);
         }
         if let Some(offset) = offset {
-            self.stack.stack.push(offset);
+            if !matches!(self.stack.stack.last(), Some(BorrowStackElement::Undetermined)) {
+                self.stack.stack.push(offset);
+            }
         }
     }
 
@@ -1366,6 +1481,15 @@ impl BorrowPath {
             return true;
         }
         self.stack.is_divergent(&other.stack)
+    }
+}
+
+impl Display for BorrowStackElement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BorrowStackElement::Known(offset) => write!(f, "{offset}"),
+            BorrowStackElement::Undetermined => write!(f, "any")
+        }
     }
 }
 
@@ -1423,7 +1547,7 @@ impl BorrowState {
         src: BorrowSource,
         ref_value: MirValue,
         owner: OwnerData,
-        offset: Option<MemberOffset>,
+        offset: Option<BorrowStackElement>,
         mutable: bool,
     ) -> Self {
         BorrowState {
@@ -1463,12 +1587,12 @@ impl BorrowState {
         &self,
         value: MirValue,
         owner: OwnerData,
-        offset: Option<MemberOffset>,
+        offset: Option<BorrowStackElement>,
         _mutable: bool,
     ) -> Result<Self, BorrowConflict> {
         let states = self.set.iter().map(|path| {
             let mut path = path.clone();
-            path.extend(value, offset);
+            path.extend(value, offset.clone());
             path
         })
             .collect();
@@ -1766,9 +1890,18 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirRef {
                 Ok(input
                     .replace(target, input
                         .element_value(&self.value)
-                        .extend(*target, ctx.get_owner_data(target), Some(*offset), self.mutable)?))
+                        .extend(*target, ctx.get_owner_data(target), Some(BorrowStackElement::Known(*offset)), self.mutable)?))
             },
-            _ => {
+            RefOffset::ArrayIndex { .. }
+            | RefOffset::SliceIndex { .. }
+            | RefOffset::ArrayRange { .. }
+            | RefOffset::SliceRange { .. } => {
+                Ok(input
+                    .replace(target, input
+                        .element_value(&self.value)
+                        .extend(*target, ctx.get_owner_data(target), Some(BorrowStackElement::Undetermined), self.mutable)?))
+            },
+            RefOffset::Entire => {
                 // offset is zero, so we actually create a new reference
                 let mut state = input
                     .element_value(&self.value)
@@ -1852,11 +1985,11 @@ impl<'reg> ExprEval<BorrowState, BorrowContext<'reg>> for MirTypeInit {
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, BorrowState>,
-        _ctx: &mut BorrowContext,
+        ctx: &mut BorrowContext,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, BorrowConflict> {
-        let mut out = BorrowState::default();
+        let mut out = BorrowState::raw_data(ctx.get_owner_data(target), true);
         for param in self.inits.iter() {
             out.and_assign(&input.element_value(&param.val));
         }

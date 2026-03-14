@@ -68,16 +68,19 @@ impl MirAssign {
 
 impl MirGraphElement for MirAssign {
     fn collect_vars(&self) -> Vec<MirValue> {
-        vec![self.rhs]
+        vec![self.rhs, self.lhs]
     }
 
     fn uses_var(&self, val: &MirValue) -> bool {
-        &self.rhs == val
+        &self.rhs == val || &self.lhs == val
     }
 
     fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
         if &self.rhs == var {
             self.rhs = *repl;
+        }
+        if &self.lhs == var {
+            self.lhs = *repl;
         }
     }
 }
