@@ -37,6 +37,7 @@ use crate::mir::mir_type::{MirTypeId, TMirFnCallInfo};
 use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ScopeId};
 use std::error::Error;
+use std::hash::DefaultHasher;
 use log::warn;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
@@ -105,8 +106,8 @@ struct FunctionParameterReport<'a, Fact: Sized> {
     facts: Fact,
     ret: EdlMaybeType,
     arg_types: Vec<EdlMaybeType>,
-    arg_formated: Vec<[TypeArgument<'a>; 3]>,
-    args: Vec<SrcError<'a>>,
+    arg_formated: Vec<[TypeArgument<'a, DefaultHasher>; 3]>,
+    args: Vec<SrcError<'a, DefaultHasher>>,
 }
 
 macro_rules! format_function_parameters(

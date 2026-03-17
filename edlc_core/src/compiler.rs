@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::hash::DefaultHasher;
 use std::io;
 use std::sync::Arc;
 use log::debug;
@@ -479,7 +480,7 @@ impl EdlCompiler {
             // error information which can then be used to construct the error arguments.
             // the reason for this is, that [TypeArguments] expects a lifetime and thus the
             // provided argument must essentially be forced to outlive the actual error message.
-            let mut errors = Vec::<(SrcPos, ModuleSrc, [TypeArgument; 1])>::new();
+            let mut errors = Vec::<(SrcPos, ModuleSrc, [TypeArgument<'_, DefaultHasher>; 1])>::new();
             for (child, pos) in root.iter_children() {
                 errors.push((
                     *pos,

@@ -35,14 +35,14 @@ pub trait SrcSupplier {
 /// A local file is a file in the **Rust** source code and **not** in the EDL code base.
 /// This struct is used to get information where in the Rust code base raw EDL source code is
 /// injected in to the compiler, in case that EDL source code causes errors or warnings.
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, PartialOrd, Eq)]
 pub struct LocalFileSource {
     pub relative_path: PathBuf,
     pub pos: SrcPos,
     pub src: String,
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, PartialOrd, Eq)]
 pub struct BufferedFile {
     pub path: PathBuf,
     pub buffer: String,
@@ -75,7 +75,7 @@ impl Debug for LocalFileSource {
 /// Since the structure is also thread save and its contents to not have to be `mut`, this means
 /// that we can attach the `ModuleSrc` to any file src position without fear of bricking the
 /// performance or memory consumption of the program.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleSrc {
     File(Arc<BufferedFile>),
     String(Arc<LocalFileSource>),

@@ -20,6 +20,7 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{Arguments, Debug, Display, Formatter};
+use std::hash::DefaultHasher;
 use std::rc::Rc;
 use log::warn;
 use crate::core::{edl_type, EdlVarId};
@@ -195,7 +196,7 @@ pub struct TypeSource<'src, 'a> {
     pub ty: EdlMaybeType,
     pub pos: SrcRange,
     pub src: &'src ModuleSrc,
-    pub remark: TypeArguments<'a>
+    pub remark: TypeArguments<'a, DefaultHasher>,
 }
 
 impl HirPhase {
@@ -218,7 +219,12 @@ impl HirPhase {
     }
 
     /// Can be used to format error messages for compiler errors.
-    pub fn report_error(&mut self, error: TypeArguments, remarks: &[SrcError], _help: Option<TypeArguments>) {
+    pub fn report_error(
+        &mut self,
+        error: TypeArguments<'_, DefaultHasher>,
+        remarks: &[SrcError<'_, DefaultHasher>],
+        _help: Option<TypeArguments<'_, DefaultHasher>>,
+    ) {
         if !self.report_mode.print_errors {
             return;
         }
@@ -313,7 +319,7 @@ impl HirPhase {
         ctx: Arguments,
         exp: TypeSource,
         got: &HirExpression,
-        got_remark: TypeArguments,
+        got_remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<(), HirError> {
         let got = self.check_type_from_expr(got, got_remark)?;
         self.check_report_type(ctx, exp, got)
@@ -327,9 +333,9 @@ impl HirPhase {
         &mut self,
         ctx: Arguments,
         exp: &HirExpression,
-        exp_remark: TypeArguments,
+        exp_remark: TypeArguments<'_, DefaultHasher>,
         got: &HirExpression,
-        got_remark: TypeArguments,
+        got_remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<(), HirError> {
         let exp = self.check_type_from_expr(exp, exp_remark)?;
         let got = self.check_type_from_expr(got, got_remark)?;
@@ -339,7 +345,7 @@ impl HirPhase {
     fn check_extract_resolved_type(
         &mut self,
         expr: &HirExpression,
-        remark: TypeArguments,
+        remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<EdlMaybeType, HirError> {
         let ty = self.check_type_from_expr(expr, remark)?;
         self.check_type_resolved(&ty)?;
@@ -350,7 +356,7 @@ impl HirPhase {
     fn check_type_from_expr<'src, 'a>(
         &mut self,
         expr: &'src HirExpression,
-        remark: TypeArguments<'a>,
+        remark: TypeArguments<'a, DefaultHasher>,
     ) -> Result<TypeSource<'src, 'a>, HirError> {
         let err = match expr.get_type(self) {
             Ok(ty) => return Ok(TypeSource {
@@ -393,7 +399,7 @@ impl HirPhase {
                     SrcError::Single {
                         pos: exp.pos,
                         src: exp.src.clone(),
-                        error: exp.remark,
+                        error: exp.remark.clone(),
                     }
                 ],
                 Some(issue::format_type_args!(
@@ -411,7 +417,12 @@ impl HirPhase {
     }
 
     /// Can be used to format warning messages for compiler errors.
-    pub fn report_warn(&mut self, error: TypeArguments, remarks: &[SrcError], _help: Option<TypeArguments>) {
+    pub fn report_warn(
+        &mut self,
+        error: TypeArguments<'_, DefaultHasher>,
+        remarks: &[SrcError<'_, DefaultHasher>],
+        _help: Option<TypeArguments<'_, DefaultHasher>>,
+    ) {
         if !self.report_mode.print_warnings {
             return;
         }

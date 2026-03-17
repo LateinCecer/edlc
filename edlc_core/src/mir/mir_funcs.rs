@@ -35,7 +35,7 @@ use crate::mir::{MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::{mem, ops};
 use std::path::PathBuf;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
@@ -283,8 +283,8 @@ impl DependencyAnalyser {
         &self,
         stack: &CallStack,
         phase: &mut HirPhase,
-        issue: TypeArguments,
-        help: Option<TypeArguments>
+        issue: TypeArguments<'_, DefaultHasher>,
+        help: Option<TypeArguments<'_, DefaultHasher>>,
     ) {
         let mut error_info = Vec::new();
         for call in stack.0.iter().rev() {
@@ -305,7 +305,7 @@ impl DependencyAnalyser {
                     (&sig[0] as &dyn FmtType).into(),
                 ]
             })
-            .collect::<Vec<[TypeArgument; 2]>>();
+            .collect::<Vec<[TypeArgument<'_, DefaultHasher>; 2]>>();
         // format final error messages
         let errors = error_info.iter()
             .zip(errors.iter())

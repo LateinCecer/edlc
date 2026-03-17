@@ -2120,6 +2120,7 @@ mod test {
     use crate::core::type_analysis::{Infer, InferEq, InferState, InferSub, InferTryEq, NodeIdGen};
     use crate::issue::{TypeArgument, TypeArguments};
     use std::fmt::{Display, Formatter};
+    use std::hash::DefaultHasher;
     use crate::inline_code;
     use crate::lexer::SrcPos;
 
@@ -2177,7 +2178,7 @@ mod test {
 
         impl Display for TyFormatter<'_, '_> {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                TypeArguments::new(&[TypeArgument::new_type(self.ty)])
+                TypeArguments::new(&[TypeArgument::<'_, DefaultHasher>::new_type(self.ty)])
                     .fmt(f, self.reg, self.vars)
             }
         }

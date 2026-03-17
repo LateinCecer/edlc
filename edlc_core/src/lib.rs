@@ -29,6 +29,7 @@ pub mod prelude;
 mod file;
 mod issue;
 mod documentation;
+mod report;
 
 #[cfg(test)]
 fn setup_logger() -> Result<(), fern::InitError> {

@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::hash::DefaultHasher;
 use crate::core::edl_type::{EdlTypeInstance, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{Infer, InferError, InferErrorCtx, InferState, InternalConstUid};
@@ -82,7 +83,7 @@ pub fn report_expect_mutable(
     pos: SrcPos,
     err: InferError,
     phase: &mut HirPhase,
-    src: &[SrcError],
+    src: &[SrcError<'_, DefaultHasher>],
 ) -> HirError {
     phase.report_error(
         format_type_args!(

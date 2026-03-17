@@ -23,7 +23,7 @@ use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowS
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprVariant, MirGraphLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
@@ -36,6 +36,10 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::mem;
 use std::ops::{BitOr, Range};
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
+use crate::lexer::SrcPos;
+use crate::report::{Report, ReportError};
 
 /// Lattice:
 ///
@@ -813,6 +817,173 @@ impl ConstEval {
             ConstEvalState::Runtime | ConstEvalState::Unknown => None,
             ConstEvalState::Known(c) => Some(c),
         })
+    }
+
+    /// Validates that all values that are used in a comptime context are actually known at
+    /// compile time.
+    pub fn validate_comptime_context(
+        &self,
+        cfg: &MirFlowGraph,
+        phase: &mut HirPhase,
+    ) -> Report<ConstError, ()> {
+        let mut report = Report::default();
+        for (block_ref, block) in cfg.blocks.iter().enumerate() {
+            for statement in block.statements.iter() {
+                match statement {
+                    Statement::VarDef { var, value, uid, debug } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            self.check_hybrid_call(value, block, debug, cfg, phase, &mut report);
+                        } else {
+                            self.check_comptime_call(value,  block, debug, cfg, phase, &mut report);
+                        }
+                    }
+                    Statement::VarMove { var: _, value, uid: _, debug } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            continue;
+                        }
+                        report.record_err(|| self.check_constant(value, block, debug, phase))
+                    }
+                    Statement::VarCopy { var: _, value, uid: _, debug } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            continue;
+                        }
+                        report.record_err(|| self.check_constant(value, block, debug, phase))
+                    }
+                    Statement::Drop { value, uid: _, debug } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            continue;
+                        }
+                        report.record_err(|| self.check_constant_drop(value, block, debug, phase))
+                    }
+                    Statement::Sync { .. } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            continue;
+                        }
+                        unreachable!()
+                    }
+                    Statement::Record { .. } => {
+                        if !matches!(block.ctx, Context::Comptime) {
+                            continue;
+                        }
+                        unreachable!()
+                    }
+                }
+            }
+        }
+        report
+    }
+
+    fn check_hybrid_call(
+        &self,
+        expr: &MirExprId,
+        block: &Block,
+        debug: &DebugSymbols,
+        cfg: &MirFlowGraph,
+        phase: &mut HirPhase,
+        report: &mut Report<ConstError, ()>,
+    ) {
+        if !matches!(expr.ty, MirExprVariant::Call) {
+            return;
+        }
+        let call = &cfg.expressions.call[expr.id];
+        for comptime_arg in call.comptime_args.iter() {
+            report.record_err(|| self.check_constant(&comptime_arg.value_expr, block, debug, phase));
+        }
+    }
+
+    fn check_comptime_call(
+        &self,
+        expr: &MirExprId,
+        block: &Block,
+        debug: &DebugSymbols,
+        cfg: &MirFlowGraph,
+        phase: &mut HirPhase,
+        report: &mut Report<ConstError, ()>,
+    ) {
+        if !matches!(expr.ty, MirExprVariant::Call) {
+            return;
+        }
+        let call = &cfg.expressions.call[expr.id];
+        for comptime_arg in call.comptime_args.iter() {
+            report.record_err(|| self.check_constant(&comptime_arg.value_expr, block, debug, phase));
+        }
+        for arg in call.args.iter() {
+            report.record_err(|| self.check_constant(arg, block, debug, phase));
+        }
+    }
+
+    fn check_constant(
+        &self,
+        val: &MirValue,
+        block: &Block,
+        debug: &DebugSymbols,
+        phase: &mut HirPhase,
+    ) -> Result<(), ReportError<ConstError>> {
+        if self.get_constant_value(val).is_some() {
+            Ok(())
+        } else {
+            phase.report_error(
+                TypeArguments::new(&[
+                    TypeArgument::new_display("non-constant captured in `comptime` block")
+                ]),
+                &[
+                    SrcError::Double {
+                        first: block.pos.into(),
+                        second: debug.pos.into(),
+                        src: block.src.clone(),
+                        error_first: TypeArguments::new(&[
+                            TypeArgument::new_display("`comptime` block starting here")
+                        ]),
+                        error_second: TypeArguments::new(&[
+                            TypeArgument::new_display("non-constant captured here")
+                        ]),
+                    },
+                ],
+                None,
+            );
+            Err(ReportError {
+                src: block.src.clone(),
+                pos: debug.pos,
+                payload: ConstError::UnresolvedAtComptime(*val, "non-constant captured in comptime block".to_string()),
+            })
+        }
+    }
+
+    fn check_constant_drop(
+        &self,
+        val: &MirValue,
+        block: &Block,
+        debug: &DebugSymbols,
+        phase: &mut HirPhase,
+    ) -> Result<(), ReportError<ConstError>> {
+        if self.get_constant_value(val).is_some() {
+            Ok(())
+        } else {
+            phase.report_error(
+                TypeArguments::new(&[
+                    TypeArgument::new_display("non-constant value dropped in `comptime` block")
+                ]),
+                &[
+                    SrcError::Double {
+                        first: block.pos.into(),
+                        second: debug.pos.into(),
+                        src: block.src.clone(),
+                        error_first: TypeArguments::new(&[
+                            TypeArgument::new_display("`comptime` block starting here")
+                        ]),
+                        error_second: TypeArguments::new(&[
+                            TypeArgument::new_display("non-constant value goes out of scope here")
+                        ]),
+                    },
+                ],
+                None,
+            );
+            Err(ReportError {
+                src: block.src.clone(),
+                pos: debug.pos,
+                payload: ConstError::UnresolvedAtComptime(*val, "non-constant dropped in comptime block".to_string())
+            })
+        }
     }
 }
 

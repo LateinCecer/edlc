@@ -24,6 +24,7 @@ mod borrow;
 mod scope_check;
 mod drop_check;
 mod sync;
+mod validate;
 
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
@@ -49,7 +50,7 @@ use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowContext};
+use crate::mir::mir_expr::mir_graph::borrow::BorrowContext;
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::{DataOrigin, PartialSsaDeconstruction};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
@@ -57,7 +58,7 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
-pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame, ConstEval, ValueConstState};
+pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstEval, ConstFrame, ValueConstState};
 pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};

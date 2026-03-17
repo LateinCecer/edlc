@@ -17,6 +17,7 @@
 use std::fmt::{Display, Formatter};
 use std::{io, mem};
 use std::error::Error;
+use std::hash::DefaultHasher;
 use std::sync::Arc;
 use crate::lexer::{Lexer, LexError, Punct, SrcPos, SrcToken, Token};
 
@@ -448,7 +449,7 @@ impl ParseError {
                             (*pos, [format_args!("`comptime` modifier here").into()]),
                         _ => unreachable!()
                     })
-                    .collect::<Vec<(SrcPos, [TypeArgument; 1])>>();
+                    .collect::<Vec<(SrcPos, [TypeArgument<'_, DefaultHasher>; 1])>>();
                 let errors = errors.iter()
                     .map(|(pos, issues)| SrcError::Single {
                         pos: (*pos).into(),
