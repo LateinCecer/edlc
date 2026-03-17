@@ -20,7 +20,6 @@ use crate::core::index_map::IndexMap;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowState, JoinState, ReferenceStateForest};
-use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
@@ -29,33 +28,295 @@ use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use edlc_analysis::graph::{IsDefault, LatticeElement};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::mem;
 use std::ops::{BitOr, Range};
 
-
-#[derive(Debug)]
+/// Lattice:
+///
+///               Runtime
+///                  |
+///                  |
+///                Known
+///                  |
+///                  |
+///               Unknown
+///
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 enum ConstEvalState {
     Runtime,
     Known(AmorphusDataCopy),
+    #[default]
+    Unknown,
 }
+
+impl IsDefault for ConstEvalState {
+    fn is_default(&self) -> bool {
+        matches!(self, ConstEvalState::Unknown)
+    }
+}
+
+impl LatticeElement for ConstEvalState {
+    type Conflict = ConstError;
+
+    fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
+        Ok(self.lower_raw(other))
+    }
+
+    fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
+        Ok(self.join(other))
+    }
+
+    fn is_lower_bound(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ConstEvalState::Known(lhs), ConstEvalState::Known(rhs)) => lhs == rhs,
+            (ConstEvalState::Unknown, _) => true,
+            (_, ConstEvalState::Unknown) => false,
+            (ConstEvalState::Known(_), ConstEvalState::Runtime) => true,
+            (ConstEvalState::Runtime, ConstEvalState::Known(_)) => false,
+            (ConstEvalState::Runtime, ConstEvalState::Runtime) => true,
+        }
+    }
+
+    fn is_upper_bound(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ConstEvalState::Known(lhs), ConstEvalState::Known(rhs)) => lhs == rhs,
+            (_, ConstEvalState::Unknown) => true,
+            (ConstEvalState::Unknown, _) => false,
+            (ConstEvalState::Runtime, _) => true,
+            _ => false,
+        }
+    }
+
+    fn bottom() -> Self {
+        Self::Unknown
+    }
+
+    fn top() -> Self {
+        Self::Runtime
+    }
+}
+
+impl ConstEvalState {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (ConstEvalState::Known(lhs), ConstEvalState::Known(rhs))
+                if lhs == rhs => ConstEvalState::Known(lhs),
+            (ConstEvalState::Unknown, rhs) => rhs,
+            (lhs, ConstEvalState::Unknown) => lhs,
+            _ => ConstEvalState::Runtime,
+        }
+    }
+
+    fn join_mut(&mut self, other: &Self) {
+        match (self, other) {
+            (ConstEvalState::Known(lhs), ConstEvalState::Known(rhs))
+                if lhs == rhs => (), // nothing to do
+            (lhs @ ConstEvalState::Unknown, rhs) => *lhs = rhs.clone(),
+            (_, ConstEvalState::Unknown) => (), // nothing to do
+            (rhs, _) => *rhs = ConstEvalState::Runtime,
+        }
+    }
+
+    fn lower_raw(self, other: Self) -> Self {
+        match (self, other) {
+            (ConstEvalState::Known(lhs), ConstEvalState::Known(rhs)) => if lhs != rhs {
+                ConstEvalState::Unknown
+            } else {
+                ConstEvalState::Known(lhs)
+            },
+            (ConstEvalState::Unknown, _) => ConstEvalState::Unknown,
+            (_, ConstEvalState::Unknown) => ConstEvalState::Unknown,
+            (ConstEvalState::Known(lhs), ConstEvalState::Runtime) => ConstEvalState::Known(lhs),
+            (ConstEvalState::Runtime, ConstEvalState::Known(rhs)) => ConstEvalState::Known(rhs),
+            (ConstEvalState::Runtime, ConstEvalState::Runtime) => ConstEvalState::Runtime,
+        }
+    }
+}
+
+#[derive(Default)]
+struct OutputVecBuilder {
+    parameters: Vec<CallParameterCopy>,
+    force_runtime: HashSet<MirValue>,
+}
+
+impl OutputVecBuilder {
+    /// Inserts MIR values into the builder that we force to be carried as a runtime parameter.
+    fn with_force_runtime<I: IntoIterator<Item=MirValue>>(&mut self, iter: I) {
+        self.force_runtime.extend(iter);
+    }
+
+    /// Inserts a parameter call into the block output builder.
+    fn insert_call(
+        &mut self,
+        block_call: &BlockCall,
+        block_frame: &ConstFrame,
+        vm: &ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        reg: &MirTypeRegistry,
+    ) -> &mut Self {
+        let param = CallParameterCopy::new(
+            block_call, block_frame, vm, stack_frame, reg, &self.force_runtime);
+        self.parameters.push(param);
+        self
+    }
+
+    fn build(self) -> Vec<CallParameterCopy> {
+        self.parameters
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+/// The state of const evaluation of a single node in the CFG analysis graph.
+/// A 'single node' in this context is actually a block.
+struct ConstNodeState {
+    block_parameters: CallParameterCopy,
+    output: Vec<CallParameterCopy>,
+    /// Number of iterations this node has already been visited
+    computation_counter: usize,
+}
+
+#[derive(Debug)]
+struct ConstGraphState {
+    map: IndexMap<ConstNodeState>,
+    consts: IndexMap<ConstEvalState>,
+}
+
+impl ConstNodeState {
+    fn new(
+        block: &MirBlockRef,
+        cfg: &MirFlowGraph,
+    ) -> Self {
+        ConstNodeState {
+            block_parameters: CallParameterCopy::empty(block, cfg),
+            output: vec![],
+            computation_counter: 0,
+        }
+    }
+
+    fn set_output_values(
+        &mut self,
+        out_vec: Vec<CallParameterCopy>,
+    ) {
+        self.output = out_vec;
+    }
+
+    fn call_changed(
+        block: &MirBlockRef,
+        graph_state: &mut ConstGraphState,
+        new_call: &CallParameterCopy,
+    ) -> bool {
+        if let Some(state) = graph_state.map.get_mut(block.0) {
+            if &state.block_parameters != new_call {
+                state.block_parameters = new_call.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    fn join(
+        block: &MirBlockRef,
+        graph_state: &ConstGraphState,
+        cfg: &MirFlowGraph,
+    ) -> CallParameterCopy {
+        let mut out = CallParameterCopy::empty(block, cfg);
+        for parents in cfg.backlinks[block.0].iter() {
+            let Some(parent_node) = graph_state.map.get(parents.0) else {
+                continue;
+            };
+            for output in parent_node.output.iter() {
+                if &output.block != block {
+                    continue; // target is not the original block
+                }
+                out.join(output);
+            }
+        }
+        out
+    }
+
+    fn join_direct(
+        block: &MirBlockRef,
+        parent: &MirBlockRef,
+        graph_state: &ConstGraphState,
+        cfg: &MirFlowGraph,
+    ) -> CallParameterCopy {
+        let mut out = CallParameterCopy::empty(block, cfg);
+        let Some(parent_node) = graph_state.map.get(parent.0) else {
+            return out;
+        };
+        for output in parent_node.output.iter() {
+            if &output.block != block {
+                continue; // target is not the original block
+            }
+            out.join(output);
+        }
+        out
+    }
+}
+
+impl ConstGraphState {
+    fn new(cfg: &MirFlowGraph) -> Self {
+        let mut nodes = IndexMap::<ConstNodeState>::default();
+        for block_idx in 0..cfg.blocks.len() {
+            nodes.view_mut(block_idx).set(ConstNodeState::new(&MirBlockRef(block_idx), cfg));
+        }
+        ConstGraphState {
+            map: nodes,
+            consts: IndexMap::<ConstEvalState>::default(),
+        }
+    }
+
+    fn set(&mut self, state: ConstNodeState) {
+        self.map.view_mut(state.block_parameters.block.0).set(state);
+    }
+
+    fn copy_const_values(&self) -> IndexMap<ConstEvalState> {
+        self.consts.clone()
+    }
+
+    fn compute_diff(&self, other: &IndexMap<ConstEvalState>) -> HashSet<MirValue> {
+        let mut out = HashSet::new();
+        let max = usize::max(self.consts.len(), other.len());
+        for i in 0..max {
+            let lhs = self.consts.get(i);
+            let rhs = other.get(i);
+            if lhs != rhs {
+                out.insert(MirValue(i));
+            }
+        }
+        out
+    }
+}
+
 
 /// Const eval data
 pub struct ConstEval {
-    consts: IndexMap<ConstEvalState>,
-    // const_states: IndexMap<ConstState>,
+    state: ConstGraphState,
     block_frame: ConstFrame,
     borrow_graph: BorrowGraph,
 }
 
 impl ConstEval {
+    fn element_value_mut(&mut self, val: &MirValue) -> &mut ConstEvalState {
+        let mut view = self.state.consts.view_mut(val.0);
+        if matches!(view.get(), None) {
+            view.set(ConstEvalState::Unknown);
+        }
+        self.state.consts.get_mut(val.0).unwrap()
+    }
+
     pub fn print(&self) {
         println!("Result of constant evaluation:");
-        for (raw_id, state) in self.consts.iter() {
+        for (raw_id, state) in self.state.consts.iter() {
             let value = MirValue(raw_id);
             match state {
                 ConstEvalState::Known(data) if data.len() != 0 => {
@@ -67,7 +328,7 @@ impl ConstEval {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 /// Records with values are available in a const evaluation stack frame.
 pub(crate) struct ConstFrame {
     avail: HashSet<MirValue>,
@@ -76,28 +337,45 @@ pub(crate) struct ConstFrame {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct CallParameterCopy {
-    params: Vec<Option<AmorphusDataCopy>>,
+    params: Vec<ConstEvalState>,
     block: MirBlockRef,
 }
 
 impl CallParameterCopy {
+    fn empty(block: &MirBlockRef, cfg: &MirFlowGraph) -> CallParameterCopy {
+        CallParameterCopy {
+            params: vec![const { ConstEvalState::Unknown }; cfg.blocks[block.0].parameters.len()],
+            block: *block,
+        }
+    }
+
+    fn join(&mut self, other: &Self) {
+        assert_eq!(self.block, other.block);
+        for (lhs, rhs) in self.params.iter_mut()
+            .zip(other.params.iter()) {
+            lhs.join_mut(rhs);
+        }
+    }
+
     fn new(
         call: &BlockCall,
         block_frame: &ConstFrame,
         vm: &ExecutorVM,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
+        force_runtime: &HashSet<MirValue>,
     ) -> Self {
-        let mut params: Vec<Option<AmorphusDataCopy>> = (0..call.params.len())
-            .map(|_| None).collect();
+        let mut params = vec![const { ConstEvalState::Unknown }; call.params.len()];
         for (const_target, param_value) in params
             .iter_mut()
             .zip(call.params.iter()) {
 
-            if block_frame.avail.contains(param_value) {
+            if block_frame.avail.contains(param_value) && !force_runtime.contains(param_value) {
                 let range = stack_frame.get_offset(param_value, vm).unwrap();
                 let value = vm.get_data(range.0.clone(), range.1).get_copy(reg);
-                *const_target = Some(value);
+                *const_target = ConstEvalState::Known(value);
+            } else {
+                *const_target = ConstEvalState::Runtime;
             }
         }
         CallParameterCopy {
@@ -113,8 +391,7 @@ impl CallParameterCopy {
         reg: &MirTypeRegistry,
     ) -> CallParameterCopy {
         let root_ref = cfg.root();
-        let mut params: Vec<Option<AmorphusDataCopy>> = (0..cfg.get_root_parameters().len())
-            .map(|_| None).collect();
+        let mut params = vec![const { ConstEvalState::Unknown }; comptime_params.len()];
         for (value, (src_range, src_ty)) in comptime_params.iter() {
             let value_copy = vm.get_data(src_range.clone(), *src_ty).get_copy(reg);
 
@@ -127,7 +404,7 @@ impl CallParameterCopy {
                     None
                 })
                 .unwrap();
-            params[index] = Some(value_copy);
+            params[index] = ConstEvalState::Known(value_copy);
         }
         CallParameterCopy {
             block: root_ref,
@@ -141,7 +418,7 @@ impl CallParameterCopy {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         consts: &mut ConstEval,
-        reg: &MirTypeRegistry,
+        _reg: &MirTypeRegistry,
     ) {
         consts.block_frame.avail.clear();
         for (param, param_value) in cfg.blocks[self.block.0]
@@ -149,17 +426,14 @@ impl CallParameterCopy {
             .iter()
             .zip(self.params.iter()) {
 
-            let Some(param_value) = param_value else {
-                // if the parameter is not available as a constant in one call, it is definitely
-                // not available as a constant in general.
-                consts.mark_runtime(param);
-                continue;
-            };
-            let (dst_range, dst_ty) = stack_frame.get_offset(param, vm).unwrap();
-            let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
-            dst.memcpy(&param_value.as_data());
-            // record const value in eval records
-            consts.insert_const_value(cfg, param, vm, stack_frame, reg);
+            consts.element_value_mut(param).join_mut(param_value);
+            if let ConstEvalState::Known(val) = param_value {
+                let (dst_range, dst_ty) = stack_frame.get_offset(param, vm).unwrap();
+                let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
+                dst.memcpy(&val.as_data());
+                // record const value in eval records
+                consts.block_frame.set_avail(param, &consts.borrow_graph);
+            }
         }
     }
 }
@@ -195,8 +469,8 @@ impl ConstFrame {
 }
 
 impl ConstEval {
-    pub fn new(borrow_graph: BorrowGraph, const_states: IndexMap<ConstState>) -> Self {
-        let mut consts: IndexMap<ConstEvalState> = IndexMap::default();
+    pub fn new(cfg: &MirFlowGraph, borrow_graph: BorrowGraph) -> Self {
+        // let mut consts: IndexMap<ConstEvalState> = IndexMap::default();
         // for (idx, state) in const_states.iter() {
         //     if !matches!(state, ConstState::Const(_)) {
         //         consts.view_mut(idx).set(ConstEvalState::Runtime);
@@ -204,7 +478,7 @@ impl ConstEval {
         // }
 
         ConstEval {
-            consts,
+            state: ConstGraphState::new(cfg),
             // const_states,
             block_frame: ConstFrame {
                 avail: HashSet::new(),
@@ -241,11 +515,12 @@ impl ConstEval {
                 let dst = stack_frame.get_offset(callee_value, vm).unwrap();
                 vm.memcpy(&dst, &src);
 
+                self.insert_const_value(cfg, callee_value, vm, stack_frame, reg);
                 self.block_frame.set_avail(callee_value, &self.borrow_graph);
             } else {
+                self.mark_runtime(callee_value);
                 self.block_frame.set_unavail(callee_value, &self.borrow_graph);
             }
-            self.merge_parameter_const_state(cfg, caller_value, callee_value, reg, Some(&block_frame));
         }
     }
 
@@ -261,7 +536,15 @@ impl ConstEval {
         reg: &MirTypeRegistry,
     ) -> bool {
         Self::insert_const_value_internal(
-            &mut self.block_frame, &mut self.consts, &self.borrow_graph, cfg, value, vm, stack_frame, reg)
+            &mut self.block_frame,
+            &mut self.state.consts,
+            &self.borrow_graph,
+            cfg,
+            value,
+            vm,
+            stack_frame,
+            reg,
+        )
     }
 
     /// Inserts a constant value to the pool of constant values in the evaluator.
@@ -311,7 +594,13 @@ impl ConstEval {
                 ConstEvalState::Runtime => {
                     // do nothing in this case
                     false
-                },
+                }
+                ConstEvalState::Unknown => {
+                    let range = stack_frame.get_offset(value, vm).unwrap();
+                    let value = vm.get_data(range.0, range.1);
+                    view.set(ConstEvalState::Known(value.get_copy(reg)));
+                    true
+                }
             }
         } else {
             let range = stack_frame.get_offset(value, vm).unwrap();
@@ -340,7 +629,7 @@ impl ConstEval {
             };
             for other in tree.get_owners() {
                 changed |= Self::insert_const_value_internal(
-                    &mut self.block_frame, &mut self.consts, &self.borrow_graph, cfg, other, vm, stack_frame, reg);
+                    &mut self.block_frame, &mut self.state.consts, &self.borrow_graph, cfg, other, vm, stack_frame, reg);
             }
         }
         changed
@@ -359,7 +648,7 @@ impl ConstEval {
                 continue;
             };
             for other in tree.get_owners() {
-                let mut view = self.consts.view_mut(other.0);
+                let mut view = self.state.consts.view_mut(other.0);
                 changed |= !matches!(view.get(), Some(ConstEvalState::Runtime));
                 view.set(ConstEvalState::Runtime);
             }
@@ -433,10 +722,8 @@ impl ConstEval {
                     Statement::VarDef { var, value, uid, debug: _ } => {
                         let mut info = Info::def(block_ref, *uid);
                         // nothing should have side effects, except for runtime calls
-                        // info.remove_allowed = !matches!(value.ty, MirExprVariant::Assign) &&
-                        //     (!matches!(value.ty, MirExprVariant::Call) || matches!(self.const_states.get(var.0), Some(ConstState::Const(_))));
-                        info.remove_allowed = !matches!(value.ty, MirExprVariant::Assign | MirExprVariant::Call);
-
+                        info.remove_allowed = !matches!(value.ty,
+                            MirExprVariant::Assign | MirExprVariant::Call);
                         buf.view_mut(var.0).set(info);
                         for u in cfg.expressions.collect_vars(*value) {
                             buf.get_mut(u.0).unwrap().in_use = true;
@@ -501,12 +788,7 @@ impl ConstEval {
 
         // remove all values that we can consider to be dropped
         let mut remove_counter = 0;
-        for (val_raw, info) in buf.iter() {
-            if val_raw == 0x3a {
-                dbg!(info);
-            }
-
-            // if !info.in_use && (info.is_const || matches!(self.const_states.get(val_raw), Some(ConstState::Const(_)))) {
+        for (_val_raw, info) in buf.iter() {
             if !info.in_use && info.remove_allowed {
                 cfg.remove_def(&info.init);
                 if let Some(drop) = info.drop.as_ref() {
@@ -518,105 +800,20 @@ impl ConstEval {
         remove_counter
     }
 
-    /// Merges the states of the block call parameter values into the target block parameters.
-    /// If any of the target block parameters changed as a result of this operation, `true` is
-    /// returned.
-    /// Otherwise, this method returns `false`.
-    /// Should the block call not contain any parameters, this method returns `false`.
-    fn merge_call_parameters(
-        &mut self,
-        call: &BlockCall,
-        cfg: &MirFlowGraph,
-        reg: &MirTypeRegistry,
-    ) -> bool {
-        let mut changed = false;
-        for (caller_value, callee_value) in call.params.iter()
-            .zip(cfg.blocks[call.target.0].parameters.iter()) {
-            // merge the parameters using the internal stack frame reference
-            changed |= self.merge_parameter_const_state(cfg, caller_value, callee_value, reg, None);
-        }
-        changed
-    }
-
-    /// Merges the constant evaluation states of the source and the destination parameter
-    /// and writes the result into the destination state.
-    /// If the destination state changed, this method returns `true`, otherwise it returns `false`.
-    fn merge_parameter_const_state(
-        &mut self,
-        cfg: &MirFlowGraph,
-        src: &MirValue,
-        dst: &MirValue,
-        reg: &MirTypeRegistry,
-        src_frame: Option<&ConstFrame>,
-    ) -> bool {
-        // if the source is not constant, dst can also not be constant
-        let Some(ConstEvalState::Known(src_data)) = self.consts.get(src.0) else {
-            // if source does not have a constant value registered, the callee parameter can also
-            // definitely not be constant
-            return self.mark_runtime(dst);
-        };
-
-        let is_avail = if let Some(src_frame) = src_frame {
-            src_frame
-        } else {
-            &self.block_frame
-        }.is_avail(src, &self.borrow_graph);
-
-        if is_avail {
-            // get value from vm
-            let view = self.consts.view(dst.0);
-            let ty = cfg.get_var_type(dst);
-            if reg.is_ref(ty) {
-                return self.mark_runtime(dst);
-            }
-
-            // the value is not a reference
-            if let Some(prev) = view.get() {
-                match prev {
-                    ConstEvalState::Known(prev) => {
-                        if src_data.as_data() != prev.as_data() {
-                            self.mark_runtime(dst)
-                        } else {
-                            false
-                        }
-                    }
-                    ConstEvalState::Runtime => false, // do nothing in this case
-                }
-            } else {
-                let data = src_data.clone();
-                self.consts.view_mut(dst.0).set(ConstEvalState::Known(data));
-                true
-            }
-        } else {
-            // if the value is not available now, mark it as unavailable permanently
-            self.mark_runtime(dst)
-        }
-    }
-
     /// Marks the [MirValue] as only being available at runtime and returns if the value changed.
     fn mark_runtime(&mut self, value: &MirValue) -> bool {
-        let mut view = self.consts.view_mut(value.0);
+        let mut view = self.state.consts.view_mut(value.0);
         let changed = !matches!(view.get(), Some(ConstEvalState::Runtime));
         view.set(ConstEvalState::Runtime);
         changed
     }
 
     fn get_constant_value(&self, value: &MirValue) -> Option<&AmorphusDataCopy> {
-        self.consts.get(value.0).and_then(|state| match state {
-            ConstEvalState::Runtime => None,
+        self.state.consts.get(value.0).and_then(|state| match state {
+            ConstEvalState::Runtime | ConstEvalState::Unknown => None,
             ConstEvalState::Known(c) => Some(c),
         })
     }
-
-    // pub fn is_const(
-    //     &self,
-    //     value: &MirValue,
-    // ) -> ConstState {
-    //     self.const_states
-    //         .get(value.0)
-    //         .cloned()
-    //         .unwrap_or_default()
-    // }
 }
 
 #[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
@@ -886,7 +1083,7 @@ impl MirFlowGraph {
                 }
                 let call = &self.expressions.call[value.id];
                 for arg in call.comptime_args.iter() {
-                    let Some(ConstEvalState::Known(const_value)) = eval.consts.get(arg.value_expr.0) else {
+                    let Some(ConstEvalState::Known(const_value)) = eval.state.consts.get(arg.value_expr.0) else {
                         return Err(ConstError::UnresolvedAtComptime(
                             arg.value_expr, "value is passed as a function call parameter value \
                             marked as `comptime` in the function signature".to_string()));
@@ -913,139 +1110,231 @@ impl MirFlowGraph {
         edl_vars: &EdlVarRegistry,
         backend: &mut impl Backend,
     ) -> Result<ConstEval, ExecutionError> {
-        let const_state = self.constant_analysis()
-            .expect("failed const propagation analysis");
         let bg = self.borrows(reg, edl_types, edl_vars)
             .expect("failed to build borrow graph for const evaluation");
-        let mut const_eval = ConstEval::new(bg, const_state);
+        let mut const_eval = ConstEval::new(self, bg);
 
-        #[allow(unused_assignments)]
-        let mut current_block = self.root();
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
-        let mut work_list = CallParameterWorklist::new(root_call_params);
-        // let mut visit_count = IndexMap::<usize>::default();
+        let mut work_list: Vec<MirBlockRef> = vec![];
+        self.process_block(vm, stack_frame, reg, backend, &mut work_list, root_call_params, &mut const_eval);
+
         // work through work-list
-        while let Some(params) = work_list.pop() {
-            params.set_vm_values(self, vm, stack_frame, &mut const_eval, reg);
-            current_block = params.block;
-
-            // if we can continue on just one branch, don't actually divert to work-list to keep
-            // overhead low.
-            'outer: loop {
-                // limit execution of a single block to a set amount of times
-                // let mut visit = visit_count.view_mut(current_block.0);
-                // if visit.get().cloned().unwrap_or(0) > 10 {
-                //     break;
-                // }
-                // visit.update(|val| *val += 1, || 0);
-
-                self.blocks[current_block.0]
-                    .eval_consts(self, vm, stack_frame, reg, backend, &mut const_eval);
-                // jump to other block using sealing statement
-                match &self.blocks[current_block.0].seal {
-                    Seal::Return(_value, _debug) => {
-                        // println!("returning from execution in a branch of const evaluation");
-                        break;
-                    }
-                    Seal::Panic(_value, _debug) => {
-                        // println!("panic possible in const evaluation");
-                        break;
-                    }
-                    Seal::Jump(target, _debug) => {
-                        const_eval.transfer_block_call(target, self, vm, stack_frame, reg);
-                        current_block = target.target;
-                    }
-                    Seal::Cond { cond, then_target, else_target, debug: _ } => {
-                        if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
-                            // condition of conditional jump is known at compile time
-                            let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
-                            if cond_value {
-                                // proceed just in then-block
-                                const_eval.transfer_block_call(then_target, self, vm, stack_frame, reg);
-                                current_block = then_target.target;
-                            } else {
-                                // proceed just in else-block
-                                const_eval.transfer_block_call(else_target, self, vm, stack_frame, reg);
-                                current_block = else_target.target;
-                            }
-                        } else {
-                            // condition of conditional jump is unknown at compile time
-                            // -> we need to continue on both blocks
-                            let then_frame = CallParameterCopy::new(
-                                then_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(
-                                then_frame,
-                                current_block,
-                                const_eval.merge_call_parameters(then_target, self, reg),
-                            );
-                            let else_frame = CallParameterCopy::new(
-                                else_target, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(
-                                else_frame,
-                                current_block,
-                                const_eval.merge_call_parameters(else_target, self, reg),
-                            );
-                            // continue traversing the worklist
-                            break;
-                        }
-                    }
-                    Seal::Switch { cond, targets, default, debug: _ } => {
-                        // if the condition is known at compile time, we can execute the jump directly
-                        if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
-                            // condition is known at comptime
-                            let (cond_range, cond_ty) = stack_frame.get_offset(cond, vm).unwrap();
-                            let cond_data = vm.get_data(cond_range.clone(), cond_ty);
-
-                            for target in targets.iter() {
-                                // value **must** be known
-                                if !const_eval.block_frame.is_avail(&target.match_value, &const_eval.borrow_graph) {
-                                    report_comptime_unknown(target.match_value);
-                                    break 'outer;
-                                }
-
-                                // get match value and compare to constant input condition
-                                let (target_range, target_ty) = stack_frame
-                                    .get_offset(&target.match_value, vm).unwrap();
-                                if vm.get_data(target_range.clone(), target_ty) == cond_data {
-                                    // data matches!
-                                    const_eval.transfer_block_call(&target.block_call, self, vm, stack_frame, reg);
-                                    current_block = target.block_call.target;
-                                    continue 'outer; // continue execution in the new block
-                                }
-                            }
-
-                            // none of the match branches caught the condition.
-                            // continue in default branch
-                            const_eval.transfer_block_call(default, self, vm, stack_frame, reg);
-                            current_block = default.target;
-                        } else {
-                            // condition is not known at comptime
-                            // -> push all possible branches to worklist
-                            for target in targets.iter() {
-                                let call_param = CallParameterCopy::new(
-                                    &target.block_call, &const_eval.block_frame, vm, stack_frame, reg);
-                                work_list.push(
-                                    call_param,
-                                    current_block,
-                                    const_eval.merge_call_parameters(&target.block_call, self, reg),
-                                );
-                            }
-                            let call_param = CallParameterCopy::new(
-                                default, &const_eval.block_frame, vm, stack_frame, reg);
-                            work_list.push(
-                                call_param,
-                                current_block,
-                                const_eval.merge_call_parameters(default, self, reg),
-                            );
-                            break;
-                        }
-                    }
-                    Seal::None => panic!("block is not sealed!"),
-                }
-            };
+        while let Some(current_block) = work_list.pop() {
+            // join call parameters from parent blocks
+            let params = ConstNodeState::join(&current_block, &const_eval.state, self);
+            self.process_block(
+                vm,
+                stack_frame,
+                reg,
+                backend,
+                &mut work_list,
+                params,
+                &mut const_eval,
+            );
         }
         Ok(const_eval)
+    }
+
+    fn process_block(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        reg: &mut MirTypeRegistry,
+        backend: &mut impl Backend,
+        work_list: &mut Vec<MirBlockRef>,
+        mut params: CallParameterCopy,
+        const_eval: &mut ConstEval,
+    ) {
+        let current_block = params.block;
+        if !params.params.is_empty()
+            && !ConstNodeState::call_changed(&current_block, &mut const_eval.state, &params) {
+            // call has not changed since last execution; block contents can not change
+            return;
+        }
+        params.set_vm_values(self, vm, stack_frame, const_eval, reg);
+        let max_compute_cache = {
+            let state = const_eval.state.map
+                .get_mut(current_block.0).unwrap();
+            state.computation_counter += 1;
+            if state.computation_counter > vm.const_folding_execution_limit {
+                Some(const_eval.state.copy_const_values())
+            } else {
+                None
+            }
+        };
+        let state_changed = self.blocks[current_block.0]
+            .eval_consts(self, vm, stack_frame, reg, backend, const_eval);
+        let mut output_builder = OutputVecBuilder::default();
+        if let Some(max_computation_cache) = max_compute_cache {
+            // If, after a configurable amount of iterations, not all values have converged
+            // into a stable state, we find the values that are still changing and fix them
+            // as a runtime value.
+            let diff = const_eval.state.compute_diff(&max_computation_cache);
+            output_builder.with_force_runtime(diff);
+        }
+
+        // jump to other block using sealing statement
+        match &self.blocks[current_block.0].seal {
+            Seal::Return(_value, _debug) => {
+                // println!("returning from execution in a branch of const evaluation");
+            }
+            Seal::Panic(_value, _debug) => {
+                // warn!("panic possible in const evaluation");
+            }
+            Seal::Jump(target, _debug) => {
+                output_builder.insert_call(
+                    target, &const_eval.block_frame, vm, stack_frame, reg);
+                const_eval.state.map
+                    .get_mut(current_block.0)
+                    .unwrap()
+                    .set_output_values(output_builder.build());
+
+                if !work_list.contains(&target.target) {
+                    work_list.push(target.target);
+                }
+            }
+            Seal::Cond { cond, then_target, else_target, debug: _ } => {
+                if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
+                    // condition of conditional jump is known at compile time
+                    let cond_value: bool = vm.read(*cond, stack_frame, reg).unwrap();
+                    if cond_value {
+                        // proceed just in then-block
+                        output_builder.insert_call(
+                            then_target, &const_eval.block_frame, vm, stack_frame, reg);
+                        const_eval.state.map
+                            .get_mut(current_block.0)
+                            .unwrap()
+                            .set_output_values(output_builder.build());
+
+                        if !work_list.contains(&then_target.target) {
+                            work_list.push(then_target.target);
+                        }
+                    } else {
+                        // proceed just in else-block
+                        output_builder.insert_call(
+                            else_target, &const_eval.block_frame, vm, stack_frame, reg);
+                        const_eval.state.map
+                            .get_mut(current_block.0)
+                            .unwrap()
+                            .set_output_values(output_builder.build());
+
+                        if !work_list.contains(&else_target.target) {
+                            work_list.push(else_target.target);
+                        }
+                    }
+                } else {
+                    if !state_changed {
+                        return; // don't continue if the state of the const-eval did not change
+                    }
+
+                    output_builder.insert_call(
+                        then_target, &const_eval.block_frame, vm, stack_frame, reg);
+                    output_builder.insert_call(
+                        else_target, &const_eval.block_frame, vm, stack_frame, reg);
+                    const_eval.state.map
+                        .get_mut(current_block.0)
+                        .unwrap()
+                        .set_output_values(output_builder.build());
+
+                    // condition of conditional jump is unknown at compile time
+                    // -> we need to continue on both blocks
+                    if !work_list.contains(&then_target.target) {
+                        work_list.push(then_target.target);
+                    }
+                    if !work_list.contains(&else_target.target) {
+                        work_list.push(else_target.target);
+                    }
+                }
+            }
+            Seal::Switch { cond, targets, default, debug: _ } => {
+                // if the condition is known at compile time, we can execute the jump directly
+                if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
+                    // condition is known at comptime
+                    let (cond_range, cond_ty) = stack_frame.get_offset(cond, vm).unwrap();
+                    let cond_data = vm.get_data(cond_range.clone(), cond_ty);
+
+                    for target in targets.iter() {
+                        // value **must** be known
+                        if !const_eval.block_frame
+                            .is_avail(&target.match_value, &const_eval.borrow_graph) {
+
+                            report_comptime_unknown(target.match_value);
+                            return;
+                        }
+
+                        // get match value and compare to constant input condition
+                        let (target_range, target_ty) = stack_frame
+                            .get_offset(&target.match_value, vm).unwrap();
+                        if vm.get_data(target_range.clone(), target_ty) == cond_data {
+                            // data matches!
+                            output_builder.insert_call(
+                                &target.block_call,
+                                &const_eval.block_frame,
+                                vm,
+                                stack_frame,
+                                reg,
+                            );
+                            const_eval.state.map
+                                .get_mut(current_block.0)
+                                .unwrap()
+                                .set_output_values(output_builder.build());
+
+                            // const_eval.transfer_block_call(
+                            //     &target.block_call, self, vm, stack_frame, reg);
+                            // current_block = target.block_call.target;
+                            if !work_list.contains(&target.block_call.target) {
+                                work_list.push(target.block_call.target);
+                            }
+                            return; // continue execution in the new block
+                        }
+                    }
+
+                    output_builder.insert_call(
+                        default, &const_eval.block_frame, vm, stack_frame, reg);
+                    const_eval.state.map
+                        .get_mut(current_block.0)
+                        .unwrap()
+                        .set_output_values(output_builder.build());
+
+                    // none of the match branches caught the condition.
+                    // continue in default branch
+                    // const_eval.transfer_block_call(default, self, vm, stack_frame, reg);
+                    // current_block = default.target;
+                    if !work_list.contains(&default.target) {
+                        work_list.push(default.target);
+                    }
+                } else {
+                    if !state_changed {
+                        return; // don't continue updating the children if the const state
+                        // did not change at all
+                    }
+
+                    targets.iter().for_each(|target| {
+                        output_builder.insert_call(
+                            &target.block_call, &const_eval.block_frame, vm, stack_frame, reg);
+                    });
+                    output_builder.insert_call(
+                        default, &const_eval.block_frame, vm, stack_frame, reg);
+                    const_eval.state.map
+                        .get_mut(current_block.0)
+                        .unwrap()
+                        .set_output_values(output_builder.build());
+
+                    // condition is not known at comptime
+                    // -> push all possible branches to worklist
+                    targets.iter().for_each(|target| {
+                        if !work_list.contains(&target.block_call.target) {
+                            work_list.push(target.block_call.target)
+                        }
+                    });
+                    if !work_list.contains(&default.target) {
+                        work_list.push(default.target);
+                    }
+                }
+            }
+            Seal::None => panic!("block is not sealed!"),
+        }
     }
 }
 
@@ -1089,7 +1378,7 @@ impl Statement {
             Self::VarMove { var, value, uid: _, debug: _ }
                 | Self::VarCopy { var, value, uid: _, debug: _ } => {
                 // check if value exists
-                if const_eval.block_frame.avail.contains(value) {
+                if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
                     vm.memcpy(&dst, &src);

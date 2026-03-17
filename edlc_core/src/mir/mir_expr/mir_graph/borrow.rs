@@ -76,7 +76,7 @@ pub enum FlowState {
     Floating,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReferenceState<V> {
     /// Each state corresponds to a node in a borrow tree
     states: Vec<usize>,
@@ -819,7 +819,7 @@ impl IndexMut<BorrowSource> for BorrowForest {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReferenceStateForest<V> {
     forest: HashMap<BorrowSource, ReferenceState<V>>,
 }

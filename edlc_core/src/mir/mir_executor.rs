@@ -300,6 +300,7 @@ pub struct ExecutorVM {
     stack_region: usize,
     stack_region_size: usize,
     pub frame_pointer: usize,
+    pub const_folding_execution_limit: usize,
 }
 
 impl ExecutorVM {
@@ -315,6 +316,7 @@ impl ExecutorVM {
             memory,
             global_vars: HashMap::new(),
             frame_pointer: 0,
+            const_folding_execution_limit: 1000,
         }
     }
 

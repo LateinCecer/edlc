@@ -203,7 +203,7 @@ impl TestCompiler {
             &self.compiler.phase.vars,
         )?;
 
-        borrow_graph.print();
+        // borrow_graph.print();
         body.insert_drops_with_dependencies(&borrow_graph)?;
 
         // write MIR code to file for debugging
@@ -727,13 +727,15 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
 
         // create an array to test internal references
         let mut arr = [1_i32, 2, 4, 8, 16, 32];
-        arr[2] = 6;
+        arr[2] = std::input();
         std::print("array index access: ");
         std::print(arr[2]);
         std::print("\n");
 
         // copy arr to somewhere else
         let second_array = arr;
+        std::print(second_array[2]);
+        std::print("\n");
 
         let data = MyData {
             name: "Ferris",
@@ -861,6 +863,8 @@ fn test_simple() -> Result<(), anyhow::Error> {
     {
         let mut y = 0i32;
         let mut z = 1i32;
+        let mut x = y + z;
+
         loop {
             if y == std::input() { break; }
             z *= 2;
