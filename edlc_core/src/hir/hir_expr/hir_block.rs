@@ -520,9 +520,14 @@ impl MakeGraph for HirBlock {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block);
+        let merge_block = merge_block.build();
         // make sure to record that `target` lives outside the new block we are about to create
-        let scope = graph.graph.get_block_scope(&graph.current_block);
+        let scope = graph.graph.get_block_scope(&merge_block);
         graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
+
         // block in HIR always create a new MIR block too;
         // this makes tracking of debugging information easier and provides an attachment point for
         // block contexts
@@ -537,7 +542,11 @@ impl MakeGraph for HirBlock {
         let new_block = new_block.build();
         graph.graph.insert_jump(graph.current_block, new_block, DebugSymbols { pos: self.pos });
         graph.current_block = new_block;
-        self.write_to_graph_plane(graph, target)
+        self.write_to_graph_plane(graph, target)?;
+
+        graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
+        graph.current_block = merge_block;
+        Ok(())
     }
 
     fn mir_type<B: Backend>(

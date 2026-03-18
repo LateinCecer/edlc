@@ -84,7 +84,7 @@ impl PartialSsaDeconstruction {
     }
 
     fn get_source(&mut self, loc: &MirGraphLoc) -> DataSource {
-        *self.sources.entry(loc.clone()).or_insert_with(|| {
+        *self.sources.entry(*loc).or_insert_with(|| {
             let id = self.source_count;
             self.source_count += 1;
             DataSource(id)
@@ -231,6 +231,8 @@ impl PartialSsaDeconstruction {
             // If not, we can safely merge the data source with the first source.
             if !self.collides(el, &value, lifeness) {
                 self.transition_value(*el, els[0]);
+            } else {
+                panic!("failed to merge phi node during SSA value deconstruction");
             }
         }
 

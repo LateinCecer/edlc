@@ -183,20 +183,10 @@ impl FmtType for EdlType {
             Self::Generic { env_id, index } => {
                 types.fmt_env_param_name(*env_id, *index, fmt)
             },
-            Self::Function { name, state: FunctionState::Init { sig, .. } } => {
-                if let Some(fn_name) = name {
-                    write!(fmt, "{fn_name}")?;
-                } else {
-                    write!(fmt, "fn")?;
-                }
+            Self::Function { name: _, state: FunctionState::Init { sig, .. } } => {
                 sig.fmt_type(fmt, types)
             },
-            Self::Function { name, state: FunctionState::Pre { sig } } => {
-                if let Some(fn_name) = name {
-                    write!(fmt, "{fn_name}")?;
-                } else {
-                    write!(fmt, "fn")?;
-                }
+            Self::Function { name: _, state: FunctionState::Pre { sig } } => {
                 sig.fmt_type(fmt, types)
             }
         }
@@ -1658,6 +1648,7 @@ impl EdlTypeRegistry {
         match ty {
             t if t == EDL_ARRAY => return write!(fmt, "[_; _]"),
             t if t == EDL_SLICE => return write!(fmt, "[_]"),
+            t if t == EDL_REF => return write!(fmt, "&_"),
             _ => (),
         }
 

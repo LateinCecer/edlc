@@ -835,7 +835,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 pub struct MirComptimeParam {
     pub param_index: usize,
     pub comptime_index: usize,
-    value: ComptimeValueId,
+    pub(crate) value: ComptimeValueId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -1044,21 +1044,19 @@ impl MirFn {
                 .get_offset(&root_parameters[index], vm).unwrap();
             vm.memcpy(&param_dst, param_src);
         }
+        assert_eq!(root_parameters.len(), params.len(), "not enough parameters");
         // get comptime parameters
-        let root_param_offset = params.len();
-        for (index, param) in self.comptime_params.iter().enumerate() {
-            let func_ref = backend.func_reg();
-            let value = func_ref.comptime_mapper.get(param.value).unwrap();
-            // println!("MAPPER VALUES: {:?}", value);
-            // let mut bytes = [0u8; 4];
-            // bytes.copy_from_slice(&value.as_data().as_slice()[0..4]);
-            // let test = f32::from_ne_bytes(bytes);
-            // println!("AS FLOAT: {test}");
+        // NOTE: for hybrid functions the new optimization pipeline compiles the input parameters
+        //       directly into the base function!
 
-            let param_dst = stack_frame_layout
-                .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
-            vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
-        }
+        // let root_param_offset = params.len();
+        // for (index, param) in self.comptime_params.iter().enumerate() {
+        //     let func_ref = backend.func_reg();
+        //     let value = func_ref.comptime_mapper.get(param.value).unwrap();
+        //     let param_dst = stack_frame_layout
+        //         .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
+        //     vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
+        // }
 
         // println!("Block parameter values:");
         // for (index, param) in self.body.get_root_parameters().iter().enumerate() {

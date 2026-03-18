@@ -745,6 +745,16 @@ pub enum Context {
     Runtime,
 }
 
+impl Display for Context {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Comptime => write!(f, "Comptime"),
+            Self::MaybeComptime => write!(f, "MaybeComptime"),
+            Self::Runtime => write!(f, "Runtime"),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 struct Block {
     active_scopes: Vec<Scope>,

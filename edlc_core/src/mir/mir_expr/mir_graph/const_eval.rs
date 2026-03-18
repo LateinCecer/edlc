@@ -395,7 +395,7 @@ impl CallParameterCopy {
         reg: &MirTypeRegistry,
     ) -> CallParameterCopy {
         let root_ref = cfg.root();
-        let mut params = vec![const { ConstEvalState::Unknown }; comptime_params.len()];
+        let mut params = vec![const { ConstEvalState::Unknown }; cfg.get_root_parameters().len()];
         for (value, (src_range, src_ty)) in comptime_params.iter() {
             let value_copy = vm.get_data(src_range.clone(), *src_ty).get_copy(reg);
 
@@ -834,37 +834,57 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             self.check_hybrid_call(value, block, debug, cfg, phase, &mut report);
                         } else {
-                            self.check_comptime_call(value,  block, debug, cfg, phase, &mut report);
+                            self.check_comptime_call(value, MirBlockRef(block_ref), debug, cfg, phase, &mut report);
                         }
                     }
                     Statement::VarMove { var: _, value, uid: _, debug } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
+                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                            continue; // don't report this for comptime functions; in those every parameter is
+                            // comptime, because the function itself can only be called during comptime ;)
+                        };
                         report.record_err(|| self.check_constant(value, block, debug, phase))
                     }
                     Statement::VarCopy { var: _, value, uid: _, debug } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
+                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                            continue; // don't report this for comptime functions; in those every parameter is
+                            // comptime, because the function itself can only be called during comptime ;)
+                        };
                         report.record_err(|| self.check_constant(value, block, debug, phase))
                     }
                     Statement::Drop { value, uid: _, debug } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
+                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                            continue; // don't report this for comptime functions; in those every parameter is
+                            // comptime, because the function itself can only be called during comptime ;)
+                        };
                         report.record_err(|| self.check_constant_drop(value, block, debug, phase))
                     }
                     Statement::Sync { .. } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
+                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                            continue; // don't report this for comptime functions; in those every parameter is
+                            // comptime, because the function itself can only be called during comptime ;)
+                        };
                         unreachable!()
                     }
                     Statement::Record { .. } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
+                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                            continue; // don't report this for comptime functions; in those every parameter is
+                            // comptime, because the function itself can only be called during comptime ;)
+                        };
                         unreachable!()
                     }
                 }
@@ -894,7 +914,7 @@ impl ConstEval {
     fn check_comptime_call(
         &self,
         expr: &MirExprId,
-        block: &Block,
+        block: MirBlockRef,
         debug: &DebugSymbols,
         cfg: &MirFlowGraph,
         phase: &mut HirPhase,
@@ -903,6 +923,11 @@ impl ConstEval {
         if !matches!(expr.ty, MirExprVariant::Call) {
             return;
         }
+        let Some(start_of_block) = cfg.find_begin_comptime_block(block) else {
+            return; // don't report this for comptime functions; in those every parameter is
+            // comptime, because the function itself can only be called during comptime ;)
+        };
+        let block = &cfg.blocks[block.0];
         let call = &cfg.expressions.call[expr.id];
         for comptime_arg in call.comptime_args.iter() {
             report.record_err(|| self.check_constant(&comptime_arg.value_expr, block, debug, phase));
@@ -924,7 +949,7 @@ impl ConstEval {
         } else {
             phase.report_error(
                 TypeArguments::new(&[
-                    TypeArgument::new_display("non-constant captured in `comptime` block")
+                    TypeArgument::new_display(&"non-constant captured in `comptime` block")
                 ]),
                 &[
                     SrcError::Double {
@@ -932,10 +957,10 @@ impl ConstEval {
                         second: debug.pos.into(),
                         src: block.src.clone(),
                         error_first: TypeArguments::new(&[
-                            TypeArgument::new_display("`comptime` block starting here")
+                            TypeArgument::new_display(&"`comptime` block starting here")
                         ]),
                         error_second: TypeArguments::new(&[
-                            TypeArgument::new_display("non-constant captured here")
+                            TypeArgument::new_display(&"non-constant captured here")
                         ]),
                     },
                 ],
@@ -961,7 +986,7 @@ impl ConstEval {
         } else {
             phase.report_error(
                 TypeArguments::new(&[
-                    TypeArgument::new_display("non-constant value dropped in `comptime` block")
+                    TypeArgument::new_display(&"non-constant value dropped in `comptime` block")
                 ]),
                 &[
                     SrcError::Double {
@@ -969,10 +994,10 @@ impl ConstEval {
                         second: debug.pos.into(),
                         src: block.src.clone(),
                         error_first: TypeArguments::new(&[
-                            TypeArgument::new_display("`comptime` block starting here")
+                            TypeArgument::new_display(&"`comptime` block starting here")
                         ]),
                         error_second: TypeArguments::new(&[
-                            TypeArgument::new_display("non-constant value goes out of scope here")
+                            TypeArgument::new_display(&"non-constant value goes out of scope here")
                         ]),
                     },
                 ],
@@ -1749,8 +1774,30 @@ fn process_function(
         &compiler.mir_phase.types,
     );
     vm.alloc_stack_frame(&stack_frame);
+
+    // collect comptime parameters for hybrid functions
+    let comptime_param_values = {
+        let func_reg = backend.func_reg();
+        let root_parameters = body.body.get_root_parameters();
+        let offset = body.signature.params.len();
+        body.comptime_params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                // note: unwrap is safe here since we make sure during the function gathering
+                //       step that all comptime parameters are present
+                let data = func_reg.comptime_mapper.get(param.value).unwrap();
+                let mir_value = root_parameters[offset + index];
+                let (dst_range, dst_ty) = stack_frame.get_offset(&mir_value, vm).unwrap();
+                let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
+                dst.memcpy(&data.as_data());
+                Ok((mir_value, (dst_range, dst_ty)))
+            })
+            .collect::<Result<Vec<_>, OptimizationError>>()
+    }?;
+
     let const_eval = body.body.propagate_constants(
-        &[],
+        &comptime_param_values,
         vm,
         &stack_frame,
         &mut compiler.mir_phase.types,
@@ -1768,20 +1815,25 @@ fn process_function(
 
     // insert constant eval results where possible
     body.body.include_constants(&const_eval);
-    let mut borrow_graph = body.body.borrows(
+    assert_eq!(
+        body.body.get_root_parameters().len(),
+        body.signature.params.len(),
+        "after optimization, any comptime parameters need to disappear from the functions entry block"
+    );
+
+    compiler.phase.report_mode.print_errors = true;
+    compiler.phase.report_mode.print_warnings = true;
+    const_eval.validate_comptime_context(&body.body, &mut compiler.phase);
+
+    let borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
         &compiler.phase.types,
         &compiler.phase.vars,
     )?;
     let report = body.body.check_scopes(&borrow_graph);
     report.print();
-    body.body.route_owner_data(
-        &mut borrow_graph,
-        &mut compiler.mir_phase.types,
-        &compiler.phase.types,
-        &compiler.phase.vars,
-    )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend);
 
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;

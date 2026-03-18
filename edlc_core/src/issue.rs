@@ -205,16 +205,17 @@ impl<'a, H: Hasher> TypeArgument<'a, H> {
 
     pub fn new_var(arg: &'a dyn FmtVar) -> Self { Self::VarArg(arg) }
 
-    pub fn new_display<A: std::fmt::Display + std::hash::Hash + ?Sized>(arg: &'a A) -> Self {
+    pub fn new_display<A: std::fmt::Display + std::hash::Hash>(arg: &'a A) -> Self {
         Self::General {
-            ptr: NonNull::from_ref(arg).cast(),
+            ptr: NonNull::<A>::from_ref(arg).cast(),
             // # Safety: the `formatter` function pointer will only ever be called with `ptr` as the
             // argument for `self`, which is the right type.
             formatter: unsafe {
+                let f: fn(&A, &mut Formatter<'_>) -> Result<(), fmt::Error> = A::fmt;
                 std::mem::transmute::<
                     fn(&A, &mut Formatter<'_>) -> Result<(), fmt::Error>,
                     fn(&(), &mut Formatter<'_>) -> Result<(), fmt::Error>,
-                >(A::fmt)
+                >(f)
             },
             // # Safety: the `hasher` function pointer will only ever be called with `ptr` as the
             // argument for `self`, which is the right type.
@@ -228,16 +229,17 @@ impl<'a, H: Hasher> TypeArgument<'a, H> {
         }
     }
 
-    pub fn new_edl<A: EdlDisplay + std::hash::Hash + ?Sized>(arg: &'a A) -> Self {
+    pub fn new_edl<A: EdlDisplay + std::hash::Hash>(arg: &'a A) -> Self {
         Self::Types {
-            ptr: NonNull::from_ref(arg).cast(),
+            ptr: NonNull::<A>::from_ref(arg).cast(),
             // # Safety: the `formatter` function pointer will only ever be called with `ptr` as the
             // argument for `self`, which is the right type.
             formatter: unsafe {
+                let f: fn(&A, &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error> = A::fmt_edl;
                 std::mem::transmute::<
                     fn(&A, &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error>,
                     fn(&(), &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error>,
-                >(A::fmt_edl)
+                >(f)
             },
             // # Safety: the `hasher` function pointer will only ever be called with `ptr` as the
             // argument for `self`, which is the right type.
@@ -264,11 +266,13 @@ impl<'a, H: Hasher> TypeArgument<'a, H> {
                 unsafe {
                     formatter(ptr.as_ref(), fmt)
                 }
+                // write!(fmt, "placeholder")
             }
             TypeArgument::Types { ptr, formatter, .. } => {
                 unsafe {
                     formatter(ptr.as_ref(), fmt, &TypeArgInformation { types, vars } )
                 }
+                // write!(fmt, "placeholder")
             }
         }
     }

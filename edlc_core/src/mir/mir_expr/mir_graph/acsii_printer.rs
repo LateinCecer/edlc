@@ -335,7 +335,9 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
             let ty = graph.get_var_type(param);
             self.write_type(ty)?;
         }
-        self.writer.write_all(b"):\n")?;
+        self.writer.write_all(b") [")?;
+        write!(self.writer, "{}", block.ctx)?;
+        self.writer.write_all(b"]:\n")?;
 
         // write body
         const SPACER: &[u8] = b"    ";

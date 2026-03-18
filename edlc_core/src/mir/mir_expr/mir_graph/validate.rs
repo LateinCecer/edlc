@@ -58,7 +58,10 @@ impl MirFlowGraph {
     /// Should the entire CFG be in a comptime mode, `None` is returned, indicating that this
     /// is either a comptime function, a global variable, or a similar matter of comptime
     /// expression.
-    fn find_begin_comptime_block(&self, block: MirBlockRef) -> Option<MirBlockRef> {
+    pub(crate) fn find_begin_comptime_block(&self, block: MirBlockRef) -> Option<MirBlockRef> {
+        if block == self.root() && self.blocks[block.0].ctx == Context::Comptime {
+            return None;
+        }
         let mut work_list = vec![(block, block)];
         while let Some((block, prev)) = work_list.pop() {
             if self.blocks[block.0].ctx != Context::Comptime {
@@ -199,11 +202,11 @@ fn validate_def<B: Backend>(
                 let begin_block = validator.cfg.find_begin_comptime_block(info.block_ref);
                 let comptime_block_msg0 = &[
                     TypeArgument::<'_, DefaultHasher>::new_display(
-                        "within `comptime` block starting here"),
+                        &"within `comptime` block starting here"),
                 ];
                 let comptime_block_msg1 = &[
                     TypeArgument::<'_, DefaultHasher>::new_display(
-                        "in a `comptime` function global variable definition"),
+                        &"in a `comptime` function global variable definition"),
                 ];
                 let comptime_block_src = if let Some(begin) = begin_block {
                     SrcError::Single {
@@ -221,22 +224,22 @@ fn validate_def<B: Backend>(
 
                 validator.phase.report_error(
                     TypeArguments::new(&[
-                        TypeArgument::new_display("call to runtime function "),
+                        TypeArgument::new_display(&"call to runtime function `"),
                         TypeArgument::new_edl(&edl_id),
-                        TypeArgument::new_display(" in comptime context"),
+                        TypeArgument::new_display(&"` in comptime context"),
                     ]),
                     &[
                         SrcError::Single {
                             pos: info.debug.pos.into(),
                             src: info.src.clone(),
                             error: TypeArguments::new(&[
-                                TypeArgument::new_display("runtime function called here"),
+                                TypeArgument::new_display(&"runtime function called here"),
                             ]),
                         },
                         comptime_block_src,
                     ],
                     Some(TypeArguments::new(&[
-                        TypeArgument::new_display(r#"Runtime functions can only be called from
+                        TypeArgument::new_display(&r#"Runtime functions can only be called from
                         a runtime context."#),
                     ])),
                 );
@@ -246,16 +249,16 @@ fn validate_def<B: Backend>(
                 // report call to a runtime function in a ?comptime context
                 validator.phase.report_error(
                     TypeArguments::new(&[
-                        TypeArgument::new_display("call to runtime function "),
+                        TypeArgument::new_display(&"call to runtime function `"),
                         TypeArgument::new_edl(&edl_id),
-                        TypeArgument::new_display(" in ?comptime context")
+                        TypeArgument::new_display(&"` in ?comptime context")
                     ]),
                     &[
                         SrcError::Single {
                             pos: info.debug.pos.into(),
                             src: info.src.clone(),
                             error: TypeArguments::new(&[
-                                TypeArgument::new_display("runtime function called here"),
+                                TypeArgument::new_display(&"runtime function called here"),
                             ])
                         }
                     ],
@@ -270,21 +273,21 @@ fn validate_def<B: Backend>(
                 // report call to a comptime function in a ?comptime context
                 validator.phase.report_error(
                     TypeArguments::new(&[
-                        TypeArgument::new_display("call to comptime function "),
+                        TypeArgument::new_display(&"call to comptime function `"),
                         TypeArgument::new_edl(&edl_id),
-                        TypeArgument::new_display(" in ?comptime context")
+                        TypeArgument::new_display(&"` in ?comptime context")
                     ]),
                     &[
                         SrcError::Single {
                             pos: info.debug.pos.into(),
                             src: info.src.clone(),
                             error: TypeArguments::new(&[
-                                TypeArgument::new_display("comptime function called here"),
+                                TypeArgument::new_display(&"comptime function called here"),
                             ])
                         }
                     ],
                     Some(TypeArguments::new(&[
-                        TypeArgument::new_display(r#"?comptime functions cannot have any side
+                        TypeArgument::new_display(&r#"?comptime functions cannot have any side
                         effects and may not be called in neither comptime nor runtime contexts."#),
                     ])),
                 );
@@ -294,21 +297,21 @@ fn validate_def<B: Backend>(
                 // report call to a comptime function in a runtime context
                 validator.phase.report_error(
                     TypeArguments::new(&[
-                        TypeArgument::new_display("call to comptime function "),
+                        TypeArgument::new_display(&"call to comptime function `"),
                         TypeArgument::new_edl(&edl_id),
-                        TypeArgument::new_display(" in runtime context")
+                        TypeArgument::new_display(&"` in runtime context")
                     ]),
                     &[
                         SrcError::Single {
                             pos: info.debug.pos.into(),
                             src: info.src.clone(),
                             error: TypeArguments::new(&[
-                                TypeArgument::new_display("comptime function called here"),
+                                TypeArgument::new_display(&"comptime function called here"),
                             ])
                         }
                     ],
                     Some(TypeArguments::new(&[
-                        TypeArgument::new_display(r#"Comptime functions may only be called in
+                        TypeArgument::new_display(&r#"Comptime functions may only be called in
                         a runtime context. To statically call comptime function in a runtime
                         context during compilation, the call may be wrapped in a `comptime {}`
                         block. This indicates to any reader of the code that any and all function

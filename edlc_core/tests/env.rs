@@ -245,6 +245,10 @@ impl TestCompiler {
             body.insert_comptime_call_parameters(&mut func_reg, &res)?;
         }
         body.include_constants(&res); // includes the compile-time analysis results into the
+        self.compiler.phase.report_mode.print_errors = true;
+        self.compiler.phase.report_mode.print_warnings = true;
+        res.validate_comptime_context(&body, &mut self.compiler.phase);
+
         // CFG for optimization
         // After after all modifications to the CFG, run final verification steps
         borrow_graph = body.borrows(
@@ -252,11 +256,17 @@ impl TestCompiler {
             &self.compiler.phase.types,
             &self.compiler.phase.vars,
         )?;
+
         let report = body.check_scopes(&borrow_graph);
         report.print();
         body.insert_drops_with_dependencies(&borrow_graph)?;
 
         let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
+        body.validate_call_context(
+            &mut self.compiler.phase,
+            &mut self.compiler.mir_phase,
+            &mut self.backend,
+        );
         let deconstruction = body.deconstruct(&lifeness)?;
         let options = StackFrameOptions {
             store_plane: true,
@@ -690,7 +700,7 @@ fn test_function(val: f32) -> f32 {
 }
 
 fn some_hybrid(y: f32, comptime x: f32) -> i32 {
-    (transform(x) + y) as i32
+    (comptime { transform(x) } + y) as i32
 }
 
 type MyData = struct {
