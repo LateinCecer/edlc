@@ -75,9 +75,11 @@ impl MirGlobalVar {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
-        let global_var_offset = vm.get_global(&self.var);
-        unsafe { vm.write_ptr(*target, global_var_offset, stack_frame, reg) };
+        let global_var_offset = backend.global_var(self.var)
+            .expect("global variable missing");
+        unsafe { vm.write_ptr(*target, global_var_offset.as_ptr() as *const _, stack_frame, reg) };
     }
 
     /// For now, we will say that globals are always available at compile time.

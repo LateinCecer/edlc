@@ -268,6 +268,10 @@ impl HirLet {
         Ok(var.name.clone())
     }
 
+    pub fn id(&self) -> Option<&EdlVarId> {
+        self.info.as_ref().map(|info| &info.var_id)
+    }
+
     pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {
         if self.global {
             ctx.push()

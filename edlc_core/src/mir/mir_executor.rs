@@ -26,6 +26,8 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::ops;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_value::EdlLiteralValue;
 
 pub struct AmorphusDataMut<'a> {
     data: &'a mut [u8],
@@ -47,6 +49,10 @@ impl<'a> AmorphusDataMut<'a> {
     /// **Only proceed if you are absolutely sure what you are doing!**
     pub unsafe fn read_ptr(&mut self, src: *const u8) {
         std::ptr::copy(src, self.data.as_mut_ptr(), self.data.len());
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
     }
 }
 
@@ -138,6 +144,62 @@ impl AmorphusDataCopy {
         assert_eq!(size_of::<T>(), self.data.len());
         assert_eq!(align_of::<T>(), self.align);
         std::ptr::read(self.data.as_ptr() as *const T)
+    }
+
+    pub fn into_literal(self, reg: &MirTypeRegistry) -> Option<EdlLiteralValue> {
+        match &self.ty {
+            id if *id == reg.u8() => {
+                Some(EdlLiteralValue::U8(unsafe { self.into() }))
+            },
+            id if *id == reg.u16() => {
+                Some(EdlLiteralValue::U16(unsafe { self.into() }))
+            },
+            id if *id == reg.u32() => {
+                Some(EdlLiteralValue::U32(unsafe { self.into() }))
+            },
+            id if *id == reg.u64() => {
+                Some(EdlLiteralValue::U64(unsafe { self.into() }))
+            },
+            id if *id == reg.u128() => {
+                Some(EdlLiteralValue::U128(unsafe { self.into() }))
+            },
+            id if *id == reg.usize() => {
+                Some(EdlLiteralValue::Usize(unsafe { self.into() }))
+            },
+            id if *id == reg.i8() => {
+                Some(EdlLiteralValue::I8(unsafe { self.into() }))
+            },
+            id if *id == reg.i16() => {
+                Some(EdlLiteralValue::I16(unsafe { self.into() }))
+            },
+            id if *id == reg.i32() => {
+                Some(EdlLiteralValue::I32(unsafe { self.into() }))
+            },
+            id if *id == reg.i64() => {
+                Some(EdlLiteralValue::I64(unsafe { self.into() }))
+            },
+            id if *id == reg.i128() => {
+                Some(EdlLiteralValue::I128(unsafe { self.into() }))
+            },
+            id if *id == reg.isize() => {
+                Some(EdlLiteralValue::Isize(unsafe { self.into() }))
+            },
+            id if *id == reg.bool() => {
+                Some(EdlLiteralValue::Bool(unsafe { self.into() }))
+            },
+            id if *id == reg.char() => {
+                Some(EdlLiteralValue::Char(unsafe { self.into() }))
+            },
+            id if *id == reg.empty() => {
+                Some(EdlLiteralValue::Empty())
+            },
+            id if *id == reg.str() => {
+                // read as a fat ptr then convert to std string
+                let val: &str = unsafe { self.into() };
+                Some(EdlLiteralValue::Str(val.to_string()))
+            },
+            _ => None
+        }
     }
 
     pub fn as_data(&self) -> AmorphusData<'_> {

@@ -35,13 +35,14 @@ use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirValue};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirBlockRef, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::hir_loop::HirLoop;
 use crate::prelude::HirContext;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use crate::compiler::EdlCompiler;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
 use crate::hir::hir_expr::hir_deref::HirDeref;
@@ -264,6 +265,60 @@ impl HirExpression {
             HirExpression::Return(val) => val.terminates(phase),
             _ => Ok(false),
         }
+    }
+
+    /// Prepares the HIR expression for evaluation by translating it to MIR.
+    /// The returned MIR code has not undergone _any_ MIR code transformation steps.
+    /// The caller is responsible for transforming and validating the generated MIR code before
+    /// execution through of method of their choosing.
+    ///
+    /// One method to transform the output of this function into MIR code that is ready for codegen
+    /// or adhoc evaluation in the VM is to run [mir_expr::compile_expression] on it.
+    pub fn prepare_mir_eval<B: Backend>(
+        &self,
+        compiler: &mut EdlCompiler,
+        backend: &mut B,
+        ctx: Context,
+    ) -> Result<MirFlowGraph, HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen = Box<dyn CodeGen<B>>> {
+        let parameters = [];
+        let return_type = self.get_type(&mut compiler.phase)?;
+        if !return_type.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos(),
+                ty: return_type,
+            });
+        }
+        let return_type = compiler.mir_phase.types
+            .mir_id(&return_type.unwrap(), &compiler.phase.types)?;
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            return_type,
+            ctx,
+            self.src().clone(),
+            DebugSymbols { pos: self.pos() },
+            *self.scope(),
+        );
+        let ret_value = body.create_temp_variable(return_type);
+
+        let mut var_mapper = VariableMapper::new();
+        let mut loop_manager = LoopMapper::new();
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase: &mut compiler.mir_phase,
+                hir_phase: &mut compiler.phase,
+                mir_funcs: &mut backend.func_reg_mut(),
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_manager,
+            };
+            self.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
+        };
+        body.insert_return(current_block, ret_value, DebugSymbols { pos: self.pos() });
+        body.seal();
+        Ok(body)
     }
 }
 

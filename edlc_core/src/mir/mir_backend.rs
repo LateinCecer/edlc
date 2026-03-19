@@ -39,30 +39,15 @@ pub enum WriteDest<Addr> {
 /// A backend is used in dynamic code generation.
 pub trait Backend: Sized {
     type Error: Error;
-    type Module;
-    type Addr;
     type FuncGen<'a>;
-    
-    fn eval_const_expr(
-        &mut self,
-        element: MirValue,
-        graph: &mut MirFlowGraph,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<MirExprId, MirError<Self>>;
-    fn eval_const_bytes(
-        &mut self,
-        element: MirValue,
-        graph: &MirFlowGraph,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<Vec<u8>, MirError<Self>>;
 
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>>;
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;
 
     /// Returns a function binding for an intrinsic function based on a MIR function ID.
     fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding>;
+    fn global_var_mut(&mut self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
+    fn global_var(&self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
 }
 
 

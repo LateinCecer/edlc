@@ -295,6 +295,10 @@ impl HirConst {
             )
         )
     }
+
+    pub fn id(&self) -> Option<&EdlConstId> {
+        self.finalized_const.as_ref().map(|info| &info.id)
+    }
 }
 
 #[cfg(test)]

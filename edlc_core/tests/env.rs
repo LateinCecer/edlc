@@ -10,6 +10,7 @@ use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
+use std::ptr::NonNull;
 use std::thread::current;
 use anyhow::anyhow;
 use edlc_core::inline_code;
@@ -17,7 +18,7 @@ use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
+use edlc_core::prelude::{AmorphusDataCopy, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
 use edlc_core::prelude::mir_str::FatPtr;
@@ -34,6 +35,7 @@ struct TestCompiler {
 struct TestBackend {
     funcs: RefCell<MirFuncRegistry<Self>>,
     intrinsics: HashMap<MirFuncId, FunctionBinding>,
+    globals: HashMap<EdlVarId, AmorphusDataCopy>,
 }
 
 impl TestCompiler {
@@ -112,7 +114,7 @@ impl TestCompiler {
         module: &QualifierName,
         src: &ModuleSrc,
     ) -> Result<(), anyhow::Error> {
-        let mut hir = self.compiler.parse_module(src.clone(), module.clone())?;
+        let hir = self.compiler.parse_module(src.clone(), module.clone())?;
         self.compiler.phase.report_mode.print_errors = true;
         self.compiler.phase.report_mode.print_warnings = true;
 
@@ -125,6 +127,8 @@ impl TestCompiler {
         }
 
         hir.register_function_definitions(&mut self.backend.func_reg_mut());
+        let mut vm = ExecutorVM::new(1024 * 1024);
+        self.compile_globals(&hir, &mut vm)?;
 
         // let mut infer_state = InferState::new();
         // let _errors = hir.transform(&mut self.compiler.phase, &mut infer_state);
@@ -133,6 +137,50 @@ impl TestCompiler {
         // for error in errors {
         //     return Err(anyhow!(error));
         // }
+        Ok(())
+    }
+
+    fn compile_globals(&mut self, module: &HirModule, vm: &mut ExecutorVM) -> Result<(), anyhow::Error> {
+        for item in module.items.iter() {
+            match item {
+                HirItem::Let(val) => {
+                    let mut code = val.value
+                        .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
+                    let options = CompileOptions::default();
+                    let stack_frame = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                        Err(_err) => {
+                            return Err(anyhow!("panic in execution of global variable"));
+                        },
+                        Ok(eval_result) => {
+                            self.backend.globals.insert(*val.id().unwrap(), eval_result);
+                        },
+                    }
+                },
+                HirItem::Const(val) => {
+                    let mut code = val.value
+                        .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
+                    let options = CompileOptions::default();
+                    let stack_frame = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                        Err(_err) => {
+                            return Err(anyhow!("panic in execution of global variable"));
+                        },
+                        Ok(eval_result) => {
+                            let lit = eval_result
+                                .into_literal(&self.compiler.mir_phase.types)
+                                .ok_or_else(|| anyhow!("failed to create literal value from evaluated constant data"))?;
+                            self.compiler.mir_phase.types.insert_const_value::<TestBackend>(
+                                *val.id().unwrap(), lit)?;
+                        },
+                    }
+                },
+                HirItem::Submod(m, _) => self.compile_globals(m, vm)?,
+                _ => (),
+            }
+        }
         Ok(())
     }
 
@@ -302,6 +350,7 @@ impl TestBackend {
         TestBackend {
             funcs: RefCell::new(MirFuncRegistry::default()),
             intrinsics: HashMap::new(),
+            globals: HashMap::new(),
         }
     }
 
@@ -522,29 +571,7 @@ impl Error for BackendError {}
 
 impl Backend for TestBackend {
     type Error = BackendError;
-    type Module = ();
-    type Addr = ();
     type FuncGen<'a> = ();
-
-    fn eval_const_expr(
-        &mut self,
-        element: MirValue,
-        graph: &mut MirFlowGraph,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<MirExprId, MirError<Self>> {
-        todo!()
-    }
-
-    fn eval_const_bytes(
-        &mut self,
-        element: MirValue,
-        graph: &MirFlowGraph,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<Vec<u8>, MirError<Self>> {
-        todo!()
-    }
 
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>> {
         self.funcs.borrow()
@@ -556,6 +583,18 @@ impl Backend for TestBackend {
 
     fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding> {
         self.intrinsics.get(&func)
+    }
+
+    fn global_var_mut(&mut self, var: EdlVarId) -> Option<NonNull<()>> {
+        self.globals.get_mut(&var)
+            .and_then(|g| NonNull::new(g.as_data_mut().as_mut_ptr()))
+            .map(|ptr| ptr.cast())
+    }
+
+    fn global_var(&self, var: EdlVarId) -> Option<NonNull<()>> {
+        self.globals.get(&var)
+            .and_then(|g| NonNull::new(g.as_data().as_ptr() as *mut ()))
+            .map(|ptr| ptr.cast())
     }
 }
 
@@ -647,6 +686,9 @@ fn test_env() -> Result<(), anyhow::Error> {
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
 
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+let funny_factor: f32 = 67.0;
+const N: i32 = 32;
+
 comptime fn transform(val: f32) -> f32 {
     val * 2.0
 }
@@ -655,7 +697,7 @@ fn test_function(val: f32) -> f32 {
     std::print("Hello, World! from the test function. ");
     std::print(val as i32);
     std::print("\n");
-    val * 67.0_f32
+    val * funny_factor
 }
 
 fn some_hybrid(y: f32, comptime x: f32) -> i32 {
@@ -695,10 +737,12 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
         let mut y = i + x;
 
         // create an array to test internal references
-        let mut arr = [1_i32, 2, 4, 8, 16, 32];
+        let mut arr = [1_i32, 2, 4, 8, 16, N];
         arr[2] = std::input();
         std::print("array index access: ");
         std::print(arr[2]);
+        std::print(", ");
+        std::print(arr[5]);
         std::print("\n");
 
         // copy arr to somewhere else
