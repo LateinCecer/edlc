@@ -395,4 +395,3 @@ impl MirPhase {
         &mut self.ctx
     }
 }
-

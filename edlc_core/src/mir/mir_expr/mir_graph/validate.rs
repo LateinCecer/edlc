@@ -210,13 +210,13 @@ fn validate_def<B: Backend>(
                 ];
                 let comptime_block_src = if let Some(begin) = begin_block {
                     SrcError::Single {
-                        pos: validator.cfg.blocks[begin.0].pos.into(),
+                        pos: validator.cfg.blocks[begin.0].pos.pos.into(),
                         src: validator.cfg.blocks[begin.0].src.clone(),
                         error: TypeArguments::new(comptime_block_msg0)
                     }
                 } else {
                     SrcError::Single {
-                        pos: validator.cfg.blocks[validator.cfg.root().0].pos.into(),
+                        pos: validator.cfg.blocks[validator.cfg.root().0].pos.pos.into(),
                         src: validator.cfg.blocks[validator.cfg.root().0].src.clone(),
                         error: TypeArguments::new(comptime_block_msg1)
                     }

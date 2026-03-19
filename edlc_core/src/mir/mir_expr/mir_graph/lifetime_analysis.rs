@@ -76,6 +76,35 @@ impl LifetimeAnalysis {
     }
 }
 
+/// Prints lifetime information for debugging purposes.
+pub(super) trait PrintLifetimes {
+    fn print(&self);
+}
+
+impl PrintLifetimes for HashNodeState<MirValue, LifetimeSpan> {
+    fn print(&self) {
+        println!("lifetime");
+        for (val, sd) in self.map.iter() {
+            print!(" - {val}: [");
+            match sd {
+                LifetimeSpan::Static => print!("static]"),
+                LifetimeSpan::Scoped(set) => {
+                    let mut first = true;
+                    for item in set {
+                        if first {
+                            first = false;
+                        } else {
+                            print!(", ");
+                        }
+                        print!("{}", item.value);
+                    }
+                }
+            };
+            println!("]");
+        }
+    }
+}
+
 #[derive(Default)]
 struct BlockLifenessData {
     regions: Vec<(Range<usize>, MirValue)>
@@ -141,12 +170,15 @@ impl CurrentRegion {
         let Self::Scoped(a) = self else { unreachable!() };
         let Self::Scoped(b) = other else { unreachable!() };
 
-        for lhs in scopes[a.clone()].iter() {
-            if Self::scope_contains_non_equal(&scopes[b.clone()], lhs) {
-                return true;
-            }
-        }
-        false
+        Self::scope_overlaps_difference_partial(&scopes[a.clone()], &scopes[b.clone()])
+            || Self::scope_overlaps_difference_partial(&scopes[b.clone()], &scopes[a.clone()])
+    }
+
+    fn scope_overlaps_difference_partial(
+        lhs: &[(MirBlockRef, MirValue, Range<usize>)],
+        rhs: &[(MirBlockRef, MirValue, Range<usize>)],
+    ) -> bool {
+        lhs.iter().any(|lhs| Self::scope_contains_non_equal(rhs, lhs))
     }
 
     fn contains(
@@ -190,6 +222,9 @@ impl CurrentRegion {
         scopes: &[(MirBlockRef, MirValue, Range<usize>)],
         (block_lhs, value_lhs, range_lhs): &(MirBlockRef, MirValue, Range<usize>),
     ) -> bool {
+        if scopes.iter().find(|(block, _, _)| block == block_lhs).is_some() {
+            return false;
+        }
         scopes.iter().any(|(block_rhs, value_rhs, range_rhs)| {
             value_lhs != value_rhs && block_rhs == block_lhs && range_rhs.overlaps(range_lhs)
         })
@@ -278,8 +313,8 @@ impl LifetimeAnalysis {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct ValueUse {
-    value: MirValue,
+pub struct ValueUse {
+    pub(crate) value: MirValue,
     loc: MirLoc,
 }
 

@@ -15,7 +15,6 @@
  */
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::MirError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReportError<P> {
@@ -31,6 +30,7 @@ pub struct ReportWarning<P> {
     pub payload: P,
 }
 
+#[must_use]
 #[derive(Debug)]
 pub struct Report<E, W> {
     errors: Vec<ReportError<E>>,
@@ -92,6 +92,17 @@ impl<E, W> Report<E, W> {
 
     pub fn num_warnings(&self) -> usize {
         self.warnings.len()
+    }
+
+    /// Converts the report into an error.
+    /// The error type can be any type that implements `From<Report<E, W>>` for this report
+    /// type instance.
+    pub fn ok<Err: From<Self>>(self) -> Result<(), Err> {
+        if self.errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Err::from(self))
+        }
     }
 }
 

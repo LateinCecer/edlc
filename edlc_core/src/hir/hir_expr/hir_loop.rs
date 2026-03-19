@@ -261,7 +261,7 @@ impl MakeGraph for HirLoop {
         let header_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)
-            .with_source(self.src.clone(), self.pos.clone(), self.scope)
+            .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
             .create_scope()
             .build();
         let merge_block = graph.graph

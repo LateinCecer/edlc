@@ -16,27 +16,25 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::core::index_map::IndexMap;
-use crate::mir::mir_expr::lifetime_analysis::RegionLifenessList;
-use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowSource, OwnerData};
-use crate::mir::mir_expr::mir_graph::{Block, BorrowGraph, Seal, Statement, VarUse};
-use crate::mir::mir_expr::{BlockCall, BlockLocalStatementUid, BlockParameterIndex, DebugSymbols, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
-use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use std::collections::{HashMap, HashSet};
-use std::fmt::{Display, Formatter};
-use crate::ast::ast_expression::as_expr::AstAsExpr;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
+use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
+use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowSource};
+use crate::mir::mir_expr::mir_graph::{Block, BorrowGraph, Seal, Statement, VarUse};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{BlockCall, BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use std::collections::HashSet;
+use std::fmt::{Display, Formatter};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LocalVarUsage {
@@ -300,7 +298,7 @@ impl DropAnalysis {
 
             // insert var at determined index
             let debug = if index == 0 {
-                DebugSymbols { pos: block.pos }
+                block.pos.clone()
             } else {
                 block.statements[index - 1].debug().clone()
             };
@@ -352,7 +350,7 @@ impl DropAnalysis {
                 DefPoint::BlockParameter(block_ref, BlockParameterIndex(_)) => {
                     // insert right at the top of the block
                     let block = &mut cfg.blocks[block_ref.0];
-                    let debug = DebugSymbols { pos: block.pos };
+                    let debug = block.pos.clone();
                     let uid = block.new_uid();
                     block.statements.insert(0, Statement::Drop {
                         value,

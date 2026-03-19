@@ -15,66 +15,51 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowSource, ScopeCheck};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, Seal, VarUse};
 use crate::mir::mir_expr::{BlockCall, DefPoint, MirBlockRef, MirFlowGraph, MirValue};
+use crate::report::Report;
 
+#[derive(Debug)]
 pub struct ScopeError {
     pos: VarUse,
     src_element: Option<DefPoint>,
-}
-
-pub struct ScopeReport {
-    issues: Vec<ScopeError>,
-}
-
-impl ScopeReport {
-    pub fn print(&self) {
-        if self.issues.is_empty() {
-            println!("Scope checking: OK");
-            return;
-        }
-        todo!()
-    }
-
-    /// If this method returns `true`, there are no issues with scoping in the recorded CFG.
-    fn is_ok(&self) -> bool {
-        self.issues.is_empty()
-    }
 }
 
 impl MirFlowGraph {
     /// Checks that no variables can go out of scope.
     /// We can do this just by checking if all values that borrow from another value have _an_
     /// owner of that borrowed data source in the current block
-    pub fn check_scopes(&self, borrow: &BorrowGraph) -> ScopeReport {
-        let mut errors = Vec::new();
+    pub fn check_scopes(&self, borrow: &BorrowGraph, phase: &mut HirPhase) -> Report<ScopeError, ()> {
+        let mut report = Report::default();
         for (block_ref, block) in self.blocks.iter().enumerate() {
             let block_ref = MirBlockRef(block_ref);
             match &block.seal {
                 Seal::Jump(call, _debug) => {
-                    call.check_scope(&block_ref, self, borrow, &mut errors);
+                    call.check_scope(&block_ref, self, borrow, phase, &mut report);
                 },
                 Seal::Cond { cond: _, then_target, else_target, debug: _ } => {
-                    then_target.check_scope(&block_ref, self, borrow, &mut errors);
-                    else_target.check_scope(&block_ref, self, borrow, &mut errors);
+                    then_target.check_scope(&block_ref, self, borrow, phase, &mut report);
+                    else_target.check_scope(&block_ref, self, borrow, phase, &mut report);
                 },
                 Seal::Switch { cond: _, targets, default, debug: _ } => {
                     targets.iter().for_each(|target| {
-                        target.block_call.check_scope(&block_ref, self, borrow, &mut errors);
+                        target.block_call.check_scope(&block_ref, self, borrow, phase, &mut report);
                     });
-                    default.check_scope(&block_ref, self, borrow, &mut errors);
+                    default.check_scope(&block_ref, self, borrow, phase, &mut report);
                 },
                 Seal::Return(value, _debug) => {
-                    check_function_scope(&block_ref, value, borrow, self, &mut errors);
+                    check_function_scope(&block_ref, value, borrow, self, phase, &mut report);
                 },
                 Seal::Panic(value, _debug) => {
-                    check_function_scope(&block_ref, value, borrow, self, &mut errors);
+                    check_function_scope(&block_ref, value, borrow, self, phase, &mut report);
                 },
                 Seal::None => unreachable!(),
             }
         }
-        ScopeReport { issues: errors }
+        report
     }
 }
 
@@ -85,9 +70,10 @@ fn check_function_scope(
     val: &MirValue,
     borrow: &BorrowGraph,
     cfg: &MirFlowGraph,
-    errors: &mut Vec<ScopeError>,
+    phase: &mut HirPhase,
+    report: &mut Report<ScopeError, ()>,
 ) {
-    check_scope(&VarUse::Seal(*block_ref, *val), &ScopeCheck::Caller, borrow, cfg, errors);
+    check_scope(&VarUse::Seal(*block_ref, *val), &ScopeCheck::Caller, borrow, cfg, phase, report);
 }
 
 fn check_scope(
@@ -95,12 +81,15 @@ fn check_scope(
     scope: &ScopeCheck,
     borrow: &BorrowGraph,
     cfg: &MirFlowGraph,
-    errors: &mut Vec<ScopeError>,
+    phase: &mut HirPhase,
+    report_buffer: &mut Report<ScopeError, ()>,
 ) {
     // check for each data owner if the scope of the data source is covered in the target
     // block
     let param = var.temp_var();
     if let Err(report) = borrow.is_alive_at(param, scope, cfg) {
+        let (var_debug, var_src) = cfg.find_use_debug_info(var).unwrap();
+
         for src in report.into_iter() {
             let BorrowSource::Local(owner) = src else {
                 continue; // global sources _should_ always be available
@@ -112,10 +101,53 @@ fn check_scope(
                 .and_then(|(val, block)| {
                     cfg.blocks[block.0].find_var_definition(&block, &val)
                 });
-            errors.push(ScopeError {
+            if let Some(creation_value) = creation_value.as_ref() {
+                let (def_debug, def_src) = cfg
+                    .find_def_debug_info(creation_value).unwrap();
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"value out of scope"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: def_debug.pos.into(),
+                            src: def_src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"value created here"),
+                            ])
+                        },
+                        SrcError::Single {
+                            pos: var_debug.pos.into(),
+                            src: var_src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"and used here"),
+                            ])
+                        },
+                    ],
+                    None,
+                );
+            } else {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"value out of scope"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: var_debug.pos.into(),
+                            src: var_src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"use out of scope"),
+                            ]),
+                        }
+                    ],
+                    None,
+                );
+            }
+
+            report_buffer.insert_err(ScopeError {
                 pos: var.clone(),
                 src_element: creation_value,
-            });
+            }, var_debug.pos, var_src.clone());
         }
     }
 }
@@ -126,10 +158,11 @@ impl BlockCall {
         block_ref: &MirBlockRef,
         cfg: &MirFlowGraph,
         borrow: &BorrowGraph,
-        errors: &mut Vec<ScopeError>,
+        phase: &mut HirPhase,
+        report: &mut Report<ScopeError, ()>,
     ) {
         for param in self.params.iter() {
-            check_scope(&VarUse::Seal(*block_ref, *param), &ScopeCheck::Block(self.target), borrow, cfg, errors);
+            check_scope(&VarUse::Seal(*block_ref, *param), &ScopeCheck::Block(self.target), borrow, cfg, phase, report);
         }
     }
 }

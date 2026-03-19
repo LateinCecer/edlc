@@ -163,9 +163,13 @@ impl PartialSsaDeconstruction {
         let Some(range) = self.ranges.get(data_source.0) else {
             return false;
         };
-        range.iter().any(|r| {
+        let out = range.iter().any(|r| {
             lifeness.overlaps_non_equal(r, value)
-        })
+        });
+        if out {
+            dbg!(range);
+        }
+        out
     }
 
     /// Checks if the lifetimes for the two specified data sources overlap.
@@ -219,29 +223,36 @@ impl PartialSsaDeconstruction {
     ) -> DataSource {
         let els = iter
             .map(|el| self.transition_mapping[el.0])
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
         if els.is_empty() {
             panic!();
         }
 
+        let mut iter = els.iter();
+        let first = *iter.next().unwrap();
         // insert the value into the range buffer for the first data source in the selection
-        self.ranges.view_mut(els[0].0).get_or_insert_with(HashSet::new).insert(value);
-        for el in els.iter().skip(1) {
+        self.ranges
+            .view_mut(first.0)
+            .get_or_insert_with(HashSet::new)
+            .insert(value);
+        for el in iter {
             // For all remaining elements check if the data source collides with the range of value.
             // If not, we can safely merge the data source with the first source.
             if !self.collides(el, &value, lifeness) {
-                self.transition_value(*el, els[0]);
+                self.transition_value(*el, first);
             } else {
+                eprintln!("value={value}, source={el} and source={first}");
+                dbg!(&els);
                 panic!("failed to merge phi node during SSA value deconstruction");
             }
         }
 
         #[cfg(debug_assertions)]
         assert!(
-            self.ranges.view_mut(els[0].0).contains(&value),
+            self.ranges.view_mut(first.0).contains(&value),
             "transitioning deconstructed data source ranges failed sanity check",
         );
-        els[0]
+        first
     }
 
     pub fn consolidate(

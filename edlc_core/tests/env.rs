@@ -15,7 +15,7 @@ use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
-use edlc_core::prelude::mir_expr::{process_comptime_functions, process_function_mir_pass, AsciPrinter, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
@@ -63,6 +63,8 @@ impl TestCompiler {
         self.backend.load_binop_math::<i128>(&mut self.compiler, "i128")?;
         self.backend.load_binop_math_float::<f32>(&mut self.compiler, "f32")?;
         self.backend.load_binop_math_float::<f64>(&mut self.compiler, "f64")?;
+
+        self.backend.load_bool(&mut self.compiler)?;
         Ok(())
     }
 
@@ -155,7 +157,7 @@ impl TestCompiler {
             return_type,
             ctx,
             src.clone(),
-            SrcPos::default(),
+            DebugSymbols { pos: SrcPos::default() },
             *hir.scope(),
         );
         let ret_value = body.create_temp_variable(return_type);
@@ -179,104 +181,15 @@ impl TestCompiler {
         body.insert_return(current_block, ret_value, DebugSymbols { pos: hir.pos().clone() });
         body.seal();
 
-        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
-        body.promote_moves_with_lifetimes(&lifeness);
-
         // write MIR code to file for debugging
         let mut out = BufWriter::new(File::create("../test_mir/raw.mir")?);
         let mut writer = AsciPrinter::new(&mut out);
         writer.print(&body)?;
         out.flush()?;
 
-        // do scope checking
-        let mut borrow_graph = body.borrows(
-            &mut self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-            &self.compiler.phase.vars,
-        )?;
-        let report = body.check_scopes(&borrow_graph);
-        report.print();
-        body.route_owner_data(
-            &mut borrow_graph,
-            &mut self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-            &self.compiler.phase.vars,
-        )?;
-
-        // borrow_graph.print();
-        body.insert_drops_with_dependencies(&borrow_graph)?;
-
-        // write MIR code to file for debugging
-        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir")?);
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&body)?;
-        out.flush()?;
-
-        // body.constant_analysis()?;
-        // println!("doing lifetime analysis");
-
         let mut vm = ExecutorVM::new(1024 * 1024);
-        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
-
-        // create stack frame
-        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
-        let deconstruction = body.deconstruct(&lifeness)?;
-        let options = StackFrameOptions {
-            store_plane: true,
-            .. Default::default()
-        };
-        let mut stack_frame = StackFrameLayout::new(
-            &deconstruction, options, &body, &self.compiler.mir_phase.types);
-        vm.alloc_stack_frame(&stack_frame);
-        let res = body.propagate_constants(
-            &[],
-            &mut vm,
-            &stack_frame,
-            &mut self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-            &self.compiler.phase.vars,
-            &mut self.backend,
-        ).unwrap();
-        vm.pop_frame(&stack_frame);
-        // res.print();
-
-        {
-            let mut func_reg = self.backend.func_reg_mut();
-            body.insert_comptime_call_parameters(&mut func_reg, &res)?;
-        }
-        body.include_constants(&res); // includes the compile-time analysis results into the
-        self.compiler.phase.report_mode.print_errors = true;
-        self.compiler.phase.report_mode.print_warnings = true;
-        res.validate_comptime_context(&body, &mut self.compiler.phase);
-
-        // CFG for optimization
-        // After after all modifications to the CFG, run final verification steps
-        borrow_graph = body.borrows(
-            &mut self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-            &self.compiler.phase.vars,
-        )?;
-
-        let report = body.check_scopes(&borrow_graph);
-        report.print();
-        body.insert_drops_with_dependencies(&borrow_graph)?;
-
-        let lifeness = body.lifetimes(&self.compiler.mir_phase.types)?;
-        body.validate_call_context(
-            &mut self.compiler.phase,
-            &mut self.compiler.mir_phase,
-            &mut self.backend,
-        );
-        let deconstruction = body.deconstruct(&lifeness)?;
-        let options = StackFrameOptions {
-            store_plane: true,
-            .. Default::default()
-        };
-        stack_frame = StackFrameLayout::new(
-            &deconstruction, options, &body, &self.compiler.mir_phase.types);
-
-
-        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
+        let options = CompileOptions::default();
+        let stack_frame = compile_expression(&mut body, &mut vm, &mut self.compiler, &mut self.backend, &options)?;
 
         // print result
         // write MIR code to file for debugging
@@ -478,6 +391,52 @@ impl TestBackend {
 
         self.load_compare(comp, &CompareOpInfo { func: "partial_eq", ty, trait_name: "core::PartialEq" }, Self::partial_eq::<T>)?;
         // self.load_compare(comp, &CompareOpInfo { func: "eq", ty, trait_name: "core::Eq" })?;
+        Ok(())
+    }
+
+    fn load_bool(
+        &mut self,
+        comp: &mut EdlCompiler,
+    ) -> Result<(), anyhow::Error> {
+        let [f] = comp.parse_impl(
+            inline_code!("<>"),
+            inline_code!("bool"),
+            [
+                inline_code!(r#"
+                ?comptime fn not(value: bool) -> bool
+                "#)
+            ],
+            Some((
+                inline_code!("core::Not"),
+                inline_code!("<bool>"),
+            ))
+        )?;
+
+        let name = "bool_not";
+        self.funcs.borrow_mut().register_intrinsic(
+            comp.get_func_instance(
+                f,
+                inline_code!("<>"),
+                Some(inline_code!("bool")),
+            )?,
+            TestCodegen,
+            true,
+            &comp.mir_phase.types,
+            &comp.phase.types,
+            name,
+        )?;
+        let func_id = {
+            let binding = self.funcs.borrow();
+            *binding.get_intrinsic(name).unwrap()
+        };
+
+        extern "C" fn not_func(value: bool) -> bool {
+            !value
+        }
+        self.intrinsics.insert(
+            func_id,
+            FunctionBinding::from_function(not_func as extern "C" fn(bool) -> bool),
+        );
         Ok(())
     }
 
@@ -883,6 +842,30 @@ fn test_simple() -> Result<(), anyhow::Error> {
         std::print("the number is ");
         std::print(z);
         std::print("!\n");
+
+        // create an array and try some funny stuff with references
+        let mut arr: [i32; 3] = if z == 1000 {
+            [1, 2, 3]
+        } else {
+            [4, 5, 6]
+        };
+
+        let c = arr;
+
+        std::print("[");
+        let mut index: usize = 0;
+        std::print(arr[index]);
+        // loop {
+        //     if index == 3 {
+        //         break;
+        //     }
+        //     if index != 0 {
+        //         std::print(", ");
+        //     }
+        //     std::print(arr[index]);
+        //     index += 1;
+        // }
+        std::print("]\n");
     }
     "#))?;
     Ok(())

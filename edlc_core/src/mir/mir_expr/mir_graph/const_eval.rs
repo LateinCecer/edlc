@@ -33,12 +33,14 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
 use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
-use crate::lexer::SrcPos;
+use crate::mir::mir_expr::mir_graph::scope_check::ScopeError;
+use crate::mir::mir_expr::mir_graph::validate::ContextError;
 use crate::report::{Report, ReportError};
 
 /// Lattice:
@@ -830,7 +832,7 @@ impl ConstEval {
         for (block_ref, block) in cfg.blocks.iter().enumerate() {
             for statement in block.statements.iter() {
                 match statement {
-                    Statement::VarDef { var, value, uid, debug } => {
+                    Statement::VarDef { var: _, value, uid: _, debug } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             self.check_hybrid_call(value, block, debug, cfg, phase, &mut report);
                         } else {
@@ -841,7 +843,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -851,7 +853,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -861,7 +863,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -871,7 +873,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -881,7 +883,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -923,7 +925,7 @@ impl ConstEval {
         if !matches!(expr.ty, MirExprVariant::Call) {
             return;
         }
-        let Some(start_of_block) = cfg.find_begin_comptime_block(block) else {
+        let Some(_start_of_block) = cfg.find_begin_comptime_block(block) else {
             return; // don't report this for comptime functions; in those every parameter is
             // comptime, because the function itself can only be called during comptime ;)
         };
@@ -953,7 +955,7 @@ impl ConstEval {
                 ]),
                 &[
                     SrcError::Double {
-                        first: block.pos.into(),
+                        first: block.pos.pos.into(),
                         second: debug.pos.into(),
                         src: block.src.clone(),
                         error_first: TypeArguments::new(&[
@@ -990,7 +992,7 @@ impl ConstEval {
                 ]),
                 &[
                     SrcError::Double {
-                        first: block.pos.into(),
+                        first: block.pos.pos.into(),
                         second: debug.pos.into(),
                         src: block.src.clone(),
                         error_first: TypeArguments::new(&[
@@ -1116,7 +1118,7 @@ impl CallParameterWorklist {
 }
 
 impl MirFlowGraph {
-    pub fn include_constants(&mut self, consts: &ConstEval) {
+    pub fn eliminate_dead_code(&mut self, consts: &ConstEval) {
         self.reduce_const_branching(consts);
         self.replace_constant_parameters(consts);
         self.replace_constant_statements(consts);
@@ -1170,7 +1172,7 @@ impl MirFlowGraph {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
             // check parameters
-            let debug = DebugSymbols { pos: block.pos };
+            let debug = block.pos.clone();
 
             let mut statements = params
                 .iter()
@@ -1683,6 +1685,9 @@ pub enum OptimizationError {
     Other(String),
     DropError(DropError),
     BorrowConflict(BorrowConflict),
+    ScopeChecking(Report<ScopeError, ()>),
+    ContextChecking(Report<ContextError, ()>),
+    ConstCapture(Report<ConstError, ()>),
 }
 
 impl From<DropError> for OptimizationError {
@@ -1721,6 +1726,24 @@ impl From<DeconstructionConflict> for OptimizationError {
     }
 }
 
+impl From<Report<ScopeError, ()>> for OptimizationError {
+    fn from(value: Report<ScopeError, ()>) -> Self {
+        Self::ScopeChecking(value)
+    }
+}
+
+impl From<Report<ContextError, ()>> for OptimizationError {
+    fn from(value: Report<ContextError, ()>) -> Self {
+        Self::ContextChecking(value)
+    }
+}
+
+impl From<Report<ConstError, ()>> for OptimizationError {
+    fn from(value: Report<ConstError, ()>) -> Self {
+        Self::ConstCapture(value)
+    }
+}
+
 impl Display for OptimizationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1731,6 +1754,18 @@ impl Display for OptimizationError {
             Self::DropError(err) => write!(f, "drop error: {}", err),
             Self::BorrowConflict(err) => write!(f, "borrow conflict: {}", err),
             Self::Other(err) => write!(f, "{}", err),
+            OptimizationError::ScopeChecking(report) => {
+                write!(f, "scope checking report with {} errors and {} warnings",
+                       report.num_errors(), report.num_warnings())
+            }
+            OptimizationError::ContextChecking(report) => {
+                write!(f, "context checking report with {} errors and {} warnings",
+                       report.num_errors(), report.num_warnings())
+            }
+            OptimizationError::ConstCapture(report) => {
+                write!(f, "const capture report with {} errors and {} warnings",
+                       report.num_errors(), report.num_warnings())
+            }
         }
     }
 }
@@ -1751,8 +1786,8 @@ fn process_function(
         &compiler.phase.types,
         &compiler.phase.vars,
     )?;
-    let report = body.body.check_scopes(&borrow_graph);
-    report.print();
+    body.body.check_scopes(&borrow_graph, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
     body.body.route_owner_data(
         &mut borrow_graph,
         &mut compiler.mir_phase.types,
@@ -1814,26 +1849,25 @@ fn process_function(
     }
 
     // insert constant eval results where possible
-    body.body.include_constants(&const_eval);
+    body.body.eliminate_dead_code(&const_eval);
     assert_eq!(
         body.body.get_root_parameters().len(),
         body.signature.params.len(),
         "after optimization, any comptime parameters need to disappear from the functions entry block"
     );
-
-    compiler.phase.report_mode.print_errors = true;
-    compiler.phase.report_mode.print_warnings = true;
-    const_eval.validate_comptime_context(&body.body, &mut compiler.phase);
+    const_eval.validate_comptime_context(&body.body, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
 
     let borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
         &compiler.phase.types,
         &compiler.phase.vars,
     )?;
-    let report = body.body.check_scopes(&borrow_graph);
-    report.print();
+    body.body.check_scopes(&borrow_graph, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend);
+    body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend)
+        .ok::<OptimizationError>()?;
 
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
@@ -1870,11 +1904,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         for func in funcs.iter_mut() {
             process_function(func, vm, compiler, backend)?;
 
-            let mut std_out = std::io::stdout();
-            writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
-            let mut writer = AsciPrinter::new(&mut std_out);
-            writer.print(&func.body).unwrap();
-            std_out.flush().unwrap();
+            // let mut std_out = std::io::stdout();
+            // writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
+            // let mut writer = AsciPrinter::new(&mut std_out);
+            // writer.print(&func.body).unwrap();
+            // std_out.flush().unwrap();
         }
 
         let mut func_reg = backend.func_reg_mut();
@@ -1898,11 +1932,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     for func in funcs.iter_mut() {
         process_function(func, vm, compiler, backend)?;
 
-        let mut std_out = std::io::stdout();
-        writeln!(&mut std_out, "comptime function {:?} body:", func.mir_id).unwrap();
-        let mut writer = AsciPrinter::new(&mut std_out);
-        writer.print(&func.body).unwrap();
-        std_out.flush().unwrap();
+        // let mut std_out = std::io::stdout();
+        // writeln!(&mut std_out, "comptime function {:?} body:", func.mir_id).unwrap();
+        // let mut writer = AsciPrinter::new(&mut std_out);
+        // writer.print(&func.body).unwrap();
+        // std_out.flush().unwrap();
     }
     // println!("processed {} comptime functions", funcs.len());
 
@@ -1911,3 +1945,126 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     Ok(())
 }
 
+/// Compile options for compiling MIR expressions.
+#[derive(Debug, Default)]
+pub struct CompileOptions {
+    pub comptime_args: Option<Vec<AmorphusDataCopy>>,
+}
+
+/// Compiles a MIR expression by performing all necessary code transformation and validation steps
+/// that need to happen in MIR before code then.
+/// This includes generation and compiling all dependent code.
+///
+/// # Validation Passes
+///
+/// 1. lifetime analysis
+/// 2. move promotion
+/// 3. borrow analysis
+/// 4. scope checking
+/// 5. routing data routing
+/// 6. drop analysis & minimal drop insertion
+/// 7. compile comptime dependencies
+/// 8. redo lifetime analysis
+/// 9. SSA value deconstruction
+/// 10. compile-time constant propagation & compile-time constant folding
+/// 11. finish monomorphization of hybrid function calls
+/// 12. dead code elimination
+/// 13. comptime value capture validation
+/// 14. final borrow analysis
+/// 15. final scope checking
+/// 16. call context validation
+/// 17. final lifetime analysis
+/// 18. final SSA value deconstruction
+/// 19. compile related runtime functions
+pub fn compile_expression<B: Backend>(
+    body: &mut MirFlowGraph,
+    vm: &mut ExecutorVM,
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+    _options: &CompileOptions,
+) -> Result<StackFrameLayout, OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    compiler.phase.report_mode.print_errors = true;
+    compiler.phase.report_mode.print_warnings = true;
+
+    let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
+    body.promote_moves_with_lifetimes(&lifeness);
+
+    // do scope checking
+    let mut borrow_graph = body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.check_scopes(&borrow_graph, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
+    body.route_owner_data(
+        &mut borrow_graph,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.insert_drops_with_dependencies(&borrow_graph)?;
+    process_comptime_functions(vm, compiler, backend)?;
+
+    // create stack frame
+    let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
+    let deconstruction = body.deconstruct(&lifeness)?;
+
+
+    let options = StackFrameOptions {
+        store_plane: true,
+        .. Default::default()
+    };
+    let mut stack_frame = StackFrameLayout::new(
+        &deconstruction, options, body, &compiler.mir_phase.types);
+    vm.alloc_stack_frame(&stack_frame);
+    let res = body.propagate_constants(
+        &[],
+        vm,
+        &stack_frame,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+        backend,
+    )?;
+    vm.pop_frame(&stack_frame);
+
+    {
+        let mut func_reg = backend.func_reg_mut();
+        body.insert_comptime_call_parameters(&mut func_reg, &res)?;
+    }
+    body.eliminate_dead_code(&res); // includes the compile-time analysis results into the
+    res.validate_comptime_context(body, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
+
+    // CFG for optimization
+    // After after all modifications to the CFG, run final verification steps
+    borrow_graph = body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+
+    body.check_scopes(&borrow_graph, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
+    body.insert_drops_with_dependencies(&borrow_graph)?;
+
+    body.validate_call_context(
+        &mut compiler.phase,
+        &mut compiler.mir_phase,
+        backend,
+    ).ok::<OptimizationError>()?;
+
+    let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
+    let deconstruction = body.deconstruct(&lifeness)?;
+    let options = StackFrameOptions {
+        store_plane: true,
+        .. Default::default()
+    };
+    stack_frame = StackFrameLayout::new(
+        &deconstruction, options, body, &compiler.mir_phase.types);
+
+    process_function_mir_pass(vm, compiler, backend)?;
+    Ok(stack_frame)
+}

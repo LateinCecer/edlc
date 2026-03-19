@@ -60,7 +60,7 @@ use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstEval, ConstFrame, ValueConstState};
 pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
-pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass};
+pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::resolver::ScopeId;
@@ -607,6 +607,17 @@ enum Seal {
 }
 
 impl Seal {
+    fn debug(&self) -> &DebugSymbols {
+        match self {
+            Seal::Jump(_, debug) => debug,
+            Seal::Return(_, debug) => debug,
+            Seal::Cond { debug, .. } => debug,
+            Seal::Switch { debug, .. } => debug,
+            Seal::Panic(_, debug) => debug,
+            Seal::None => unreachable!(),
+        }
+    }
+
     fn links(&self) -> SealLinks<'_> {
         SealLinks {
             seal: self,
@@ -766,7 +777,7 @@ struct Block {
     ctx: Context,
     // source code context
     src: ModuleSrc,
-    pos: SrcPos,
+    pos: DebugSymbols,
     scope: ScopeId,
 }
 
@@ -1339,7 +1350,7 @@ pub struct BlockBuilder<'graph> {
     parent: Option<MirBlockRef>,
     create_scope: bool,
     ctx: Option<Context>,
-    src: Option<(ModuleSrc, SrcPos, ScopeId)>,
+    src: Option<(ModuleSrc, DebugSymbols, ScopeId)>,
 }
 
 impl<'a> BlockBuilder<'a> {
@@ -1358,7 +1369,7 @@ impl<'a> BlockBuilder<'a> {
         self
     }
 
-    pub fn with_source(mut self, src: ModuleSrc, pos: SrcPos, frontend_scope: ScopeId) -> Self {
+    pub fn with_source(mut self, src: ModuleSrc, pos: DebugSymbols, frontend_scope: ScopeId) -> Self {
         self.src = Some((src, pos, frontend_scope));
         self
     }
@@ -1429,7 +1440,7 @@ impl MirFlowGraph {
         return_type: MirTypeId,
         ctx: Context,
         src: ModuleSrc,
-        pos: SrcPos,
+        pos: DebugSymbols,
         scope_id: ScopeId,
     ) -> Self {
         let mut out = Self {
@@ -2204,11 +2215,10 @@ impl MirFlowGraph {
         }
         ranges
             .into_iter()
-            .map(|(block, locs)| {
+            .filter_map(|(block, locs)| {
                 self.blocks[block.block.0].locations_to_range(&block.block, &block.value, locs.iter())
                     .map(|(range)| (block.block, block.value, range))
             })
-            .flatten()
             .collect()
     }
 
@@ -2222,6 +2232,53 @@ impl MirFlowGraph {
             } else {
                 None
             })
+    }
+
+    pub fn find_def_debug_info(
+        &self,
+        def_point: &DefPoint,
+    ) -> Option<(&DebugSymbols, &ModuleSrc)> {
+        match def_point {
+            DefPoint::Definition(MirGraphLoc(block, uid)) => {
+                self.find_debug_info(block, Some(*uid))
+            },
+            DefPoint::BlockParameter(block, _) => {
+                self.blocks.get(block.0).map(|block| (&block.pos, &block.src))
+            },
+        }
+    }
+
+    pub fn find_use_debug_info(
+        &self,
+        use_point: &VarUse,
+    ) -> Option<(&DebugSymbols, &ModuleSrc)> {
+        match use_point {
+            VarUse::Statement(block_ref, _, uid) => {
+                self.find_debug_info(block_ref, Some(*uid))
+            },
+            VarUse::Seal(block_ref, _) => {
+                self.find_debug_info(block_ref, None)
+            }
+        }
+    }
+
+    pub fn find_debug_info(
+        &self,
+        block_ref: &MirBlockRef,
+        uid: Option<BlockLocalStatementUid>,
+    ) -> Option<(&DebugSymbols, &ModuleSrc)> {
+        let block = self.blocks.get(block_ref.0)?;
+        if let Some(uid) = uid {
+            block.statements
+                .iter()
+                .find_map(|statement| if statement.uid() == &uid {
+                    Some((statement.debug(), &block.src))
+                } else {
+                    None
+                })
+        } else {
+            Some((block.seal.debug(), &block.src))
+        }
     }
 
     /// Finds the block local lifetime for the specified value.
@@ -2262,11 +2319,6 @@ impl MirFlowGraph {
         state.1.insert_references(self, mir_types);
         WorkListFixpointBackward.solve(self, &mut state, LifetimeSpan::upper)?;
 
-        // println!("result of lifetime analysis:");
-        // for (node, const_state) in state.0.iter() {
-        //     println!("${:x} is alive in {const_state}", node.0);
-        // }
-
         let liveness = RegionLifenessList::new(&state.0, self);
         Ok(liveness)
     }
@@ -2291,9 +2343,6 @@ impl MirFlowGraph {
             edl_types,
             edl_vars,
         );
-
-        // println!("result of borrow state analysis:");
-        // graph.print();
         Ok(graph)
     }
 
@@ -2316,12 +2365,6 @@ impl MirFlowGraph {
         state.1.insert_root_parameters(self, &mut state.0);
         WorkListFixpointForward.solve(self, &mut state, DataOrigin::upper)?;
 
-        // println!("result of joined data origin resolution:");
-        // for (node, state) in state.0.iter() {
-        //     println!("${:x} is saved in {state}", node.0);
-        // }
-        //
-        // println!("trying to consolidate data sources...");
         state.1.consolidate(&mut state.0, lifeness);
         state.1.reduce_further(lifeness, self);
         Ok(state.1)

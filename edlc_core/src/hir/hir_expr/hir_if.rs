@@ -744,7 +744,7 @@ impl MakeGraph for HirIf {
         let merge_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)
-            .with_source(self.src.clone(), self.pos.clone(), self.scope)
+            .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
             .build();
 
         let mut early_exit = false;
@@ -752,13 +752,13 @@ impl MakeGraph for HirIf {
             let then_block = graph.graph
                 .create_block()
                 .with_parent(graph.current_block)
-                .with_source(self.src.clone(), self.pos.clone(), self.scope)
+                .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
                 .create_scope()
                 .build();
             let else_block = graph.graph
                 .create_block()
                 .with_parent(graph.current_block)
-                .with_source(self.src.clone(), block.pos.clone(), block.scope)
+                .with_source(self.src.clone(), DebugSymbols { pos: block.pos.clone() }, block.scope)
                 .create_scope()
                 .build();
 

@@ -669,7 +669,7 @@ impl HirFn {
             return_type,
             ctx,
             self.signature.src.clone(),
-            self.signature.pos,
+            DebugSymbols { pos: self.signature.pos },
             self.signature.scope,
         );
         let ret_value = body.create_temp_variable(return_type);
