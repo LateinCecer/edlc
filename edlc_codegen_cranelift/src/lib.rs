@@ -23,6 +23,7 @@ pub mod codegen;
 mod error;
 pub mod prelude;
 mod executor;
+pub mod layout;
 
 #[cfg(test)]
 fn setup_logger() -> Result<(), fern::InitError> {

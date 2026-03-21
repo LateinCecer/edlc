@@ -40,7 +40,6 @@ use crate::compiler::panic_handle::PanicHandle;
 use crate::prelude::{PtrValue, RecordMarker, RuntimeOffset, SSARepr, VarMarker};
 
 mod literal_codegen;
-pub mod layout;
 mod call_codegen;
 mod block_codegen;
 pub mod variable;

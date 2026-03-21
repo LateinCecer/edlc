@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use crate::codegen::layout::SSARepr;
+use crate::layout::SSARepr;
 use crate::codegen::variable::AggregateValue;
 use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue};
 use crate::compiler::JIT;

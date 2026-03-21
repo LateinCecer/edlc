@@ -1,5 +1,5 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *    Copyright 2026 Adrian Paskert
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+mod stack_frame;
+mod sysv;
 
 use std::sync::Arc;
 
@@ -283,6 +285,53 @@ impl SSARepr {
         members
     }
 
+    pub fn iter_eightbytes(layout: &AbiLayout) -> EightbyteIter<'_> {
+        EightbyteIter {
+            layout,
+            block: 0,
+            i: 0,
+        }
+    }
+
+    pub fn single_eightbyte(layout: &AbiLayout) -> Option<Type> {
+        let mut iter = Self::iter_eightbytes(layout);
+        let out = iter.next();
+        assert!(iter.next().is_none());
+        out
+    }
+
+    /// Single plain old data type.
+    /// Compared to eightbytes, a pod type may be larger than 8 bytes.
+    /// Examples of bigger data types include i128, u128, f128 and SIMD vector lane types.
+    pub fn pod(ty: &MirTypeId, reg: &MirTypeRegistry) -> Option<Type> {
+        match ty {
+            ty if *ty == reg.i8() || *ty == reg.u8() || *ty == reg.bool() => Some(types::I8),
+            ty if *ty == reg.i16() || *ty == reg.u16() => Some(types::I16),
+            ty if *ty == reg.i32() || *ty == reg.u32() || *ty == reg.char() => Some(types::I32),
+            ty if *ty == reg.i64() || *ty == reg.u64() => Some(types::I64),
+            ty if *ty == reg.i128() || *ty == reg.u128() => Some(types::I128),
+            ty if *ty == reg.usize() || *ty == reg.isize() => {
+                match reg.byte_size(*ty) {
+                    Some(4) => Some(types::I32),
+                    Some(8) => Some(types::I64),
+                    _ => panic!("invalid pointer usize/isize byte count"),
+                }
+            },
+            ty if *ty == reg.f32() => Some(types::F32),
+            ty if *ty == reg.f64() => Some(types::F64),
+            ty if reg.is_ref(ty) || *ty == reg.str() => {
+                match reg.byte_size(*ty) {
+                    Some(4) => Some(types::I32),
+                    Some(8) => Some(types::I64),
+                    Some(16) => Some(types::I128),
+                    _ => panic!("invalid pointer size"),
+                }
+            },
+            ty if *ty == reg.empty() => None,
+            _ => panic!("not a POD data type"),
+        }
+    }
+
     /// Sums the amount of RXX and XMM bytes in the ABI layout.
     /// The first returned value is the amount of RXX bytes, while the second parameter is the
     /// amount of XMM bytes in the layout.
@@ -302,6 +351,36 @@ impl SSARepr {
 
     pub fn len(&self) -> usize {
         self.members.len()
+    }
+}
+
+pub struct EightbyteIter<'a> {
+    layout: &'a AbiLayout,
+    block: usize,
+    i: usize,
+}
+
+impl<'a> Iterator for EightbyteIter<'a> {
+    type Item = Type;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(type_bytes) = self.layout.block_bytes(self.i) {
+            let (t, n) = if self.layout.is_float_block(self.block) {
+                SSARepr::ftype_for_alignment(type_bytes)
+            } else {
+                SSARepr::itype_for_alignment(type_bytes)
+            };
+            if self.i < n {
+                self.i += 1;
+                Some(t)
+            } else {
+                self.block += 1;
+                self.i = 0;
+                self.next()
+            }
+        } else {
+            None
+        }
     }
 }
 

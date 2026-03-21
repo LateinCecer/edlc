@@ -25,7 +25,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
 use log::{debug, info};
 use crate::codegen::{CodeCtx, Compilable, FunctionRetKind, FunctionTranslator, IntoValue};
-use crate::codegen::layout::SSARepr;
+use crate::layout::SSARepr;
 use crate::codegen::variable::AggregateValue;
 use crate::compiler::JIT;
 use crate::error::{JITError, JITErrorType};

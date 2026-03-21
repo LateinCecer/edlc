@@ -1038,7 +1038,7 @@ impl MirTypeRegistry {
         self.literal_types.as_ref().unwrap().never
     }
 
-    pub fn is_plane_type(&self, ty: MirTypeId) -> bool {
+    pub fn is_plain_old_data(&self, ty: MirTypeId) -> bool {
         ty == self.i8() || ty == self.i16()
             || ty == self.i32() || ty == self.i64()
             || ty == self.i128() || ty == self.isize()

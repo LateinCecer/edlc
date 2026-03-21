@@ -16,7 +16,7 @@
 
 
 pub use crate::codegen::variable::*;
-pub use crate::codegen::layout::*;
+pub use crate::layout::*;
 pub use crate::compiler::*;
 pub use crate::compiler::panic_handle::*;
 pub use crate::executor::macros::*;

@@ -22,11 +22,9 @@ use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{MirGlobalVar, MirOffset};
-use crate::mir::mir_let::MirLet;
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
-use std::ops::{Deref, Index};
 
 pub mod mir_array_init;
 pub mod mir_as;
@@ -51,6 +49,16 @@ pub struct MirExprUid(usize);
 pub struct MirExprId {
     id: usize,
     pub ty: MirExprVariant,
+}
+
+impl MirExprId {
+    /// You can use the ordinal of an expression id as unique identifier for that expr id *within*
+    /// the expression variant of that expression id.
+    /// Please *do not* assume that the ordinal is the index into the internal expression buffer
+    /// of the [MirExprContainer].
+    pub fn ordinal(&self) -> usize {
+        self.id
+    }
 }
 
 /// Defines a printer trait that can be used to print out MIR code.
@@ -109,6 +117,15 @@ pub trait MirGraphElement {
     fn replace_var(&mut self, var: &MirValue, repl: &MirValue);
 }
 
+macro_rules! impl_getter(
+    (fn $name:ident() -> $t:ty, $variant:ident, $field:ident) => (
+pub fn $name(&self, id: MirExprId) -> &$t {
+    assert_eq!(id.ty, MirExprVariant::$variant);
+    &self.$field[id.id]
+}
+    );
+);
+
 impl MirExprContainer {
     pub fn execute(
         &self,
@@ -156,16 +173,6 @@ impl MirExprContainer {
             MirExprVariant::Deref => self.derefs[expr.id].is_avail(frame, graph),
             MirExprVariant::DowncastRef => self.downcasts[expr.id].is_avail(frame, graph),
         }
-    }
-
-    fn is_const(
-        &self,
-        expr: MirExprId,
-        backend: &impl Backend,
-        eval: &ConstEval,
-        graph: &BorrowGraph,
-    ) -> bool {
-        todo!()
     }
 
     /// Collects all values that are used by the expression.
@@ -221,6 +228,19 @@ impl MirExprContainer {
             MirExprVariant::DowncastRef => self.downcasts[expr.id].replace_var(var, repl),
         }
     }
+
+    impl_getter!(fn get_array_init() -> MirArrayInit, ArrayInit, array_inits);
+    impl_getter!(fn get_as() -> MirAs, As, ases);
+    impl_getter!(fn get_call() -> MirCall, Call, call);
+    impl_getter!(fn get_literal() -> MirLiteral, Literal, literals);
+    impl_getter!(fn get_variable() -> MirGlobalVar, Variable, variables);
+    impl_getter!(fn get_constant() -> MirConstant, Constant, constants);
+    impl_getter!(fn get_assign() -> MirAssign, Assign, assigns);
+    impl_getter!(fn get_data() -> MirData, Data, data);
+    impl_getter!(fn get_init() -> MirTypeInit, Init, type_inits);
+    impl_getter!(fn get_ref() -> MirRef, Ref, refs);
+    impl_getter!(fn get_deref() -> MirDeref, Deref, derefs);
+    impl_getter!(fn get_downcast_ref() -> MirDowncastRef, DowncastRef, downcasts);
 
     pub fn insert_downcast(&mut self, expr: MirDowncastRef) -> MirExprId {
         self.downcasts.push(expr);

@@ -48,7 +48,7 @@ use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use log::{debug, info};
 use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue, ShortVec, CodeCtx, FunctionRetKind};
-use crate::codegen::layout::SSARepr;
+use crate::layout::SSARepr;
 use crate::codegen::variable::{AggregateValue, PtrValue};
 use crate::compiler::code::{JITCode, OptCache};
 use crate::compiler::panic_handle::PanicHandle;

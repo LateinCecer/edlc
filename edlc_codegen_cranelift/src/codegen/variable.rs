@@ -84,7 +84,7 @@ use cranelift_codegen::ir::{StackSlot, Value};
 use log::info;
 
 use crate::codegen::{CodeCtx, CompileValue, IntoValue, short_vec, ShortVec};
-use crate::codegen::layout::SSARepr;
+use crate::layout::SSARepr;
 pub use crate::codegen::variable::value::{DataValue, DataVariant, PtrValue, RuntimeOffset, SSAGenerator, SSAValue, StackValue, VariableSetResult, VariableValue};
 use crate::compiler::JIT;
 

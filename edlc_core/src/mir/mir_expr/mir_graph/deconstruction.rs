@@ -348,8 +348,8 @@ impl PartialSsaDeconstruction {
 
 #[derive(Clone, Debug)]
 pub struct StackFrameLayout {
-    pub(crate) alignment: usize,
-    pub(crate) size: usize,
+    pub alignment: usize,
+    pub size: usize,
     members: IndexMap<(ops::Range<usize>, MirTypeId)>,
     pub(crate) red_zone: usize,
     /// The location of the return frame pointer in the current stack frame.
@@ -395,7 +395,7 @@ impl StackFrameLayout {
             }
             let first = range.iter().next().unwrap();
             let ty = cfg.get_var_type(first);
-            if !reg.is_plane_type(*ty) || options.store_plane {
+            if !reg.is_plain_old_data(*ty) || options.store_plane {
                 let align = reg.byte_alignment(*ty).unwrap();
                 let size = reg.byte_size(*ty).unwrap();
 

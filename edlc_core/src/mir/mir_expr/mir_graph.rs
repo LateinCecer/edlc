@@ -59,7 +59,7 @@ use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
 pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstEval, ConstFrame, ValueConstState};
-pub(super) use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
+pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
@@ -78,7 +78,7 @@ pub struct Scope(usize);
 /// NOTE: most of these temporary variables can only be read once, as they are not actually
 ///       variables and are moved on use, instead of copied!
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirValue(pub(crate) usize);
+pub struct MirValue(pub usize);
 
 impl Display for MirValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -357,7 +357,7 @@ pub struct DebugSymbols {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-enum Statement {
+pub enum Statement {
     VarDef {
         var: MirValue,
         value: MirExprId,
@@ -394,7 +394,7 @@ enum Statement {
 }
 
 impl Statement {
-    fn debug(&self) -> &DebugSymbols {
+    pub fn debug(&self) -> &DebugSymbols {
         match self {
             Statement::VarDef { debug, .. } => debug,
             Statement::VarMove { debug, .. } => debug,
@@ -405,7 +405,7 @@ impl Statement {
         }
     }
 
-    fn defines(&self) -> Option<&MirValue> {
+    pub fn defines(&self) -> Option<&MirValue> {
         match self {
             Self::VarDef { var, .. } => Some(var),
             Self::VarMove { var, .. } => Some(var),
@@ -416,7 +416,7 @@ impl Statement {
         }
     }
 
-    fn uid(&self) -> &BlockLocalStatementUid {
+    pub fn uid(&self) -> &BlockLocalStatementUid {
         match self {
             Self::VarDef { uid, .. } => &uid,
             Self::VarMove { uid, .. } => &uid,
@@ -427,14 +427,14 @@ impl Statement {
         }
     }
 
-    fn is_usage_for(&self, var_use: &VarUse) -> bool {
+    pub fn is_usage_for(&self, var_use: &VarUse) -> bool {
         match var_use {
             VarUse::Statement(_, _, uid) => self.uid() == uid,
             _ => false,
         }
     }
 
-    fn uses_var(&self, expressions: &MirExprContainer, var: &MirValue) -> bool {
+    pub fn uses_var(&self, expressions: &MirExprContainer, var: &MirValue) -> bool {
         match self {
             Statement::VarMove { uid: _, value, var: _, debug: _ } => {
                 value == var
@@ -455,7 +455,7 @@ impl Statement {
         }
     }
 
-    fn replace_definition(&mut self, ori: &MirValue, replacement: MirValue) {
+    pub fn replace_definition(&mut self, ori: &MirValue, replacement: MirValue) {
         match self {
             Statement::VarMove { var, .. } |
             Statement::VarCopy { var, .. } |
@@ -475,7 +475,7 @@ impl Statement {
 
     /// Checks if the statement defines a variable.
     /// Variables can be defined by a declare statement, a move statement or a copy statement.
-    fn defines_var(&self, variable: &MirValue) -> bool {
+    pub fn defines_var(&self, variable: &MirValue) -> bool {
         match self {
             Self::VarDef { var, .. }
             | Self::VarMove { var, .. }
@@ -515,6 +515,32 @@ impl Statement {
                 debug!("synchronizing event {event:?}");
                 // TODO
             }
+        }
+    }
+}
+
+pub struct StatementIter<'a> {
+    cfg: &'a MirFlowGraph,
+    block: usize,
+    statement: usize,
+}
+
+impl<'a> Iterator for StatementIter<'a> {
+    type Item = &'a Statement;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.block >= self.cfg.blocks.len() {
+            return None;
+        }
+        let block = &self.cfg.blocks[self.block];
+        let idx = self.statement;
+        if idx < block.statements.len() {
+            self.statement += 1;
+            Some(&block.statements[idx])
+        } else {
+            self.statement = 0;
+            self.block += 1;
+            self.next()
         }
     }
 }
@@ -569,7 +595,7 @@ impl<'a> Iterator for SealLinks<'a> {
 }
 
 #[derive(Default, Clone, PartialEq, Debug)]
-enum Seal {
+pub enum Seal {
     /// An unconditional to another block where the specified expression is used as the return
     /// expression.
     /// The jump expression defines a variable
@@ -1210,7 +1236,7 @@ impl Block {
         }
     }
 
-    fn iter_value_uses<F: FnMut(VarUse)>(
+    pub fn iter_value_uses<F: FnMut(VarUse)>(
         &self,
         block_ref: MirBlockRef,
         expr_container: &MirExprContainer,
@@ -1300,7 +1326,7 @@ impl Block {
     }
 
     /// Finds the current index of the block for a given unique block id
-    fn find_current_index(&self, uid: &BlockLocalStatementUid) -> Option<usize> {
+    pub fn find_current_index(&self, uid: &BlockLocalStatementUid) -> Option<usize> {
         self.statements
             .iter()
             .enumerate()
@@ -1434,6 +1460,44 @@ impl Display for ExecutionError {
     }
 }
 
+pub struct MirValueIter {
+    index: usize,
+    end: usize,
+}
+
+impl Iterator for MirValueIter {
+    type Item = MirValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.end {
+            let idx = MirValue(self.index);
+            self.index += 1;
+            Some(idx)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct MirBlockIter {
+    index: usize,
+    end: usize,
+}
+
+impl Iterator for MirBlockIter {
+    type Item = MirBlockRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.end {
+            let idx = MirBlockRef(self.index);
+            self.index += 1;
+            Some(idx)
+        } else {
+            None
+        }
+    }
+}
+
 impl MirFlowGraph {
     pub fn new<I: Iterator<Item=MirTypeId>>(
         parameters: I,
@@ -1476,6 +1540,32 @@ impl MirFlowGraph {
             scope: scope_id,
         });
         out
+    }
+
+    pub fn iter_vars(&self) -> MirValueIter {
+        MirValueIter {
+            index: 0,
+            end: self.temp_vars.len(),
+        }
+    }
+
+    pub fn iter_blocks(&self) -> MirBlockIter {
+        MirBlockIter {
+            index: 0,
+            end: self.blocks.len(),
+        }
+    }
+
+    pub fn iter_statements(&self) -> StatementIter<'_> {
+        StatementIter {
+            cfg: self,
+            statement: 0,
+            block: 0,
+        }
+    }
+
+    pub fn get_block(&self, block: &MirBlockRef) -> Option<&Block> {
+        self.blocks.get(block.0)
     }
 
     pub fn get_root_scope(&self) -> Scope {
