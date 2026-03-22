@@ -30,7 +30,7 @@ use crate::prelude::mir_expr::MirFlowGraph;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 use edlc_analysis::graph::{IsDefault, LatticeElement};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
@@ -418,14 +418,16 @@ impl CallParameterCopy {
         }
     }
 
+    #[must_use]
     fn set_vm_values(
         &self,
         cfg: &MirFlowGraph,
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         consts: &mut ConstEval,
-        _reg: &MirTypeRegistry,
-    ) {
+        reg: &MirTypeRegistry,
+    ) -> bool {
+        let mut changed = false;
         consts.block_frame.avail.clear();
         for (param, param_value) in cfg.blocks[self.block.0]
             .parameters
@@ -433,14 +435,19 @@ impl CallParameterCopy {
             .zip(self.params.iter()) {
 
             consts.element_value_mut(param).join_mut(param_value);
-            if let ConstEvalState::Known(val) = param_value {
+            changed |= if let ConstEvalState::Known(val) = param_value {
                 let (dst_range, dst_ty) = stack_frame.get_offset(param, vm).unwrap();
                 let [mut dst] = vm.get_data_mut([dst_range.clone()], &[dst_ty]);
                 dst.memcpy(&val.as_data());
                 // record const value in eval records
                 consts.block_frame.set_avail(param, &consts.borrow_graph);
-            }
+                consts.insert_const_value(cfg, param, vm, stack_frame, reg)
+            } else {
+                consts.block_frame.set_unavail(param, &consts.borrow_graph);
+                consts.mark_runtime(param)
+            };
         }
+        changed
     }
 }
 
@@ -1314,11 +1321,11 @@ impl MirFlowGraph {
 
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
-        let mut work_list: Vec<MirBlockRef> = vec![];
+        let mut work_list: VecDeque<MirBlockRef> = VecDeque::new();
         self.process_block(vm, stack_frame, reg, backend, &mut work_list, root_call_params, &mut const_eval);
 
         // work through work-list
-        while let Some(current_block) = work_list.pop() {
+        while let Some(current_block) = work_list.pop_front() {
             // join call parameters from parent blocks
             let params = ConstNodeState::join(&current_block, &const_eval.state, self);
             self.process_block(
@@ -1340,28 +1347,30 @@ impl MirFlowGraph {
         stack_frame: &StackFrameLayout,
         reg: &mut MirTypeRegistry,
         backend: &mut impl Backend,
-        work_list: &mut Vec<MirBlockRef>,
+        work_list: &mut VecDeque<MirBlockRef>,
         mut params: CallParameterCopy,
         const_eval: &mut ConstEval,
     ) {
         let current_block = params.block;
-        if !params.params.is_empty()
+        let (max_compute_cache, first_run) = {
+            let state = const_eval.state.map
+                .get_mut(current_block.0).unwrap();
+            let first = state.computation_counter == 0;
+            state.computation_counter += 1;
+            (if state.computation_counter > vm.const_folding_execution_limit {
+                Some(const_eval.state.copy_const_values())
+            } else {
+                None
+            }, first)
+        };
+        if !first_run
             && !ConstNodeState::call_changed(&current_block, &mut const_eval.state, &params) {
             // call has not changed since last execution; block contents can not change
             return;
         }
-        params.set_vm_values(self, vm, stack_frame, const_eval, reg);
-        let max_compute_cache = {
-            let state = const_eval.state.map
-                .get_mut(current_block.0).unwrap();
-            state.computation_counter += 1;
-            if state.computation_counter > vm.const_folding_execution_limit {
-                Some(const_eval.state.copy_const_values())
-            } else {
-                None
-            }
-        };
-        let state_changed = self.blocks[current_block.0]
+
+        let mut state_changed = params.set_vm_values(self, vm, stack_frame, const_eval, reg);
+        state_changed |= self.blocks[current_block.0]
             .eval_consts(self, vm, stack_frame, reg, backend, const_eval);
         let mut output_builder = OutputVecBuilder::default();
         if let Some(max_computation_cache) = max_compute_cache {
@@ -1371,6 +1380,11 @@ impl MirFlowGraph {
             let diff = const_eval.state.compute_diff(&max_computation_cache);
             output_builder.with_force_runtime(diff);
         }
+
+        // if !state_changed && !first_run {
+        //     return; // don't continue updating the children if the const state
+        //     // did not change at all
+        // }
 
         // jump to other block using sealing statement
         match &self.blocks[current_block.0].seal {
@@ -1388,9 +1402,9 @@ impl MirFlowGraph {
                     .unwrap()
                     .set_output_values(output_builder.build());
 
-                if !work_list.contains(&target.target) {
-                    work_list.push(target.target);
-                }
+                // if !work_list.contains(&target.target) {
+                    work_list.push_back(target.target);
+                // }
             }
             Seal::Cond { cond, then_target, else_target, debug: _ } => {
                 if const_eval.block_frame.is_avail(cond, &const_eval.borrow_graph) {
@@ -1405,9 +1419,9 @@ impl MirFlowGraph {
                             .unwrap()
                             .set_output_values(output_builder.build());
 
-                        if !work_list.contains(&then_target.target) {
-                            work_list.push(then_target.target);
-                        }
+                        // if !work_list.contains(&then_target.target) {
+                            work_list.push_back(then_target.target);
+                        // }
                     } else {
                         // proceed just in else-block
                         output_builder.insert_call(
@@ -1417,14 +1431,14 @@ impl MirFlowGraph {
                             .unwrap()
                             .set_output_values(output_builder.build());
 
-                        if !work_list.contains(&else_target.target) {
-                            work_list.push(else_target.target);
-                        }
+                        // if !work_list.contains(&else_target.target) {
+                            work_list.push_back(else_target.target);
+                        // }
                     }
                 } else {
-                    if !state_changed {
-                        return; // don't continue if the state of the const-eval did not change
-                    }
+                    // if !state_changed {
+                    //     return; // don't continue if the state of the const-eval did not change
+                    // }
 
                     output_builder.insert_call(
                         then_target, &const_eval.block_frame, vm, stack_frame, reg);
@@ -1437,12 +1451,12 @@ impl MirFlowGraph {
 
                     // condition of conditional jump is unknown at compile time
                     // -> we need to continue on both blocks
-                    if !work_list.contains(&then_target.target) {
-                        work_list.push(then_target.target);
-                    }
-                    if !work_list.contains(&else_target.target) {
-                        work_list.push(else_target.target);
-                    }
+                    // if !work_list.contains(&then_target.target) {
+                        work_list.push_back(then_target.target);
+                    // }
+                    // if !work_list.contains(&else_target.target) {
+                        work_list.push_back(else_target.target);
+                    // }
                 }
             }
             Seal::Switch { cond, targets, default, debug: _ } => {
@@ -1481,9 +1495,9 @@ impl MirFlowGraph {
                             // const_eval.transfer_block_call(
                             //     &target.block_call, self, vm, stack_frame, reg);
                             // current_block = target.block_call.target;
-                            if !work_list.contains(&target.block_call.target) {
-                                work_list.push(target.block_call.target);
-                            }
+                            // if !work_list.contains(&target.block_call.target) {
+                                work_list.push_back(target.block_call.target);
+                            // }
                             return; // continue execution in the new block
                         }
                     }
@@ -1499,14 +1513,14 @@ impl MirFlowGraph {
                     // continue in default branch
                     // const_eval.transfer_block_call(default, self, vm, stack_frame, reg);
                     // current_block = default.target;
-                    if !work_list.contains(&default.target) {
-                        work_list.push(default.target);
-                    }
+                    // if !work_list.contains(&default.target) {
+                    work_list.push_back(default.target);
+                    // }
                 } else {
-                    if !state_changed {
-                        return; // don't continue updating the children if the const state
-                        // did not change at all
-                    }
+                    // if !state_changed {
+                    //     return; // don't continue updating the children if the const state
+                    //     // did not change at all
+                    // }
 
                     targets.iter().for_each(|target| {
                         output_builder.insert_call(
@@ -1522,13 +1536,13 @@ impl MirFlowGraph {
                     // condition is not known at comptime
                     // -> push all possible branches to worklist
                     targets.iter().for_each(|target| {
-                        if !work_list.contains(&target.block_call.target) {
-                            work_list.push(target.block_call.target)
-                        }
+                        // if !work_list.contains(&target.block_call.target) {
+                        work_list.push_back(target.block_call.target)
+                        // }
                     });
-                    if !work_list.contains(&default.target) {
-                        work_list.push(default.target);
-                    }
+                    // if !work_list.contains(&default.target) {
+                    work_list.push_back(default.target);
+                    // }
                 }
             }
             Seal::None => panic!("block is not sealed!"),
@@ -2006,6 +2020,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
     process_comptime_functions(vm, compiler, backend)?;
+
+    let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
+    let mut writer = AsciPrinter::new(&mut out);
+    writer.print(&body).unwrap();
+    out.flush().unwrap();
 
     // create stack frame
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;

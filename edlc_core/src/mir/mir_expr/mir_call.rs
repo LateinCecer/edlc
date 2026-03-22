@@ -45,7 +45,7 @@ pub struct MirCall {
     pub func: MirFuncId,
     pub comptime_args: Vec<ComptimeParamPair>,
     pub is_recursive: bool,
-    pub context: CallContext
+    pub context: CallContext,
 }
 
 impl MirGraphElement for MirCall {
@@ -86,20 +86,26 @@ impl MirCall {
     ) {
         let ret_value = if let Some(func) = backend.intrinsic_binding(self.func) {
             let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
-            let params = self.args.iter()
-                .map(|par| {
-                    let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
-                    vm.get_data(par_range.clone(), par_ty)
-                })
-                .collect::<Vec<_>>();
-
-            // println!("intrinsic function parameters:");
-            // for (i, par) in params.iter().enumerate() {
-            //     let (par_range, _par_ty) = stack_frame.get_offset(&self.args[i], vm).unwrap();
-            //     println!("{:x} - ${:x}: {:?}    VM({:?})", i, self.args[i].0, par, par_range);
-            // }
-
-            func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+            let mut params = vec![];
+            if let Some(runtime) = func.runtime_ordinal.as_ref() {
+                let runtime_ptr = backend.runtime(*runtime).unwrap();
+                let runtime_ptr = AmorphusDataCopy::new(reg.usize(), reg, runtime_ptr.as_ptr()).unwrap();
+                params.push(runtime_ptr.as_data());
+                params.extend(self.args.iter()
+                    .map(|par| {
+                        let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
+                        vm.get_data(par_range.clone(), par_ty)
+                    }));
+                func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+            } else {
+                let params = self.args.iter()
+                    .map(|par| {
+                        let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
+                        vm.get_data(par_range.clone(), par_ty)
+                    })
+                    .collect::<Vec<_>>();
+                func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+            }
             ret_value
         } else {
             let func_reg = backend.func_reg();

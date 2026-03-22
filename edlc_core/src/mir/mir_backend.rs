@@ -48,6 +48,11 @@ pub trait Backend: Sized {
     fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding>;
     fn global_var_mut(&mut self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
     fn global_var(&self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
+
+    /// A runtime can be passed to intrinsics when called.
+    /// The runtime ordinal that is to be passed to the intrinsic must be marked to the function
+    /// at compile time.
+    fn runtime(&self, ordinal: u16) -> Option<std::ptr::NonNull<()>>;
 }
 
 

@@ -125,7 +125,8 @@ impl AmorphusDataCopy {
     /// Please refrain from using this function for usages outside the normal EDL pipeline, if
     /// you are not 100% sure you know what you are doing.
     pub fn new<T: 'static>(ty: MirTypeId, reg: &MirTypeRegistry, val: T) -> Option<Self> {
-        assert_eq!(reg.get_rust_from_type(ty).unwrap(), TypeId::of::<T>());
+        assert_eq!(reg.byte_size(ty).unwrap(), size_of::<T>());
+        assert_eq!(reg.byte_alignment(ty).unwrap(), align_of::<T>());
         let mut out = Self::uninit(ty, reg)?;
         unsafe {
             std::ptr::copy(&val as *const T, out.data.as_mut_ptr() as *mut T, 1);
@@ -226,10 +227,12 @@ pub struct FunctionBinding {
         ret_buf: AmorphusDataMut<'c>,
         &'reg MirTypeRegistry,
     ) -> Result<(), TypeError>,
+    pub runtime_ordinal: Option<u16>,
 }
 
 pub trait FromFunction<F> {
     fn from_function(func: F) -> Self;
+    fn from_function_with_runtime(func: F, ordinal: u16) -> Self;
 }
 
 trait ExecFunction<F> {
@@ -261,6 +264,15 @@ macro_rules! impl_from_function(
                 FunctionBinding {
                     func: func as *const u8 as usize,
                     call_func: <Self as ExecFunction<extern "C" fn ($($P),*) -> $R>>::exec,
+                    runtime_ordinal: None,
+                }
+            }
+
+            fn from_function_with_runtime(func: extern "C" fn($($P),*) -> $R, ordinal: u16) -> Self {
+                FunctionBinding {
+                    func: func as *const u8 as usize,
+                    call_func: <Self as ExecFunction<extern "C" fn ($($P),*) -> $R>>::exec,
+                    runtime_ordinal: Some(ordinal)
                 }
             }
         }
@@ -286,19 +298,13 @@ macro_rules! impl_from_function(
                 // logic to ensure type safety
                 $(
                 let param_type_id = TypeId::of::<$P>();
-                // if param_type_id != self.params[$n] {
-                //     return Err(TypeError { type_id: param_type_id, rhs: TypeErrorRhs::RustType(self.params[$n]) });
-                // }
-                let param_ty = reg.get_rust_from_type(params[$n].ty);
-                if param_ty.is_none() || param_ty.unwrap() != param_type_id {
+                if reg.byte_size(params[$n].ty).unwrap() != std::mem::size_of::<$P>()
+                    || reg.byte_alignment(params[$n].ty).unwrap() != std::mem::align_of::<$P>() {
                     return Err(TypeError { type_id: param_type_id, rhs: TypeErrorRhs::MirType(params[$n].ty) });
                 }
                 )*
 
                 let param_type_id = TypeId::of::<$R>();
-                // if param_type_id != self.ret {
-                //     return Err(TypeError { type_id: param_type_id, rhs: TypeErrorRhs::RustType(self.ret) });
-                // }
                 let param_ty = reg.get_rust_from_type(ret_buffer.ty);
                 if param_ty.is_none() || param_ty.unwrap() != param_type_id {
                     return Err(TypeError { type_id: param_type_id, rhs: TypeErrorRhs::MirType(ret_buffer.ty) });

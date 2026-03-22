@@ -3,6 +3,7 @@
 //! implementations like addition for plane types is provided by the codegen backend, a test env
 //! of the code library must spoof these functions for basic compilation checks.
 
+use std::any::Any;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::error::Error;
@@ -11,6 +12,8 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use std::ptr::NonNull;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::thread::current;
 use anyhow::anyhow;
 use edlc_core::inline_code;
@@ -32,10 +35,46 @@ struct TestCompiler {
     backend: TestBackend,
 }
 
+struct TestRuntime {
+    output_writer: BufWriter<Vec<u8>>,
+    error_recorder: Option<Box<dyn Any>>
+}
+
+impl TestRuntime {
+    fn new() -> Self {
+        TestRuntime {
+            output_writer: BufWriter::new(Vec::new()),
+            error_recorder: None
+        }
+    }
+
+    fn write<T: Display>(&mut self, val: T) {
+        if let Err(err) = write!(&mut self.output_writer, "{val}") {
+            self.record_err(err);
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Err(err) = self.output_writer.flush() {
+            self.record_err(err);
+        }
+    }
+
+    fn record_err<T: Any + Display>(&mut self, err: T) {
+        eprintln!("ERROR: {err}");
+        self.error_recorder = Some(Box::new(err));
+    }
+
+    fn data(&self) -> &[u8] {
+        self.output_writer.get_ref()
+    }
+}
+
 struct TestBackend {
     funcs: RefCell<MirFuncRegistry<Self>>,
     intrinsics: HashMap<MirFuncId, FunctionBinding>,
     globals: HashMap<EdlVarId, AmorphusDataCopy>,
+    runtime: Rc<Mutex<TestRuntime>>
 }
 
 impl TestCompiler {
@@ -351,6 +390,7 @@ impl TestBackend {
             funcs: RefCell::new(MirFuncRegistry::default()),
             intrinsics: HashMap::new(),
             globals: HashMap::new(),
+            runtime: Rc::new(Mutex::new(TestRuntime::new()))
         }
     }
 
@@ -596,6 +636,14 @@ impl Backend for TestBackend {
             .and_then(|g| NonNull::new(g.as_data().as_ptr() as *mut ()))
             .map(|ptr| ptr.cast())
     }
+
+    fn runtime(&self, ordinal: u16) -> Option<NonNull<()>> {
+        if ordinal == 0 {
+            Some(NonNull::from_ref(&self.runtime).cast())
+        } else {
+            None
+        }
+    }
 }
 
 #[test]
@@ -649,14 +697,16 @@ fn test_env() -> Result<(), anyhow::Error> {
             &comp.compiler.phase.types,
             "print_i32",
         )?;
-    extern "C" fn print_i32(val: i32) {
-        print!("{}", val);
+    extern "C" fn print_i32(runtime: *const Rc<Mutex<TestRuntime>>, val: i32) {
+        let runtime = unsafe { &*runtime };
+        let mut runtime = runtime.lock().unwrap();
+        runtime.write(val);
     }
     let func = {
         let binding = comp.backend.func_reg();
         *binding.get_intrinsic("print_i32").unwrap()
     };
-    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function_with_runtime(print_i32 as extern "C" fn(*const Rc<Mutex<TestRuntime>>, i32) -> (), 0));
 
 
     let instance = comp.compiler.get_func_instance(
@@ -672,8 +722,9 @@ fn test_env() -> Result<(), anyhow::Error> {
             &comp.compiler.phase.types,
             "print_str",
         )?;
-    extern "C" fn print_str(val: FatPtr) {
-        print!("{}", unsafe {
+    extern "C" fn print_str(runtime: *const Rc<Mutex<TestRuntime>>, val: FatPtr) {
+        let mut runtime = unsafe { &*runtime }.lock().unwrap();
+        runtime.write(unsafe {
             std::str::from_utf8_unchecked(
                 std::slice::from_raw_parts(val.ptr.0, val.size)
             )
@@ -683,7 +734,7 @@ fn test_env() -> Result<(), anyhow::Error> {
         let binding = comp.backend.func_reg();
         *binding.get_intrinsic("print_str").unwrap()
     };
-    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function_with_runtime(print_str as extern "C" fn(*const Rc<Mutex<TestRuntime>>, FatPtr) -> (), 0));
 
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
 let funny_factor: f32 = 67.0;
@@ -783,6 +834,57 @@ fn plot(params: { x: f32, y: f32, line_thickness: f32 }) {
         std::print("\n");
     }
     "#))?;
+
+    let mut runtime = comp.backend.runtime.lock().unwrap();
+    runtime.flush();
+    let printout = std::str::from_utf8(runtime.data())?;
+    assert_eq!(printout, r#"Hello, World! from the test function. 3
+value returned by test function: 210
+executing some hybrid function:-22
+hello, world!
+array index access: 42, 32
+42
+Ferris 27
+array index access after Ferris: 27
+loop index: 5
+loop index: 6
+loop index: 7
+loop index: 8
+loop index: 9
+loop index: 10
+loop index: 11
+loop index: 12
+loop index: 13
+loop index: 14
+loop index: 15
+loop index: 16
+loop index: 17
+loop index: 18
+loop index: 19
+loop index: 20
+loop index: 21
+loop index: 22
+loop index: 23
+loop index: 24
+loop index: 25
+loop index: 26
+loop index: 27
+loop index: 28
+loop index: 29
+loop index: 30
+loop index: 31
+loop index: 32
+loop index: 33
+loop index: 34
+loop index: 35
+loop index: 36
+loop index: 37
+loop index: 38
+loop index: 39
+loop index: 40
+loop index: 41
+42
+"#);
     Ok(())
 }
 
@@ -888,7 +990,7 @@ fn test_simple() -> Result<(), anyhow::Error> {
         std::print("!\n");
 
         // create an array and try some funny stuff with references
-        let mut arr: [i32; 3] = if z == 1000 {
+        let mut arr: [i32; 3] = if z == 1024 {
             [1, 2, 3]
         } else {
             [4, 5, 6]
@@ -898,17 +1000,16 @@ fn test_simple() -> Result<(), anyhow::Error> {
 
         std::print("[");
         let mut index: usize = 0;
-        std::print(arr[index]);
-        // loop {
-        //     if index == 3 {
-        //         break;
-        //     }
-        //     if index != 0 {
-        //         std::print(", ");
-        //     }
-        //     std::print(arr[index]);
-        //     index += 1;
-        // }
+        loop {
+            if index == 3 {
+                break;
+            }
+            if index != 0 {
+                std::print(", ");
+            }
+            std::print(arr[index]);
+            index += 1;
+        }
         std::print("]\n");
     }
     "#))?;
