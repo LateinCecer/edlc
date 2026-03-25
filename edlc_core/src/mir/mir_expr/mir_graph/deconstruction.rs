@@ -6,7 +6,7 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
-use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue};
+use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Statement};
 use crate::mir::mir_expr::lifetime_analysis::{RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -285,6 +285,7 @@ impl PartialSsaDeconstruction {
     }
 
     pub fn reduce_further(&mut self, lifeness: &RegionLifenessList, cfg: &MirFlowGraph) {
+        // map values of the same type to the same data source if their lifetimes do not overlap
         let mut mapping = HashMap::new();
         self.mapping.iter().for_each(|(idx, src)| {
             let value = MirValue(idx);

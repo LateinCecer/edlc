@@ -13,8 +13,8 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-mod stack_frame;
-mod sysv;
+pub mod stack_frame;
+pub mod sysv;
 
 use std::sync::Arc;
 

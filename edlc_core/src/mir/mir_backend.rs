@@ -25,6 +25,7 @@ use crate::hir::HirPhase;
 use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use crate::mir::{MirError, MirPhase};
 use crate::mir::mir_executor::FunctionBinding;
+use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
 
 
@@ -77,6 +78,8 @@ where B: Backend {
         &self,
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
+        call: &MirCall,
+        target: &MirValue,
     ) -> Result<(), MirError<B>>;
 }
 

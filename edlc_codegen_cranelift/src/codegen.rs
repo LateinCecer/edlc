@@ -24,9 +24,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use edlc_core::lexer::SrcPos;
 
-use edlc_core::prelude::{EdlVarId, HirPhase, HirUid, MirError, MirPhase};
+use edlc_core::prelude::{EdlVarId, FunctionBinding, HirPhase, HirUid, MirError, MirPhase};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::MirExpr;
+use edlc_core::prelude::mir_expr::{MirExpr, MirValue};
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
@@ -92,7 +92,7 @@ macro_rules! short_vec(
     });
 );
 pub(crate) use short_vec;
-
+use crate::layout::stack_frame::{CraneliftValues, StackFrameMapping};
 
 impl<T> Deref for ShortVec<T> {
     type Target = [Option<T>];
@@ -396,6 +396,7 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub func_reg: Rc<RefCell<MirFuncRegistry<JIT<Runtime>>>>,
     pub global_vars: &'jit mut IndexMap<GlobalVar>,
     pub runtime_data: &'jit mut IndexMap<DataId>,
+
     /// Marks the return type of the function that is currently being translated
     pub current_effective_return_type: MirTypeId,
     pub current_return_type: MirTypeId,
@@ -409,13 +410,12 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     call_pos: Option<SrcPos>,
 
     /// variable cache
-    pub variables: VarCache,
     pub panic_handle: &'jit mut PanicHandle,
     _rt: PhantomData<Runtime>,
     pub abi: Arc<AbiConfig>,
 
-    // handle loops for control flow
-    loops: HashMap<HirUid, LoopInfo>,
+    pub layout: StackFrameMapping,
+    pub ir_values: CraneliftValues,
 }
 
 pub struct CodeCtx<'a, 'jit> {
@@ -430,15 +430,16 @@ pub trait Compilable<Runtime> {
     /// Since all statements in EDL are expression, just in some cases once that return the empty
     /// data type, this can also be used to compile expressions.
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>>;
+        target: &MirValue,
+    ) -> Result<(), MirError<JIT<Runtime>>>;
 }
 
 pub trait ItemCodegen<Runtime> {
     fn codegen(
-        self,
+        &self,
         hir_phase: &mut HirPhase,
         backend: &mut JIT<Runtime>,
         mir_phase: &mut MirPhase,
@@ -679,34 +680,6 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
     /// calling of this method.
     pub fn fence_vars(&mut self, marker: &RecordMarker) -> Option<VarMarker> {
         self.variables.fence(marker)
-    }
-}
-
-impl<Runtime> Compilable<Runtime> for MirExpr {
-    fn compile(
-        self,
-        backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        match self {
-            MirExpr::ArrayInit(val) => val.compile(backend, phase),
-            MirExpr::As(val) => val.compile(backend, phase),
-            MirExpr::Block(val) => val.compile(backend, phase),
-            MirExpr::Call(val) => val.compile(backend, phase),
-            MirExpr::Literal(val) => val.compile(backend, phase),
-            MirExpr::Variable(val) => val.compile(backend, phase),
-            MirExpr::Constant(val) => val.compile(backend, phase),
-            MirExpr::Assign(val) => val.compile(backend, phase),
-            MirExpr::Let(val) => val.compile(backend, phase),
-            MirExpr::Data(val) => val.compile(backend, phase),
-            MirExpr::Offset(val) => val.compile(backend, phase),
-            MirExpr::If(val) => val.compile(backend, phase),
-            MirExpr::Loop(val) => val.compile(backend, phase),
-            MirExpr::Break(val) => val.compile(backend, phase),
-            MirExpr::Continue(val) => val.compile(backend, phase),
-            MirExpr::Return(val) => val.compile(backend, phase),
-            MirExpr::Init(val) => val.compile(backend, phase),
-        }
     }
 }
 

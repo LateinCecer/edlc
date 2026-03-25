@@ -13,17 +13,24 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{BorrowGraph, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
-use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
-use std::ops::Range;
-use std::sync::Arc;
+use crate::codegen::FunctionTranslator;
+use crate::compiler::external_func::JITExternCall;
+use crate::compiler::JIT;
+use crate::error::{JITError, JITErrorType};
+use crate::layout::SSARepr;
 use cranelift::frontend::FunctionBuilder;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::{InstBuilder, MemFlags};
+use cranelift_module::Module;
+use edlc_core::prelude::index_map::IndexMap;
+use edlc_core::prelude::mir_backend::Backend;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::{BorrowGraph, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
 use edlc_core::prelude::mir_type::abi::{AbiConfig, AbiLayout};
-use crate::layout::SSARepr;
+use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
+use edlc_core::prelude::{MirError, MirPhase};
+use std::ops::Range;
+use std::sync::Arc;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mapping {
@@ -47,12 +54,13 @@ pub(crate) enum FrameLocation<'a> {
 }
 
 impl StackFrameMapping {
-    pub fn new<C: CallingConv>(
+    pub fn new<C: CallingConv, B: Backend>(
         layout: StackFrameLayout,
         cfg: &MirFlowGraph,
         reg: &MirTypeRegistry,
         conv: &C,
         borrow_graph: &BorrowGraph,
+        backend: &B,
     ) -> Result<StackFrameMapping, C::Error> {
         let mut mapping: IndexMap<Mapping> = IndexMap::default();
         let mut call_layouts: IndexMap<CallLayout> = IndexMap::default();
@@ -67,7 +75,7 @@ impl StackFrameMapping {
                 continue;
             }
             let call = cfg.expressions.get_call(*value);
-            let call_layout = conv.make_layout(cfg, call, *var, reg)?;
+            let call_layout = conv.make_layout(cfg, call, *var, reg, backend)?;
             stack_spill_size = usize::max(stack_spill_size, call_layout.spill_size());
             stack_spill_alignment = usize::max(stack_spill_alignment, call_layout.spill_alignment());
 
@@ -110,12 +118,151 @@ impl StackFrameMapping {
         })
     }
 
+    pub fn get_ty(&self, value: &MirValue) -> Option<&MirTypeId> {
+        self.layout.local_offset(value).map(|(_, ty)| ty)
+    }
+
     pub fn get_location(&self, value: &MirValue) -> Option<FrameLocation> {
         match self.mapping.get(value.0)? {
             Mapping::Reg => Some(FrameLocation::Reg),
             Mapping::Stack => {
                 let (offset, ty) = self.layout.local_offset(value).unwrap();
                 Some(FrameLocation::Stack(offset, *ty))
+            }
+        }
+    }
+
+    pub fn load_pod(
+        &self,
+        value: &MirValue,
+        ir_values: &CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+    ) -> Option<ir::Value> {
+        match self.mapping.get(value.0)? {
+            Mapping::Reg => {
+                // must be a POD type
+                ir_values.reg(value)
+            },
+            Mapping::Stack => {
+                let (offset, ty) = self.layout.local_offset(value).unwrap();
+                assert!(reg.is_plain_old_data(*ty));
+                Some(builder
+                    .ins()
+                    .stack_load(SSARepr::pod(ty, reg)?, ir_values.stack_slot, offset.start as i32))
+            },
+        }
+    }
+
+    pub fn store_pod(
+        &self,
+        value: ir::Value,
+        target: &MirValue,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+    ) {
+        match self.mapping.get(target.0).unwrap() {
+            Mapping::Reg => {
+                ir_values.set_value(*target, value);
+            }
+            Mapping::Stack => {
+                let (offset, ty) = self.layout.local_offset(target).unwrap();
+                assert!(reg.is_plain_old_data(*ty));
+                builder
+                    .ins()
+                    .stack_store(value, ir_values.stack_slot, offset.start as i32);
+            }
+        }
+    }
+
+    fn load_eightbyte(
+        &self,
+        value: &MirValue,
+        ir_values: &CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+        output: &mut Vec<ir::Value>,
+    ) {
+        let (offset, ty) = self.layout.local_offset(value).unwrap();
+        let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
+
+        match self.mapping.get(value.0).unwrap() {
+            Mapping::Reg => {
+                // must be a POD type
+                let mut part_ty = SSARepr::iter_eightbytes(&layout);
+                let first = part_ty.next().unwrap();
+                if let Some(second) = part_ty.next() {
+                    assert!(part_ty.next().is_none());
+                    let value = ir_values.reg(value).unwrap();
+                    let first = builder
+                        .ins()
+                        .ireduce(first, value);
+                    let temp = builder
+                        .ins()
+                        .ushr_imm(value, 64);
+                    let second = builder
+                        .ins()
+                        .ireduce(second, temp);
+                    output.push(first);
+                    output.push(second);
+                } else {
+                    output.push(ir_values.reg(value).unwrap());
+                }
+            },
+            Mapping::Stack => {
+                let mut start = offset.start as i32;
+                for ty in SSARepr::iter_eightbytes(&reg.abi_layout(abi.clone(), *ty).unwrap()) {
+                    let value = builder
+                        .ins()
+                        .stack_load(ty, ir_values.stack_slot, start);
+                    output.push(value);
+                    start += ty.bytes() as i32;
+                }
+            }
+        }
+    }
+
+    fn store_eightbyte(
+        &self,
+        value: &[ir::Value],
+        target: &MirValue,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) {
+        let (offset, ty) = self.layout.local_offset(target).unwrap();
+        let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
+
+        match self.mapping.get(target.0).unwrap() {
+            Mapping::Reg => {
+                // must be a POD type
+                let mut part_ty = SSARepr::iter_eightbytes(&layout);
+                let _first = part_ty.next().unwrap();
+                if let Some(_second) = part_ty.next() {
+                    assert!(part_ty.next().is_none());
+                    assert_eq!(value.len(), 2);
+                    let value = builder
+                        .ins()
+                        .iconcat(value[0], value[1]);
+                    ir_values.set_value(*target, value);
+                } else {
+                    assert_eq!(value.len(), 1);
+                    ir_values.set_value(*target, value[0]);
+                }
+            }
+            Mapping::Stack => {
+                let mut start = offset.start as i32;
+                for (ty, value) in SSARepr::iter_eightbytes(&reg.abi_layout(abi.clone(), *ty).unwrap())
+                    .zip(value.iter()) {
+
+                    builder
+                        .ins()
+                        .stack_store(*value, ir_values.stack_slot, start);
+                    start += ty.bytes() as i32;
+                }
             }
         }
     }
@@ -201,6 +348,54 @@ impl StackFrameMapping {
         }
     }
 
+    pub fn cpy_offset(
+        &self,
+        src: &MirValue,
+        dst: &MirValue,
+        offset: i32,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) {
+        match self.mapping.get(src.0).unwrap() {
+            Mapping::Reg => {
+                let src_ir = ir_values.reg(src).unwrap();
+                match self.mapping.get(dst.0).unwrap() {
+                    Mapping::Reg => {
+                        assert_eq!(offset, 0);
+                        ir_values.set_value(*dst, src_ir);
+                    },
+                    Mapping::Stack => {
+                        let (dst_range, _) = self.layout.local_offset(dst).unwrap();
+                        builder
+                            .ins()
+                            .stack_store(src_ir, ir_values.stack_slot, dst_range.start as i32 + offset);
+                    },
+                }
+            },
+            Mapping::Stack => {
+                let (src_range, ty) = self.layout.local_offset(src).unwrap();
+                match self.mapping.get(dst.0).unwrap() {
+                    Mapping::Reg => {
+                        assert_eq!(offset, 0);
+                        let ty_ir = SSARepr::pod(ty, reg).unwrap();
+                        let src_ir = builder
+                            .ins()
+                            .stack_load(ty_ir, ir_values.stack_slot, src_range.start as i32);
+                        ir_values.set_value(*dst, src_ir);
+
+                    },
+                    Mapping::Stack => {
+                        let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
+                        let (dst_range, _) = self.layout.local_offset(dst).unwrap();
+                        ir_values.stack_cpy(src_range.start, (dst_range.start as i32 + offset) as usize, &layout, builder);
+                    },
+                }
+            },
+        }
+    }
+
     pub fn get_ptr(
         &self,
         value: &MirValue,
@@ -243,11 +438,10 @@ impl StackFrameMapping {
         builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
-        cfg: &MirFlowGraph,
     ) {
-        let ptr_ty = cfg.get_var_type(ptr);
+        let ptr_ty = self.get_ty(ptr).unwrap();
         assert!(reg.is_ref(ptr_ty), "ptr is not a reference type");
-        let target_ty = cfg.get_var_type(target);
+        let target_ty = self.get_ty(target).unwrap();
         assert_eq!(
             reg.get_ref_type(ptr_ty).unwrap(),
             *target_ty,
@@ -290,12 +484,11 @@ impl StackFrameMapping {
         builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
-        cfg: &MirFlowGraph,
     ) {
-        let ptr_ty = cfg.get_var_type(ptr);
+        let ptr_ty = self.get_ty(ptr).unwrap();
         assert!(reg.is_ref(ptr_ty), "ptr is not a reference type");
         assert!(reg.is_ref_mutable(ptr_ty), "ptr is not a mutable reference type");
-        let src_ty = cfg.get_var_type(src);
+        let src_ty = self.get_ty(src).unwrap();
         assert_eq!(
             reg.get_ref_type(ptr_ty).unwrap(),
             *src_ty,
@@ -338,12 +531,11 @@ impl StackFrameMapping {
         builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
-        cfg: &MirFlowGraph,
     ) {
-        let src_ty = cfg.get_var_type(src);
+        let src_ty = self.get_ty(src).unwrap();
         assert!(reg.is_ref(src_ty), "ptr is not a reference type");
         assert!(reg.is_ref_mutable(src_ty), "ptr is not a mutable reference type");
-        let dst_ty = cfg.get_var_type(dst);
+        let dst_ty = self.get_ty(dst).unwrap();
         assert!(reg.is_ref(dst_ty), "ptr is not a reference type");
         assert_eq!(
             reg.get_ref_type(src_ty).unwrap(),
@@ -376,7 +568,7 @@ impl StackFrameMapping {
 }
 
 /// Maps EDLs MIR values to Cranelifts IR value types.
-struct CraneliftValues {
+pub(crate) struct CraneliftValues {
     mappings: IndexMap<ir::Value>,
     stack_slot: ir::StackSlot,
 }
@@ -393,6 +585,9 @@ impl CraneliftValues {
         ty_layout: &AbiLayout,
         builder: &mut FunctionBuilder,
     ) {
+        if src == dst {
+            return;
+        }
         for eightbyte in SSARepr::iter_eightbytes(&ty_layout) {
             let value = builder.ins().stack_load(eightbyte, self.stack_slot, src as i32);
             src += eightbyte.bytes() as usize;
@@ -412,12 +607,14 @@ impl CraneliftValues {
     }
 }
 
-pub(super) enum ArgumentPurpose {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgumentPurpose {
     Normal(MirValue),
     Struct(MirValue),
     ReturnBuffer(MirValue),
     Padding,
     StackSpill,
+    Runtime,
 }
 
 pub(super) struct Argument {
@@ -433,8 +630,11 @@ pub(super) struct StackSpill {
 }
 
 pub struct CallLayout {
-    pub(super) args: Vec<Argument>,
-    pub(super) stack_spill: Option<StackSpill>,
+    pub args: Vec<Argument>,
+    pub stack_spill: Option<StackSpill>,
+    pub runtime_ordinal: Option<u16>,
+    /// Only populated if we return by value
+    pub return_value: Option<MirValue>,
 }
 
 struct CallLayoutIter<'a> {
@@ -536,6 +736,118 @@ impl CallLayout {
             .iter()
             .any(|arg| matches!(&arg.purpose, ArgumentPurpose::ReturnBuffer(_)))
     }
+
+    pub fn compile<Runtime>(
+        &self,
+        backend: &mut FunctionTranslator<'_, Runtime>,
+        phase: &MirPhase,
+    ) -> Result<CallSignature, ()> {
+        let mut sig = backend.module.make_signature();
+        let mut eightbytes: Vec<ir::Type> = Vec::new();
+        let mut param_values: Vec<ir::Value> = Vec::new();
+        for arg in self.args.iter() {
+            match &arg.purpose {
+                ArgumentPurpose::Normal(val) => {
+                    let ty = backend.layout.get_ty(val).unwrap();
+                    let layout = phase.types.abi_layout(backend.abi.clone(), *ty).unwrap();
+                    for ty in SSARepr::iter_eightbytes(&layout) {
+                        eightbytes.push(ty);
+                        sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal))
+                    }
+                    backend.layout.load_eightbyte(
+                        val,
+                        &backend.ir_values,
+                        &mut backend.builder,
+                        &phase.types,
+                        &backend.abi,
+                        &mut param_values,
+                    );
+                    assert_eq!(eightbytes.len(), param_values.len());
+                }
+                ArgumentPurpose::Struct(val) => {
+                    let ty = backend.layout.get_ty(val).unwrap();
+                    let layout = phase.types.abi_layout(backend.abi.clone(), *ty).unwrap();
+                    let size = layout.byte_size() as u32; // align?
+                    let (ir_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
+                    eightbytes.push(ir_ty);
+                    sig.params.push(ir::AbiParam::special(
+                        ir_ty, ir::ArgumentPurpose::StructArgument(size), ));
+                    let ptr_value = backend.layout.get_ptr(
+                        val, &mut backend.ir_values, &mut backend.builder, &phase.types, &backend.abi);
+                    param_values.push(ptr_value);
+                }
+                ArgumentPurpose::ReturnBuffer(val) => {
+                    let (ptr_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
+                    eightbytes.push(ptr_ty);
+                    sig.params.push(ir::AbiParam::special(
+                        ptr_ty, ir::ArgumentPurpose::StructReturn));
+                    let ptr_value = backend.layout.get_ptr(
+                        val, &mut backend.ir_values, &mut backend.builder, &phase.types, &backend.abi);
+                    param_values.push(ptr_value);
+                }
+                ArgumentPurpose::Padding => {
+                    for _ in 0..arg.rxx {
+                        let (ir_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
+                        let value = backend.builder.ins().iconst(ir_ty, 0);
+                        eightbytes.push(ir_ty);
+                        sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::Normal));
+                        param_values.push(value);
+                    }
+                    for _ in 0..arg.xmm {
+                        let (ir_ty, _) = SSARepr::ftype_for_alignment(backend.abi.pointer_width);
+                        let value = if ir_ty.bytes() == 4 {
+                            backend.builder.ins().f32const(0.0)
+                        } else if ir_ty.bytes() == 8 {
+                            backend.builder.ins().f64const(0.0)
+                        } else {
+                            panic!("invalid floating point type with {} bytes", ir_ty.bytes());
+                        };
+                        eightbytes.push(ir_ty);
+                        sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::Normal));
+                        param_values.push(value);
+                    }
+                }
+                ArgumentPurpose::StackSpill => (),
+                ArgumentPurpose::Runtime => {
+                    let (ptr_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
+                    eightbytes.push(ptr_ty);
+                    sig.params.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::Normal));
+                    let ordinal = *self.runtime_ordinal.as_ref().unwrap();
+                    let data = backend.runtime_data.get(ordinal as usize).unwrap();
+                    let runtime_data = backend.module
+                        .declare_data_in_func(*data, backend.builder.func);
+                    let ptr = backend.builder
+                        .ins()
+                        .symbol_value(ptr_ty, runtime_data);
+                    eightbytes.push(ptr_ty);
+                    sig.params.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::Normal));
+                    param_values.push(ptr);
+                }
+            }
+        }
+        assert_eq!(eightbytes.len(), sig.params.len());
+        assert_eq!(eightbytes.len(), param_values.len());
+
+        let return_value = if !self.return_via_buffer() {
+            if let Some(val) = self.return_value.as_ref() {
+                let ty = backend.layout.get_ty(val).unwrap();
+                let layout = phase.types.abi_layout(backend.abi.clone(), *ty).unwrap();
+                SSARepr::iter_eightbytes(&layout)
+                    .for_each(|ty| sig.returns.push(ir::AbiParam::new(ty)));
+                Some(*val)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(CallSignature {
+            args: param_values,
+            signature: sig,
+            return_value,
+        })
+    }
 }
 
 /// Mapping of a single argument or return value in a call layout.
@@ -551,16 +863,66 @@ enum CallLayoutMapping {
     StackSpill(Range<usize>),
 }
 
+/// Compiled call signature.
+/// Is build from a call mapping and additional backend information.
+pub(crate) struct CallSignature {
+    signature: ir::Signature,
+    args: Vec<ir::Value>,
+    return_value: Option<MirValue>,
+}
+
+impl CallSignature {
+    fn generate<Runtime>(
+        self,
+        backend: &mut FunctionTranslator<'_, Runtime>,
+        phase: &mut MirPhase,
+        call: &JITExternCall,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
+        let func_id = backend
+            .module
+            .declare_function(&call.symbol, call.linkage, &self.signature)
+            .map_err(|err| MirError::BackendError(JITError {
+                ty: JITErrorType::ModuleErr(err),
+            }))?;
+        let local_callee = backend
+            .module
+            .declare_func_in_func(func_id, backend.builder.func);
+        let call = backend
+            .builder
+            .ins()
+            .call(local_callee, &self.args);
+
+        if let Some(target) = self.return_value {
+            let val = backend
+                .builder
+                .inst_results(call)
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            backend.layout.store_eightbyte(
+                &val,
+                &target,
+                &mut backend.ir_values,
+                &mut backend.builder,
+                &phase.types,
+                &backend.abi,
+            );
+        }
+        Ok(())
+    }
+}
+
 pub trait CallingConv {
     type Error;
 
     /// Generates the call layout for a specific call, using the rules of this calling convention.
-    fn make_layout(
+    fn make_layout<B: Backend>(
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
         target: MirValue,
         reg: &MirTypeRegistry,
+        backend: &B,
     ) -> Result<CallLayout, Self::Error>;
 
     /// Returns the supported architecture triplet for this calling convention.

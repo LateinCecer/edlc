@@ -16,8 +16,10 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirFlowGraph, MirValue};
+use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeRegistry;
 use crate::layout::SSARepr;
@@ -55,12 +57,13 @@ impl Error for SysVError {}
 impl CallingConv for SysV {
     type Error = SysVError;
 
-    fn make_layout(
+    fn make_layout<B: Backend>(
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
         target: MirValue,
         reg: &MirTypeRegistry,
+        backend: &B,
     ) -> Result<CallLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
         if reg.byte_size(call.ret).unwrap() > self.abi.large_aggregate_bytes {
@@ -69,6 +72,16 @@ impl CallingConv for SysV {
                 xmm: 0,
                 purpose: ArgumentPurpose::ReturnBuffer(target),
             });
+        }
+
+        if let Some(intr) = backend.intrinsic_binding(call.func) {
+            if intr.runtime_ordinal.is_some() {
+                args.push(Argument {
+                    rxx: 1,
+                    xmm: 0,
+                    purpose: ArgumentPurpose::Runtime,
+                })
+            }
         }
 
         for value in call.args.iter() {

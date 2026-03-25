@@ -14,35 +14,23 @@
  *    limitations under the License.
  */
 
-use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::{MirError, MirPhase};
-use log::info;
 use crate::codegen::{Compilable, FunctionTranslator};
-use crate::codegen::variable::AggregateValue;
 use crate::compiler::JIT;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirCall {
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        info!("translating function call at position {} ...", self.pos);
-
-        // format call args
-        let mut values = Vec::new();
-        for arg in self.args.into_iter() {
-            values.push(arg.compile(backend, phase)?);
-        }
-        values.into_iter().for_each(|value| backend.add_call_arg(value));
-
-        backend.put_call_return(self.ret, self.pos);
+        phase: &mut MirPhase,
+        target: &MirValue,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
         // build the function call using the code generator defined in the function registry
         backend.func_reg.clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase)?;
-        // unwrapping this is safe, since the value must always be available at runtime of the
-        // compiler works correctly.
-        Ok(backend.get_call_result().unwrap())
+            .generate_call_code(self.func, backend, phase, self, target)?;
+        Ok(())
     }
 }

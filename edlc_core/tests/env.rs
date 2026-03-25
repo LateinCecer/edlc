@@ -24,6 +24,7 @@ use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry
 use edlc_core::prelude::{AmorphusDataCopy, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_str::FatPtr;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
@@ -318,6 +319,7 @@ impl CodeGen<TestBackend> for TestCodegen {
         &self,
         backend: &mut <TestBackend as Backend>::FuncGen<'_>,
         type_reg: &mut MirPhase,
+        call: &MirCall,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
@@ -332,7 +334,12 @@ impl InstructionCount<TestBackend> for TestCallGen {
 }
 
 impl CodeGen<TestBackend> for TestCallGen {
-    fn code_gen(&self, backend: &mut <TestBackend as Backend>::FuncGen<'_>, type_reg: &mut MirPhase) -> Result<(), MirError<TestBackend>> {
+    fn code_gen(
+        &self,
+        backend: &mut <TestBackend as Backend>::FuncGen<'_>,
+        type_reg: &mut MirPhase,
+        mir_call: &MirCall,
+    ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
 }
