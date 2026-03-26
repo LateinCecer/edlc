@@ -83,7 +83,7 @@ use edlc_core::prelude::mir_type::MirTypeId;
 use cranelift_codegen::ir::{StackSlot, Value};
 use log::info;
 
-use crate::codegen::{CodeCtx, CompileValue, IntoValue, short_vec, ShortVec};
+use crate::codegen::{short_vec, CodeCtx, CompileValue, IntoValue, ShortVec};
 use crate::layout::SSARepr;
 pub use crate::codegen::variable::value::{DataValue, DataVariant, PtrValue, RuntimeOffset, SSAGenerator, SSAValue, StackValue, VariableSetResult, VariableValue};
 use crate::compiler::JIT;

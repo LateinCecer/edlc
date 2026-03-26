@@ -35,7 +35,7 @@ use std::mem::MaybeUninit;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use edlc_core::prelude::mir_backend::{Backend};
-use edlc_core::prelude::{EdlVarId, HirPhase, MirError, MirPhase};
+use edlc_core::prelude::{EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase};
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_expr::mir_data::MirData;
 use edlc_core::prelude::mir_funcs::{MirFuncId, MirFuncRegistry};
@@ -117,7 +117,7 @@ insert_function!(
 
 #[derive(Clone, Debug)]
 pub struct GlobalVar {
-    data_id: DataId,
+    pub(crate) data_id: DataId,
     pub ty: MirTypeId,
 }
 
@@ -199,8 +199,9 @@ pub struct JIT<Runtime: 'static> {
     native_functions: Arc<Mutex<NativeFunctionLookup>>,
     pub func_reg: Rc<RefCell<MirFuncRegistry<Self>>>,
     pub global_vars: IndexMap<GlobalVar>,
-    code: Rc<RefCell<JITCode>>,
     pub runtime_data: IndexMap<DataId>,
+    pub function_bindings: IndexMap<FunctionBinding>,
+    code: Rc<RefCell<JITCode>>,
     _rt: PhantomData<Runtime>,
     pub panic_handle: PanicHandle,
     pub abi: Arc<AbiConfig>,
@@ -271,6 +272,7 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
             global_vars: IndexMap::default(),
             code: Rc::new(RefCell::new(JITCode::default())),
             runtime_data: IndexMap::default(),
+            function_bindings: IndexMap::default(),
             _rt: PhantomData,
             panic_handle,
             abi: Arc::new(AbiConfig::local_system_v()),

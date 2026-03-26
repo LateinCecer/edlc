@@ -68,6 +68,12 @@ use crate::resolver::ScopeId;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MirBlockRef(pub(super) usize);
 
+impl MirBlockRef {
+    pub fn ordinal(&self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Scope(usize);
 
@@ -256,8 +262,8 @@ pub struct BlockParameterIndex(pub(crate) usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockCall {
-    target: MirBlockRef,
-    params: Vec<MirValue>,
+    pub target: MirBlockRef,
+    pub params: Vec<MirValue>,
 }
 
 impl BlockCall {
@@ -793,17 +799,17 @@ impl Display for Context {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-struct Block {
+pub struct Block {
     active_scopes: Vec<Scope>,
-    statements: Vec<Statement>,
-    seal: Seal,
+    pub statements: Vec<Statement>,
+    pub seal: Seal,
     /// Encodes the block parameter positions for input variables that are already routed into the
     /// block.
-    parameters: Vec<MirValue>,
+    pub parameters: Vec<MirValue>,
     ctx: Context,
     // source code context
-    src: ModuleSrc,
-    pos: DebugSymbols,
+    pub src: ModuleSrc,
+    pub pos: DebugSymbols,
     scope: ScopeId,
 }
 

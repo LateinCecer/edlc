@@ -64,11 +64,15 @@ impl<'a> From<AmorphusDataMut<'a>> for AmorphusData<'a> {
 
 #[derive(PartialEq, Eq, Debug)]
 pub struct AmorphusData<'a> {
-    data: &'a [u8],
-    ty: MirTypeId,
+    pub(crate) data: &'a [u8],
+    pub(crate) ty: MirTypeId,
 }
 
 impl<'a> AmorphusData<'a> {
+    pub fn get_type(&self) -> &MirTypeId {
+        &self.ty
+    }
+
     pub fn as_ptr(&self) -> *const u8 {
         self.data.as_ptr()
     }

@@ -18,7 +18,7 @@ use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase};
-use crate::prelude::ExecutorVM;
+use crate::prelude::{AmorphusData, ExecutorVM};
 use std::mem;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +69,13 @@ impl MirData {
         }
         assert_eq!(self.value.len(), mem::size_of::<usize>());
         Ok(unsafe { core::ptr::read_unaligned(self.value.as_ptr() as *const _) })
+    }
+
+    pub fn data(&self) -> AmorphusData<'_> {
+        AmorphusData {
+            ty: self.ty,
+            data: self.value.as_slice(),
+        }
     }
 }
 

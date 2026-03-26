@@ -36,7 +36,7 @@ pub mod mir_assign;
 pub mod mir_data;
 pub mod mir_type_init;
 mod mir_graph;
-mod mir_ref;
+pub mod mir_ref;
 
 pub use crate::mir::mir_expr::mir_graph::*;
 pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};

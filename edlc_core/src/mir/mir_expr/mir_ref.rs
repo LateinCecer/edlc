@@ -24,7 +24,7 @@ use crate::prelude::ExecutorVM;
 pub struct MirRef {
     pub mutable: bool,
     pub value: MirValue,
-    pub(super) offset: RefOffset,
+    pub offset: RefOffset,
     pub ty: MirTypeId,
     src_ty: MirTypeId,
 }
@@ -491,7 +491,7 @@ impl MirRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum RefOffset {
+pub enum RefOffset {
     /// The entire object is referenced.
     Entire,
     /// A member of the object is referenced.

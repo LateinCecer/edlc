@@ -66,23 +66,31 @@ impl CallingConv for SysV {
         backend: &B,
     ) -> Result<CallLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
-        if reg.byte_size(call.ret).unwrap() > self.abi.large_aggregate_bytes {
+        let return_value = if reg.byte_size(call.ret).unwrap() > self.abi.large_aggregate_bytes {
             args.push(Argument {
                 rxx: 1,
                 xmm: 0,
                 purpose: ArgumentPurpose::ReturnBuffer(target),
             });
-        }
+            None
+        } else {
+            Some(target)
+        };
 
-        if let Some(intr) = backend.intrinsic_binding(call.func) {
-            if intr.runtime_ordinal.is_some() {
+        let runtime_ordinal = if let Some(intr) = backend.intrinsic_binding(call.func) {
+            if let Some(ordinal) = intr.runtime_ordinal {
                 args.push(Argument {
                     rxx: 1,
                     xmm: 0,
                     purpose: ArgumentPurpose::Runtime,
-                })
+                });
+                Some(ordinal)
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         for value in call.args.iter() {
             let ty = cfg.get_var_type(value);
@@ -110,6 +118,8 @@ impl CallingConv for SysV {
         Ok(CallLayout {
             args: args.finish(),
             stack_spill: None,
+            return_value,
+            runtime_ordinal,
         })
     }
 

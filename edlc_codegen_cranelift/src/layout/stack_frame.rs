@@ -20,17 +20,19 @@ use crate::error::{JITError, JITErrorType};
 use crate::layout::SSARepr;
 use cranelift::frontend::FunctionBuilder;
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::{InstBuilder, MemFlags};
+use cranelift_codegen::ir::{InstBuilder, MemFlags, StackSlotData, StackSlotKind};
 use cranelift_module::Module;
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{BorrowGraph, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
-use edlc_core::prelude::mir_type::abi::{AbiConfig, AbiLayout};
+use edlc_core::prelude::mir_type::abi::{AbiConfig, AbiLayout, ByteLayout};
 use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_core::prelude::{MirError, MirPhase};
+use edlc_core::prelude::{AmorphusData, MirError, MirPhase};
 use std::ops::Range;
 use std::sync::Arc;
+use cranelift_codegen::ir::stackslot::StackSize;
+use cranelift_jit::JITModule;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mapping {
@@ -118,6 +120,22 @@ impl StackFrameMapping {
         })
     }
 
+    pub fn create_ir_values(
+        &self,
+        builder: &mut FunctionBuilder,
+    ) -> CraneliftValues {
+        let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            self.layout.size as u32,
+            u8::max(self.layout.alignment as u8, 16),
+        ));
+        let mappings: IndexMap<ir::Value> = IndexMap::default();
+        CraneliftValues {
+            stack_slot,
+            mappings,
+        }
+    }
+
     pub fn get_ty(&self, value: &MirValue) -> Option<&MirTypeId> {
         self.layout.local_offset(value).map(|(_, ty)| ty)
     }
@@ -130,6 +148,15 @@ impl StackFrameMapping {
                 Some(FrameLocation::Stack(offset, *ty))
             }
         }
+    }
+
+    pub fn is_on_reg(&self, value: &MirValue) -> bool {
+        matches!(self.mapping.get(value.0), Some(Mapping::Reg))
+    }
+
+    pub fn is_block_param_on_reg(&self, value: &MirValue, reg: &MirTypeRegistry) -> bool {
+        let ty = *self.get_ty(value).unwrap();
+        reg.is_plain_old_data(ty)
     }
 
     pub fn load_pod(
@@ -448,15 +475,27 @@ impl StackFrameMapping {
             "reference type does not match target type",
         );
 
-        assert_eq!(self.mapping.get(ptr.0).cloned(), Some(Mapping::Reg));
-        let ir_ptr = ir_values.reg(ptr).unwrap();
+        let ir_ptr = self.load_pod(ptr, ir_values, builder, reg).unwrap();
+        self.load_raw_ptr(ir_ptr, const_offset, target, ir_values, builder, reg, abi);
+    }
+
+    pub fn load_raw_ptr(
+        &self,
+        ptr: ir::Value,
+        const_offset: i32,
+        target: &MirValue,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) {
+        let (target_offset, target_ty) = self.layout.local_offset(target).unwrap();
         match self.mapping.get(target.0).unwrap() {
             Mapping::Reg => {
-                let ir_target_type = SSARepr::pod(target_ty, reg).unwrap();
+                let ir_target_ty = SSARepr::pod(target_ty, reg).unwrap();
                 let data = builder
                     .ins()
-                    .load(ir_target_type, MemFlags::trusted(), ir_ptr, const_offset);
-                ir_values.set_value(*target, data);
+                    .load(ir_target_ty, MemFlags::trusted(), ptr, const_offset);
             },
             Mapping::Stack => {
                 let target_layout = reg.abi_layout(abi.clone(), *target_ty).unwrap();
@@ -464,10 +503,10 @@ impl StackFrameMapping {
                 for eightbyte in SSARepr::iter_eightbytes(&target_layout) {
                     let value = builder
                         .ins()
-                        .load(eightbyte, MemFlags::trusted(), ir_ptr, const_offset + off);
+                        .load(eightbyte, MemFlags::trusted(), ptr, const_offset + off);
                     builder
                         .ins()
-                        .stack_store(value, ir_values.stack_slot, off);
+                        .stack_store(value, ir_values.stack_slot, target_offset.start as i32 + off);
                     off += eightbyte.bytes() as i32;
                 }
             },
@@ -495,14 +534,28 @@ impl StackFrameMapping {
             "reference type does not match target type",
         );
 
-        assert_eq!(self.mapping.get(ptr.0).cloned(), Some(Mapping::Reg));
-        let ir_ptr = ir_values.reg(ptr).unwrap();
+        let ir_ptr = self.load_pod(ptr, ir_values, builder, reg).unwrap();
+        self.write_raw_ptr(src, ir_ptr, const_offset, ir_values, builder, reg, abi);
+    }
+
+    /// Write a source value to a pointer destination.
+    pub fn write_raw_ptr(
+        &self,
+        src: &MirValue,
+        ptr: ir::Value,
+        const_offset: i32,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) {
+        let (src_offset, src_ty) = self.layout.local_offset(src).unwrap();
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let data = ir_values.reg(src).unwrap();
                 builder
                     .ins()
-                    .store(MemFlags::trusted(), data, ir_ptr, const_offset);
+                    .store(MemFlags::trusted(), data, ptr, const_offset);
             },
             Mapping::Stack => {
                 let target_layout = reg.abi_layout(abi.clone(), *src_ty).unwrap();
@@ -510,10 +563,10 @@ impl StackFrameMapping {
                 for eightbyte in SSARepr::iter_eightbytes(&target_layout) {
                     let value = builder
                         .ins()
-                        .stack_load(eightbyte, ir_values.stack_slot, offset);
+                        .stack_load(eightbyte, ir_values.stack_slot, src_offset.start as i32 + offset);
                     builder
                         .ins()
-                        .store(MemFlags::trusted(), value, ir_ptr, const_offset + offset);
+                        .store(MemFlags::trusted(), value, ptr, const_offset + offset);
                     offset += eightbyte.bytes() as i32;
                 }
             },
@@ -542,11 +595,8 @@ impl StackFrameMapping {
             reg.get_ref_type(dst_ty).unwrap(),
             "reference type does not match target type",
         );
-
-        assert_eq!(self.mapping.get(src.0).cloned(), Some(Mapping::Reg));
-        assert_eq!(self.mapping.get(dst.0).cloned(), Some(Mapping::Reg));
-        let ir_src = ir_values.reg(src).unwrap();
-        let ir_dst = ir_values.reg(dst).unwrap();
+        let ir_src = self.load_pod(src, ir_values, builder, reg).unwrap();
+        let ir_dst = self.load_pod(dst, ir_values, builder, reg).unwrap();
 
         let base_ty = reg.get_ref_type(src_ty).unwrap();
         let layout = reg.abi_layout(abi.clone(), base_ty).unwrap();
@@ -564,6 +614,115 @@ impl StackFrameMapping {
 
     pub fn spill_offset(&self) -> usize {
         self.layout.size + self.stack_spill_offset
+    }
+
+    pub fn store_data(
+        &self,
+        data: &AmorphusData,
+        target: &MirValue,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) {
+        assert_eq!(self.get_ty(target).unwrap(), data.get_type());
+        if reg.byte_size(*data.get_type()).unwrap() == 0 {
+            return;
+        }
+
+        match self.mapping.get(target.0).unwrap() {
+            Mapping::Reg => {
+                // must be a POD type
+                let ty = SSARepr::pod(data.get_type(), reg).unwrap();
+                let value = const_from_raw(
+                    data, 0, data.as_slice().len(), ty, builder).unwrap();
+                ir_values.set_value(*target, value);
+            },
+            Mapping::Stack => {
+                let (target_offset, _) = self.layout.local_offset(target).unwrap();
+                let layout = reg.abi_layout(abi.clone(), *data.get_type()).unwrap();
+                let mut offset = 0usize;
+                for eightbyte in SSARepr::iter_eightbytes(&layout) {
+                    let value = const_from_raw(
+                        data, offset, eightbyte.bytes() as usize, eightbyte, builder).unwrap();
+                    builder
+                        .ins()
+                        .stack_store(value, ir_values.stack_slot, target_offset.start as i32 + offset as i32);
+                    offset += eightbyte.bytes() as usize;
+                }
+            },
+        }
+    }
+}
+
+/// Loads a constant from an amorphus data chunk.
+/// The layout specified here must match the layout of the entire amorphus data, not just the chunk.
+/// The layout of the chunk itself is derived from this layout using the specified offset and size.
+fn const_from_data_sublayout(
+    data: &AmorphusData,
+    offset: usize,
+    size: usize,
+    layout: &ByteLayout,
+    builder: &mut FunctionBuilder,
+    abi: &Arc<AbiConfig>,
+) -> Option<ir::Value> {
+    let sub_layout = layout.derive_sub_layout(offset, size);
+    let mut layout = AbiLayout::new(abi.clone());
+    layout.push_bytes(sub_layout);
+    let ty = SSARepr::single_eightbyte(&layout).unwrap();
+    const_from_raw(data, offset, size, ty, builder)
+}
+
+/// Loads constant data from an amorphus data chunk, while accounting for the correct abi layout
+/// of the loaded data chunk.
+/// The layout specified here must match the layout of the loaded chunk, not the layout of the
+/// entire amorphus data.
+fn const_from_raw(
+    data: &AmorphusData,
+    offset: usize,
+    size: usize,
+    ty: ir::Type,
+    builder: &mut FunctionBuilder,
+) -> Option<ir::Value> {
+    assert_eq!(size, ty.bytes() as usize);
+    match ty {
+        ty if ty == ir::types::I8 => {
+            Some(builder.ins().iconst(ty, data.as_slice()[offset] as i64))
+        }
+        ty if ty == ir::types::I16 => {
+            let mut buf = [0u8; 2];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 2]);
+            Some(builder.ins().iconst(ty, i16::from_ne_bytes(buf) as i64))
+        }
+        ty if ty == ir::types::I32 => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 4]);
+            Some(builder.ins().iconst(ty, i32::from_ne_bytes(buf) as i64))
+        }
+        ty if ty == ir::types::I64 => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 8]);
+            Some(builder.ins().iconst(ty, i64::from_ne_bytes(buf)))
+        }
+        ty if ty == ir::types::I128 => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 8]);
+            let lo = builder.ins().iconst(ir::types::I64, i64::from_ne_bytes(buf));
+            buf.copy_from_slice(&data.as_slice()[offset + 8..offset + 16]);
+            let hi = builder.ins().iconst(ir::types::I64, i64::from_ne_bytes(buf));
+            Some(builder.ins().iconcat(lo, hi))
+        }
+        ty if ty == ir::types::F32 => {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 4]);
+            Some(builder.ins().f32const(f32::from_ne_bytes(buf)))
+        }
+        ty if ty == ir::types::F64 => {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&data.as_slice()[offset..offset + 8]);
+            Some(builder.ins().f64const(f64::from_ne_bytes(buf)))
+        }
+        _ => panic!("invalid layout for constant loading"),
     }
 }
 
@@ -615,6 +774,86 @@ pub enum ArgumentPurpose {
     Padding,
     StackSpill,
     Runtime,
+}
+
+pub(super) struct FunctionLayout {
+    pub(super) args: Vec<Argument>,
+    pub(super) stack_spill: Option<StackSpill>,
+    pub(super) return_type: Option<MirTypeId>,
+}
+
+impl FunctionLayout {
+    pub(crate) fn map<Runtime>(
+        &self,
+        entry_block: ir::Block,
+        builder: &mut FunctionTranslator<'_, Runtime>,
+        reg: &MirTypeRegistry,
+    ) {
+        let params = builder.builder.block_params(entry_block)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut i = 0usize;
+        for arg in self.args.iter() {
+            match &arg.purpose {
+                ArgumentPurpose::Normal(value) => {
+                    let ty = *builder
+                        .layout
+                        .get_ty(value)
+                        .unwrap();
+                    let layout = reg.abi_layout(builder.abi.clone(), ty).unwrap();
+                    let (rxx, xmm) = SSARepr::sum_block_type_eightbytes(&layout);
+                    let num_values = (rxx + xmm) as usize;
+
+                    builder.layout.store_eightbyte(
+                        &params[i..i + num_values],
+                        value,
+                        &mut builder.ir_values,
+                        &mut builder.builder,
+                        reg,
+                        &builder.abi,
+                    );
+                    i += num_values;
+                }
+                ArgumentPurpose::Struct(value) => {
+                    let ptr_value = params[i];
+                    i += 1;
+                    builder.layout.load_raw_ptr(
+                        ptr_value,
+                        0,
+                        value,
+                        &mut builder.ir_values,
+                        &mut builder.builder,
+                        reg,
+                        &builder.abi,
+                    );
+                }
+                ArgumentPurpose::ReturnBuffer(_value) => {
+                    i += 1; // don't add to block parameters
+                }
+                ArgumentPurpose::Padding => {
+                    i += 1;
+                }
+                ArgumentPurpose::StackSpill => {
+                    unimplemented!("manual stack spill mapping not yet implemented")
+                }
+                ArgumentPurpose::Runtime => {
+                    i += 1; // for now, we are doing nothing with runtime arguments passed to EDL functions
+                }
+            }
+        }
+    }
+
+    pub(crate) fn signature(
+        &self,
+        module: &mut JITModule,
+        layout: &StackFrameMapping,
+        reg: &MirTypeRegistry,
+        abi: &Arc<AbiConfig>,
+    ) -> ir::Signature {
+        todo!()
+    }
 }
 
 pub(super) struct Argument {

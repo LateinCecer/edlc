@@ -24,9 +24,7 @@ use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, H
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::edl_type::EdlTypeId;
 use edlc_core::prelude::hir_expr::HirExpression;
-use edlc_core::prelude::mir_expr::MirExpr;
 use edlc_core::prelude::mir_str::{FatPtr, MemPtr};
-use edlc_core::prelude::translation::IntoMir;
 use edlc_core::resolver::QualifierName;
 use cranelift_module::{Linkage, Module};
 use edlc_core::lexer::SrcPos;
@@ -105,37 +103,6 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
             }
         }
         true
-    }
-
-    /// Creates a new static EDL string and returns the respective fat pointer to the string source.
-    /// It should be noted that static strings are kept in memory until the program is terminated,
-    /// thus this function should really only be used if strings are created that are accessible
-    /// from the body of the program for the entirety of the programs' lifetime.
-    pub fn create_new_static_string(&mut self, val: &str, name: &str) -> Result<FatPtr, MirError<JIT<Runtime>>> {
-        let bytes = val.to_string().into_bytes();
-        let len = bytes.len();
-
-        self.backend.data_description.define(bytes.into_boxed_slice());
-
-        let data_id = self.backend.module
-            .declare_data(name, Linkage::Export, false, false)
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.module
-            .define_data(data_id, &self.backend.data_description)
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.module.finalize_definitions()
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.data_description.clear();
-
-        let (ptr, _) = self.backend.module
-            .get_finalized_data(data_id);
-        Ok(FatPtr { ptr: MemPtr(ptr as usize), size: len })
     }
 
     pub fn insert_extern<F: 'static>(
