@@ -23,7 +23,7 @@ use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeRegistry;
 use crate::layout::SSARepr;
-use crate::layout::stack_frame::{Argument, ArgumentOrdering, ArgumentPurpose, CallLayout, CallingConv};
+use crate::layout::stack_frame::{Argument, ArgumentOrdering, ArgumentPurpose, CallLayout, CallingConv, FunctionLayout, FunctionParameterPurpose};
 
 pub struct SysV {
     abi: Arc<AbiConfig>,
@@ -57,7 +57,7 @@ impl Error for SysVError {}
 impl CallingConv for SysV {
     type Error = SysVError;
 
-    fn make_layout<B: Backend>(
+    fn make_call_layout<B: Backend>(
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
@@ -120,6 +120,52 @@ impl CallingConv for SysV {
             stack_spill: None,
             return_value,
             runtime_ordinal,
+        })
+    }
+
+    fn make_function_layout(
+        &self,
+        cfg: &MirFlowGraph,
+        reg: &MirTypeRegistry,
+    ) -> Result<FunctionLayout, Self::Error> {
+        let mut args = ArgumentOrdering::new(6, 8);
+        let ret_ty = cfg.get_return_type();
+        let return_type = if reg.byte_size(ret_ty).unwrap() > self.abi.large_aggregate_bytes {
+            args.push(Argument {
+                rxx: 1,
+                xmm: 0,
+                purpose: FunctionParameterPurpose::ReturnBuffer,
+            });
+            None
+        } else {
+            Some(ret_ty)
+        };
+
+        for value in cfg.get_root_parameters() {
+            let ty = cfg.get_var_type(value);
+            let arg = if reg.byte_size(*ty).unwrap() > self.abi.large_aggregate_bytes {
+                let purpose = FunctionParameterPurpose::Struct(*value);
+                Argument {
+                    purpose,
+                    xmm: 0,
+                    rxx: 0,
+                }
+            } else {
+                let purpose = FunctionParameterPurpose::Normal(*value);
+                let (rxx, xmm) = SSARepr::sum_block_type_eightbytes(&reg.abi_layout(self.abi.clone(), *ty).unwrap());
+                Argument {
+                    purpose,
+                    xmm,
+                    rxx,
+                }
+            };
+            args.push(arg);
+        }
+
+        Ok(FunctionLayout {
+            args: args.finish(),
+            stack_spill: None,
+            return_type,
         })
     }
 

@@ -83,7 +83,8 @@ macro_rules! short_vec(
     });
 );
 pub(crate) use short_vec;
-use crate::layout::stack_frame::{CraneliftValues, StackFrameMapping};
+use crate::layout::stack_frame::{CallingConv, CraneliftValues, StackFrameMapping};
+use crate::prelude::stack_frame::FunctionLayout;
 
 impl<T> Deref for ShortVec<T> {
     type Target = [Option<T>];
@@ -396,6 +397,7 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
 
     pub layout: StackFrameMapping,
     pub ir_values: CraneliftValues,
+    pub function_layout: FunctionLayout,
 }
 
 pub struct CodeCtx<'a, 'jit> {
@@ -430,6 +432,7 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
     pub fn new(
         jit: &'jit mut JIT<Runtime>,
         mapping: StackFrameMapping,
+        function_layout: FunctionLayout,
     ) -> Self {
         let mut var_cache = VarCache::default();
         var_cache.push();
@@ -447,6 +450,7 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             function_bindings: &mut jit.function_bindings,
             panic_handle: &mut jit.panic_handle,
             layout: mapping,
+            function_layout,
             ir_values,
             _rt: PhantomData,
             abi: jit.abi.clone(),

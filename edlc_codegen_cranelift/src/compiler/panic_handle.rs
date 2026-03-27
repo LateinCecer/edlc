@@ -16,13 +16,13 @@
 
 use std::sync::OnceLock;
 use std::{mem, ptr, slice};
-
+use cranelift_codegen::ir;
 use edlc_core::prelude::{MirError, MirPhase};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, Linkage, Module, ModuleError};
-
+use edlc_core::prelude::mir_type::MirTypeId;
 use crate::codegen::{CodeCtx, FunctionTranslator};
 use crate::compiler::JIT;
 use crate::error::{JITError, JITErrorType};
@@ -404,7 +404,7 @@ impl<'jit, Runtime> FunctionTranslator<'jit, Runtime> {
     }
 
     /// Causes the EDL code to panic and unwind.
-    pub fn panic(&mut self, msg: &str, phase: &MirPhase) -> Result<(), MirError<JIT<Runtime>>> {
+    pub fn panic(&mut self, msg: &str, phase: &MirPhase, return_type: MirTypeId) -> Result<(), MirError<JIT<Runtime>>> {
         let data = self.module.declare_data_in_func(
             self.panic_handle.location,
             self.builder.func
@@ -426,19 +426,12 @@ impl<'jit, Runtime> FunctionTranslator<'jit, Runtime> {
         self.store_stack_trace_entry(msg, ptr)?;
 
         // early return from the current function body with an empty value
-        let ret_ssa = SSARepr::abi_repr(self.current_effective_return_type, self.abi.clone(), &phase.types)?;
-        let zero = ret_ssa.zeros(&mut self.builder)?;
-        // self.builder
-        //     .ins()
-        //     .return_(&zero.into_vec());
-        let mut ctx = CodeCtx {
-            abi: self.abi.clone(),
-            builder: &mut self.builder,
-            module: &mut self.module,
-            phase,
-        };
-        let data = AggregateValue::from_comp_value(zero, &mut ctx)?;
-        self.build_return(data, phase)?;
+        let layout = phase.types.abi_layout(self.abi.clone(), return_type).unwrap();
+        let zeros = SSARepr::iter_eightbytes(&layout)
+            .map(|eightbyte| SSARepr::zero_value(eightbyte, &mut self.builder))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.builder.ins()
+            .return_(&zeros);
         Ok(())
     }
 

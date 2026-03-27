@@ -326,8 +326,8 @@ impl BlockCall {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwitchTarget {
-    match_value: MirValue,
-    block_call: BlockCall,
+    pub match_value: MirValue,
+    pub block_call: BlockCall,
 }
 
 impl SwitchTarget {
@@ -1784,6 +1784,25 @@ impl MirFlowGraph {
 
     fn incoming(&self, block: &MirBlockRef) -> &Vec<MirBlockRef> {
         &self.backlinks[block.0]
+    }
+
+    /// Gets the return type for the MIR flow graph.
+    /// If the return type does not match for all sealing statements in the CFG, this method will
+    /// panic!
+    pub fn get_return_type(&self) -> MirTypeId {
+        let mut out: Option<MirTypeId> = None;
+        for block in self.blocks.iter() {
+            let Seal::Return(val, _) = &block.seal else {
+                continue;
+            };
+            let ty = *self.get_var_type(val);
+            if let Some(out) = out.as_ref() {
+                assert_eq!(ty, *out);
+            } else {
+                out = Some(ty);
+            }
+        }
+        out.expect("no return statement in CFG")
     }
 
     /// All links for the block, incoming and outgoing.

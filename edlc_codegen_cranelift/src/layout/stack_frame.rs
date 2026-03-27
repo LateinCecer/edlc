@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::fmt::{Debug, Display};
 use crate::codegen::FunctionTranslator;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::JIT;
@@ -33,6 +34,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use cranelift_codegen::ir::stackslot::StackSize;
 use cranelift_jit::JITModule;
+use crate::layout::sysv::SysV;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Mapping {
@@ -77,7 +79,7 @@ impl StackFrameMapping {
                 continue;
             }
             let call = cfg.expressions.get_call(*value);
-            let call_layout = conv.make_layout(cfg, call, *var, reg, backend)?;
+            let call_layout = conv.make_call_layout(cfg, call, *var, reg, backend)?;
             stack_spill_size = usize::max(stack_spill_size, call_layout.spill_size());
             stack_spill_alignment = usize::max(stack_spill_alignment, call_layout.spill_alignment());
 
@@ -203,7 +205,7 @@ impl StackFrameMapping {
         }
     }
 
-    fn load_eightbyte(
+    pub fn load_eightbyte(
         &self,
         value: &MirValue,
         ir_values: &CraneliftValues,
@@ -251,7 +253,7 @@ impl StackFrameMapping {
         }
     }
 
-    fn store_eightbyte(
+    pub fn store_eightbyte(
         &self,
         value: &[ir::Value],
         target: &MirValue,
@@ -776,73 +778,98 @@ pub enum ArgumentPurpose {
     Runtime,
 }
 
-pub(super) struct FunctionLayout {
-    pub(super) args: Vec<Argument>,
-    pub(super) stack_spill: Option<StackSpill>,
-    pub(super) return_type: Option<MirTypeId>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionParameterPurpose {
+    Normal(MirValue),
+    Struct(MirValue),
+    ReturnBuffer,
+    Padding,
+    StackSpill,
+    Runtime,
+}
+
+pub(crate) struct FunctionLayout {
+    pub(crate) args: Vec<Argument<FunctionParameterPurpose>>,
+    pub(crate) stack_spill: Option<StackSpill>,
+    pub(crate) return_type: Option<MirTypeId>,
 }
 
 impl FunctionLayout {
-    pub(crate) fn map<Runtime>(
+    pub(crate) fn map(
         &self,
         entry_block: ir::Block,
-        builder: &mut FunctionTranslator<'_, Runtime>,
+        layout: &StackFrameMapping,
+        ir_values: &mut CraneliftValues,
+        builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
-    ) {
-        let params = builder.builder.block_params(entry_block)
+        abi: &Arc<AbiConfig>,
+    ) -> Option<ir::Value> {
+        let params = builder.block_params(entry_block)
             .iter()
             .cloned()
             .collect::<Vec<_>>();
 
+        let mut return_buf = None;
         let mut i = 0usize;
         for arg in self.args.iter() {
             match &arg.purpose {
-                ArgumentPurpose::Normal(value) => {
-                    let ty = *builder
-                        .layout
+                FunctionParameterPurpose::Normal(value) => {
+                    let ty = *layout
                         .get_ty(value)
                         .unwrap();
-                    let layout = reg.abi_layout(builder.abi.clone(), ty).unwrap();
-                    let (rxx, xmm) = SSARepr::sum_block_type_eightbytes(&layout);
+                    let ty_layout = reg.abi_layout(abi.clone(), ty).unwrap();
+                    let (rxx, xmm) = SSARepr::sum_block_type_eightbytes(&ty_layout);
                     let num_values = (rxx + xmm) as usize;
 
-                    builder.layout.store_eightbyte(
+                    layout.store_eightbyte(
                         &params[i..i + num_values],
                         value,
-                        &mut builder.ir_values,
-                        &mut builder.builder,
+                        ir_values,
+                        builder,
                         reg,
-                        &builder.abi,
+                        abi,
                     );
                     i += num_values;
                 }
-                ArgumentPurpose::Struct(value) => {
+                FunctionParameterPurpose::Struct(value) => {
                     let ptr_value = params[i];
                     i += 1;
-                    builder.layout.load_raw_ptr(
+                    layout.load_raw_ptr(
                         ptr_value,
                         0,
                         value,
-                        &mut builder.ir_values,
-                        &mut builder.builder,
+                        ir_values,
+                        builder,
                         reg,
-                        &builder.abi,
+                        abi,
                     );
                 }
-                ArgumentPurpose::ReturnBuffer(_value) => {
-                    i += 1; // don't add to block parameters
-                }
-                ArgumentPurpose::Padding => {
+                FunctionParameterPurpose::ReturnBuffer => {
+                    assert!(return_buf.is_none());
+                    return_buf = Some(params[i]);
                     i += 1;
                 }
-                ArgumentPurpose::StackSpill => {
+                FunctionParameterPurpose::Padding => {
+                    i += 1;
+                }
+                FunctionParameterPurpose::StackSpill => {
                     unimplemented!("manual stack spill mapping not yet implemented")
                 }
-                ArgumentPurpose::Runtime => {
+                FunctionParameterPurpose::Runtime => {
                     i += 1; // for now, we are doing nothing with runtime arguments passed to EDL functions
                 }
             }
         }
+        assert_eq!(i, params.len());
+        return_buf
+    }
+
+    pub fn return_via_buffer(&self) -> bool {
+        self.args
+            .iter()
+            .any(|arg| {
+                matches!(arg.purpose, FunctionParameterPurpose::ReturnBuffer)
+            })
     }
 
     pub(crate) fn signature(
@@ -852,14 +879,69 @@ impl FunctionLayout {
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
     ) -> ir::Signature {
-        todo!()
+        let mut sig = module.make_signature();
+        let mut eightbytes: Vec<ir::Type> = Vec::new();
+
+        for arg in self.args.iter() {
+            match &arg.purpose {
+                FunctionParameterPurpose::Normal(val) => {
+                    let ty = layout.get_ty(val).unwrap();
+                    let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
+                    for ty in SSARepr::iter_eightbytes(&layout) {
+                        eightbytes.push(ty);
+                        sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal));
+                    }
+                }
+                FunctionParameterPurpose::Struct(val) => {
+                    let ty = layout.get_ty(val).unwrap();
+                    let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
+                    let size = layout.byte_size() as u32;
+                    let (ir_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
+                    eightbytes.push(ir_ty);
+                    sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::StructArgument(size)));
+                }
+                FunctionParameterPurpose::ReturnBuffer => {
+                    let (ptr_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
+                    eightbytes.push(ptr_ty);
+                    sig.params.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::StructReturn));
+                }
+                FunctionParameterPurpose::Padding => {
+                    for _ in 0..arg.rxx {
+                        let (ir_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
+                        eightbytes.push(ir_ty);
+                        sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::Normal));
+                    }
+                    for _ in 0..arg.xmm {
+                        let (ir_ty, _) = SSARepr::ftype_for_alignment(abi.pointer_width);
+                        eightbytes.push(ir_ty);
+                        sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::Normal));
+                    }
+                }
+                FunctionParameterPurpose::StackSpill => (),
+                FunctionParameterPurpose::Runtime => {
+                    let (ptr_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
+                    eightbytes.push(ptr_ty);
+                    sig.params.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::Normal));
+                }
+            }
+        }
+
+        assert_eq!(eightbytes.len(), sig.params.len());
+
+        if !self.return_via_buffer() {
+            if let Some(val) = self.return_type.as_ref() {
+                let layout = reg.abi_layout(abi.clone(), *val).unwrap();
+                SSARepr::iter_eightbytes(&layout).for_each(|ty| sig.returns.push(ir::AbiParam::new(ty)));
+            }
+        }
+        sig
     }
 }
 
-pub(super) struct Argument {
+pub(super) struct Argument<P> {
     pub(super) rxx: u32,
     pub(super) xmm: u32,
-    pub(super) purpose: ArgumentPurpose,
+    pub(super) purpose: P,
 }
 
 pub(super) struct StackSpill {
@@ -869,7 +951,7 @@ pub(super) struct StackSpill {
 }
 
 pub struct CallLayout {
-    pub args: Vec<Argument>,
+    pub args: Vec<Argument<ArgumentPurpose>>,
     pub stack_spill: Option<StackSpill>,
     pub runtime_ordinal: Option<u16>,
     /// Only populated if we return by value
@@ -991,7 +1073,7 @@ impl CallLayout {
                     let layout = phase.types.abi_layout(backend.abi.clone(), *ty).unwrap();
                     for ty in SSARepr::iter_eightbytes(&layout) {
                         eightbytes.push(ty);
-                        sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal))
+                        sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal));
                     }
                     backend.layout.load_eightbyte(
                         val,
@@ -1010,7 +1092,7 @@ impl CallLayout {
                     let (ir_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
                     eightbytes.push(ir_ty);
                     sig.params.push(ir::AbiParam::special(
-                        ir_ty, ir::ArgumentPurpose::StructArgument(size), ));
+                        ir_ty, ir::ArgumentPurpose::StructArgument(size)));
                     let ptr_value = backend.layout.get_ptr(
                         val, &mut backend.ir_values, &mut backend.builder, &phase.types, &backend.abi);
                     param_values.push(ptr_value);
@@ -1151,11 +1233,16 @@ impl CallSignature {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos", target_os = "freebsd", target_os = "openbsd")))]
+pub fn native_calling_conv() -> impl CallingConv<Error: Display + Debug> {
+    SysV::local()
+}
+
 pub trait CallingConv {
     type Error;
 
     /// Generates the call layout for a specific call, using the rules of this calling convention.
-    fn make_layout<B: Backend>(
+    fn make_call_layout<B: Backend>(
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
@@ -1163,6 +1250,12 @@ pub trait CallingConv {
         reg: &MirTypeRegistry,
         backend: &B,
     ) -> Result<CallLayout, Self::Error>;
+
+    fn make_function_layout(
+        &self,
+        cfg: &MirFlowGraph,
+        reg: &MirTypeRegistry,
+    ) -> Result<FunctionLayout, Self::Error>;
 
     /// Returns the supported architecture triplet for this calling convention.
     fn arch(&self) -> &'static str;
@@ -1173,18 +1266,18 @@ pub trait CallingConv {
     fn is_native(&self) -> bool;
 }
 
-pub(super) struct ArgumentOrdering {
+pub(super) struct ArgumentOrdering<P> {
     rxx_max: u32,
     xmm_max: u32,
     spill_rxx: bool,
     spill_xmm: bool,
     rxx: u32,
     xmm: u32,
-    reg_parameters: Vec<Argument>,
-    spill_parameters: Vec<Argument>,
+    reg_parameters: Vec<Argument<P>>,
+    spill_parameters: Vec<Argument<P>>,
 }
 
-impl ArgumentOrdering {
+impl<P> ArgumentOrdering<P> {
     pub(super) fn new(rxx_max: u32, xmm_max: u32) -> Self {
         ArgumentOrdering {
             rxx_max,
@@ -1198,7 +1291,7 @@ impl ArgumentOrdering {
         }
     }
 
-    pub(super) fn push(&mut self, arg: Argument) {
+    pub(super) fn push(&mut self, arg: Argument<P>) {
         let mut spill = false;
         if arg.rxx != 0 && arg.rxx + self.rxx > self.rxx_max {
             spill = true;
@@ -1218,14 +1311,15 @@ impl ArgumentOrdering {
         }
     }
 
-    pub(super) fn finish(mut self) -> Vec<Argument> {
+    pub(super) fn finish(mut self) -> Vec<Argument<P>>
+    where P: PaddingPurpose {
         if self.spill_rxx && self.rxx < self.rxx_max {
             let diff = self.rxx_max - self.rxx;
             assert_eq!(diff, 1);
             self.reg_parameters.push(Argument {
                 rxx: 1,
                 xmm: 0,
-                purpose: ArgumentPurpose::Padding,
+                purpose: P::padding(),
             });
         }
         if self.spill_xmm && self.xmm < self.xmm_max {
@@ -1234,10 +1328,27 @@ impl ArgumentOrdering {
             self.reg_parameters.push(Argument {
                 rxx: 0,
                 xmm: 1,
-                purpose: ArgumentPurpose::Padding,
+                purpose: P::padding(),
             });
         }
         self.reg_parameters.append(&mut self.spill_parameters);
         self.reg_parameters
     }
 }
+
+trait PaddingPurpose {
+    fn padding() -> Self;
+}
+
+impl PaddingPurpose for ArgumentPurpose {
+    fn padding() -> Self {
+        Self::Padding
+    }
+}
+
+impl PaddingPurpose for FunctionParameterPurpose {
+    fn padding() -> Self {
+        Self::Padding
+    }
+}
+

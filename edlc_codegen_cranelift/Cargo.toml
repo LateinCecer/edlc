@@ -15,11 +15,11 @@ edlc_core = { path="../edlc_core", version="0.1.1" }
 edlc_layout = { path="../edlc_layout", version="0.1.1" }
 
 log = "0.4.22"
-cranelift = { version="0.123.0" }
-cranelift-codegen = { version="0.123.0" }
-cranelift-jit = { version= "0.123.0", features = ["memmap2"] }
-cranelift-module = { version="0.123.0" }
-cranelift-native = { version="0.123.0" }
+cranelift = { version="0.130.0" }
+cranelift-codegen = { version="0.130.0" }
+cranelift-jit = { version= "0.130.0", features = ["memmap2"] }
+cranelift-module = { version="0.130.0" }
+cranelift-native = { version="0.130.0" }
 anyhow = "1.0.99"
 
 
