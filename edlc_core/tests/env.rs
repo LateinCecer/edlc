@@ -277,7 +277,8 @@ impl TestCompiler {
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         let options = CompileOptions::default();
-        let stack_frame = compile_expression(&mut body, &mut vm, &mut self.compiler, &mut self.backend, &options)?;
+        let stack_frame = compile_expression(
+            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options)?;
 
         // print result
         // write MIR code to file for debugging
@@ -983,16 +984,39 @@ fn test_simple() -> Result<(), anyhow::Error> {
         *binding.get_intrinsic("print_str").unwrap()
     };
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+fn min(x: i32, y: i32) -> i32 {
+    if x == y {
+        ret 0;
+    }
+    y
+}
+
+comptime fn min_c(x: i32, y: i32) -> i32 {
+    if x == y {
+        ret 0;
+    }
+    ret y;
+}
+
+?comptime fn min_mc(x: i32, y: i32) -> i32 {
+    if x == y {
+        ret 0;
+    }
+    y
+}
+    "#))?;
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
-        let mut y = 0i32;
+        let mut y = min(2, 1);
         let mut z = 1i32;
         let mut x = y + z;
 
         loop {
-            if y == std::input() { break; }
+            if y == min_mc(13, std::input()) { break; }
             z *= 2;
-            y += 1;
+            y += comptime { min_c(0, 1) };
         }
         std::print("the number is ");
         std::print(z);

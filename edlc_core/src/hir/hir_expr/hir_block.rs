@@ -544,7 +544,9 @@ impl MakeGraph for HirBlock {
         graph.current_block = new_block;
         self.write_to_graph_plane(graph, target)?;
 
-        graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
+        if !graph.is_current_sealed() {
+            graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
+        }
         graph.current_block = merge_block;
         Ok(())
     }

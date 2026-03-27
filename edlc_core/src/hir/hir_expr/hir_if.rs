@@ -749,6 +749,14 @@ impl MakeGraph for HirIf {
 
         let mut early_exit = false;
         for (cond, block) in self.if_else_blocks.iter() {
+            let cond_ty = cond.mir_deref_type(graph)?;
+            let cond_value = graph.graph.create_temp_variable(cond_ty);
+            cond.write_to_graph(graph, cond_value)?;
+            if graph.is_current_sealed() {
+                early_exit = true;
+                break; // early exit in condition - stop traversing if-else chain
+            }
+
             let then_block = graph.graph
                 .create_block()
                 .with_parent(graph.current_block)
@@ -761,14 +769,6 @@ impl MakeGraph for HirIf {
                 .with_source(self.src.clone(), DebugSymbols { pos: block.pos.clone() }, block.scope)
                 .create_scope()
                 .build();
-
-            let cond_ty = cond.mir_deref_type(graph)?;
-            let cond_value = graph.graph.create_temp_variable(cond_ty);
-            cond.write_to_graph(graph, cond_value)?;
-            if graph.is_current_sealed() {
-                early_exit = true;
-                break; // early exit in condition - stop traversing if-else chain
-            }
 
             graph.graph.insert_conditional_jump(
                 graph.current_block, then_block, else_block, cond_value, DebugSymbols { pos: self.pos });

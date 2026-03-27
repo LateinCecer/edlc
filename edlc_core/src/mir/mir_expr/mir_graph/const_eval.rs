@@ -1802,6 +1802,9 @@ fn process_function(
     )?;
     body.body.check_scopes(&borrow_graph, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend)
+        .ok::<OptimizationError>()?;
+
     body.body.route_owner_data(
         &mut borrow_graph,
         &mut compiler.mir_phase.types,
@@ -2012,6 +2015,12 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     )?;
     body.check_scopes(&borrow_graph, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.validate_call_context(
+        &mut compiler.phase,
+        &mut compiler.mir_phase,
+        backend,
+    ).ok::<OptimizationError>()?;
+
     body.route_owner_data(
         &mut borrow_graph,
         &mut compiler.mir_phase.types,
@@ -2023,7 +2032,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
     let mut writer = AsciPrinter::new(&mut out);
-    writer.print(&body).unwrap();
+    writer.print(body).unwrap();
     out.flush().unwrap();
 
     // create stack frame
