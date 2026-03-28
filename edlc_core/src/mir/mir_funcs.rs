@@ -943,6 +943,8 @@ pub struct MirFnSignature {
     pub ret: MirTypeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
 }
 
 
@@ -954,6 +956,7 @@ pub struct MirFnParam {
     pub ty: MirTypeId,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub var_id: EdlVarId,
 }
 

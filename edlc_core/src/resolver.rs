@@ -1776,6 +1776,8 @@ mod test {
                     scope: *resolver.current_scope().unwrap(),
                     comptime: false,
                     comptime_only: false,
+                    async_: false,
+                    async_return: false,
                     ret: reg.empty(),
                     params: vec![],
                 },

@@ -32,6 +32,8 @@ pub struct EdlFnSignature {
     pub scope: ScopeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
     pub ret: EdlTypeInstance,
     pub params: Vec<EdlFnParam>,
 }
@@ -43,6 +45,8 @@ pub struct EdlPreSignature {
     pub scope: ScopeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
 }
 
 impl EdlFnSignature {
@@ -179,6 +183,7 @@ pub struct EdlFnParam {
     pub name: String,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub ty: EdlTypeInstance,
 }
 

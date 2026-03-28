@@ -60,6 +60,8 @@ pub struct HirFnSignature {
     pub annotations: Vec<String>,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
     pub src: ModuleSrc,
     pub doc: Option<ItemDoc>,
 }
@@ -71,6 +73,7 @@ pub struct HirFnParam {
     pub ty: EdlTypeInstance,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub info: Option<EdlVarId>,
 }
 
@@ -301,6 +304,7 @@ impl IntoEdl for HirFnParam {
             name: self.name.clone(),
             mutable: self.mutable,
             comptime: self.comptime,
+            async_: self.async_,
             ty: self.ty.clone(),
         })
     }
@@ -320,6 +324,7 @@ impl HirFnParam {
             var_id: self.info.clone().unwrap(),
             comptime: self.comptime,
             mutable: self.mutable,
+            async_: self.async_,
             name: self.name.clone(),
         })
     }
@@ -379,6 +384,8 @@ impl IntoEdl for HirFnSignature {
             scope: self.scope,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
             ret: self.ret.clone(),
             params,
         })
@@ -394,6 +401,8 @@ impl HirFnSignature {
             scope: self.scope,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
         })
     }
 }
@@ -499,6 +508,8 @@ impl HirFnSignature {
             ret,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
         })
     }
 }

@@ -28,6 +28,7 @@ pub struct HirTraitFnParam {
     pub ty: EdlExtendedType,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
 }
 
 pub struct HirTraitFnSignature {
@@ -40,6 +41,8 @@ pub struct HirTraitFnSignature {
     pub annotations: Vec<String>,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
     pub src: ModuleSrc,
     pub doc: Option<ItemDoc>,
 }

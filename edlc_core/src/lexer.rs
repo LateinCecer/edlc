@@ -50,6 +50,7 @@ const KEY_IN: &str = "in";
 const KEY_SELF_TYPE: &str = "Self";
 const KEY_SELF_PARAMETER: &str = "self";
 const KEY_SYNC: &str = "sync";
+const KEY_ASYNC: &str = "async";
 
 
 pub const CORE_BOOL: &str = "bool";
@@ -260,6 +261,7 @@ pub enum KeyWord {
     SelfType,
     SelfParameter,
     Sync,
+    Async,
 }
 
 impl Display for KeyWord {
@@ -293,6 +295,7 @@ impl Display for KeyWord {
             KeyWord::SelfType => write!(f, "{}", KEY_SELF_TYPE),
             KeyWord::SelfParameter => write!(f, "{}", KEY_SELF_PARAMETER),
             KeyWord::Sync => write!(f, "{}", KEY_SYNC),
+            KeyWord::Async => write!(f, "{}", KEY_ASYNC),
         }
     }
 }
@@ -1277,6 +1280,7 @@ impl<'a> Lexer<'a> {
             s if s == KEY_SELF_TYPE => Ok(Token::Key(KeyWord::SelfType).localize(pos, KEY_SELF_TYPE.len())),
             // s if s == KEY_SELF_PARAMETER => Ok(Token::Key(KeyWord::SelfParameter).localize(pos, KEY_SELF_PARAMETER.len())),   todo stabilize
             s if s == KEY_SYNC => Ok(Token::Key(KeyWord::Sync).localize(pos, KEY_SYNC.len())),
+            s if s == KEY_ASYNC => Ok(Token::Key(KeyWord::Async).localize(pos, KEY_ASYNC.len())),
             s => {
                 let len = s.len();
                 Ok(Token::Ident(s).localize(pos, len))

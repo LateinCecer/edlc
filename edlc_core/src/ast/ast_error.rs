@@ -17,7 +17,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use crate::ast::ast_expression::AstExpr;
-use crate::ast::ast_fn::AstFnModifier;
 use crate::ast::ast_type::{AstType, AstTypeName};
 use crate::ast::AstFmt;
 use crate::core::edl_error::EdlError;
@@ -50,7 +49,7 @@ pub enum AstTranslationError {
     ElicitType { pos: SrcPos, },
     ParseError { err: ParseError },
     UnreachableCode { pos: SrcPos, expl: String },
-    InvalidFunctionModifier { pos: SrcPos, m: AstFnModifier },
+    InvalidFunctionModifier { pos: SrcPos },
     CannotInitGeneric { pos: SrcPos, name: AstTypeName, },
     CannotInitFunction { pos: SrcPos, name: AstTypeName, },
     TypeNotInstantiable { pos: SrcPos, name: AstTypeName },
@@ -128,8 +127,8 @@ impl Display for AstTranslationError {
             Self::UnreachableCode { pos, expl } => {
                 write!(f, "Error at {pos}: Unreachable code: {expl}")
             }
-            Self::InvalidFunctionModifier { pos, m } => {
-                write!(f, "Error at {pos}: Invalid function modifier: {m:?}")
+            Self::InvalidFunctionModifier { pos } => {
+                write!(f, "Error at {pos}: Invalid function modifier")
             }
             AstTranslationError::CannotInitGeneric { pos, name } => {
                 write!(f, "Error at {pos}: cannot init generic type `{name:?}`")

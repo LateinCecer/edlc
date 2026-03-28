@@ -60,6 +60,7 @@ enum AstFnSelfParamModifier {
 pub enum AstFnModifier {
     CompTime(SrcPos),
     ForceCompTime(SrcPos),
+    Async(SrcPos),
     None,
 }
 
@@ -67,6 +68,7 @@ pub enum AstFnModifier {
 enum AstFnParamModifier {
     CompTime,
     Mutable,
+    Async,
     None,
 }
 
@@ -80,6 +82,7 @@ pub struct AstFnSignature {
     self_parameter: Option<AstSelfParameter>,
     params: Vec<AstFnParam>,
     ret: Option<AstType>,
+    ret_async: Option<SrcPos>,
     pub annotations: Vec<String>,
     env_id: Option<EdlEnvId>,
     modifiers: Vec<AstFnModifier>,
@@ -153,6 +156,10 @@ impl Parsable for AstFnParamModifier {
                 parser.next_token()?;
                 Ok(Self::CompTime)
             },
+            Ok(local!(Token::Key(KeyWord::Async))) => {
+                parser.next_token()?;
+                Ok(Self::Async)
+            },
             _ => Ok(Self::None),
         }
     }
@@ -170,6 +177,10 @@ impl Parsable for AstFnModifier {
             Ok(local!(Token::Key(KeyWord::Comptime))) => {
                 let pos = parser.next_token()?.pos;
                 Ok(Self::ForceCompTime(pos))
+            },
+            Ok(local!(Token::Key(KeyWord::Async))) => {
+                let pos = parser.next_token()?.pos;
+                Ok(Self::Async(pos))
             },
             _ => Ok(Self::None),
         }
@@ -340,11 +351,17 @@ impl AstFnSignature {
             }
         }
 
-        let ret = if let Ok(local!(Token::Punct(Punct::RightArrow))) = parser.peak() {
+        let (ret, ret_async) = if let Ok(local!(Token::Punct(Punct::RightArrow))) = parser.peak() {
             parser.next_token()?;
-            Some(AstType::parse(parser)?)
+            let ret_async = if let Ok(local!(Token::Key(KeyWord::Async))) = parser.peak() {
+                let tok = parser.next_token()?;
+                Some(tok.pos)
+            } else {
+                None
+            };
+            (Some(AstType::parse(parser)?), ret_async)
         } else {
-            None
+            (None, None)
         };
 
         parser.env.pop();
@@ -356,6 +373,7 @@ impl AstFnSignature {
             env,
             params,
             ret,
+            ret_async,
             annotations: Vec::new(),
             env_id: None,
             modifiers: fn_modifiers,
@@ -369,7 +387,7 @@ impl IntoHir for AstFnParam {
     type Output = HirFnParam;
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
-        let (mutable, comptime) = self.flatten_modifiers();
+        let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
         let edl_type = hir_type.edl_repr(parser)?;
 
@@ -386,6 +404,7 @@ impl IntoHir for AstFnParam {
             ty,
             mutable,
             comptime,
+            async_: asy,
             info: None,
         })
     }
@@ -393,7 +412,7 @@ impl IntoHir for AstFnParam {
 
 impl AstFnParam {
     fn trait_hir_repr(self, parser: &mut HirPhase) -> Result<HirTraitFnParam, AstTranslationError> {
-        let (mutable, comptime) = self.flatten_modifiers();
+        let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
         let ty = hir_type.edl_extended_repr(parser)?;
 
@@ -410,23 +429,26 @@ impl AstFnParam {
             ty,
             mutable,
             comptime,
+            async_: asy,
         })
     }
 }
 
 impl AstFnParam {
-    fn flatten_modifiers(&self) -> (bool, bool) {
+    fn flatten_modifiers(&self) -> (bool, bool, bool) {
         // flatten modifiers
         let mut mutable = false;
         let mut comptime = false;
+        let mut asy = false;
         for m in self.modifiers.iter() {
             match m {
                 AstFnParamModifier::Mutable => mutable = true,
                 AstFnParamModifier::CompTime => comptime = true,
+                AstFnParamModifier::Async => asy = true,
                 AstFnParamModifier::None => (),
             }
         }
-        (mutable, comptime)
+        (mutable, comptime, asy)
     }
 }
 
@@ -456,13 +478,15 @@ impl AstFnSignature {
         parser.res.revert_to_scope(&self.scope);
         parser.res.pop();
         // register function
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         let sig = EdlPreSignature {
             name: self.name.clone(),
             env: env_id,
             scope: self.scope,
             comptime,
-            comptime_only
+            comptime_only,
+            async_,
+            async_return: self.ret_async.is_some(),
         };
         parser.res.push_top_level_item(
             self.name.clone(),
@@ -480,12 +504,46 @@ impl AstFnSignature {
     }
 
     /// Flattens the modifiers of the function into a tuple of booleans.
-    fn flatten_modifiers(&self, parser: &mut HirPhase) -> Result<(bool, bool), AstTranslationError> {
+    fn flatten_modifiers(&self, parser: &mut HirPhase) -> Result<(bool, bool, bool), AstTranslationError> {
         let mut comptime_pos = None;
         let mut comptime = false;
         let mut comptime_only = false;
+        let mut async_pos = None;
+        let mut async_ = false;
         for m in self.modifiers.iter() {
             match m {
+                AstFnModifier::Async(pos) => {
+                    if let Some(async_pos) = async_pos.as_ref() {
+                        // modifier is already set, which is wierd
+                        parser.report_error(
+                            issue::format_type_args!(
+                                format_args!("Detected function qualifier `async`, but the \
+                                function was already declared as `async`")
+                            ),
+                            &[
+                                SrcError::Double {
+                                    first: SrcRange::from(*async_pos),
+                                    second: SrcRange::from(*pos),
+                                    src: self.src.clone(),
+                                    error_first: issue::format_type_args!(
+                                        format_args!("function was first declared as `async` \
+                                        here")
+                                    ),
+                                    error_second: issue::format_type_args!(
+                                        format_args!("and then later redeclared as `async` here")
+                                    )
+                                }
+                            ],
+                            Some(issue::format_type_args!(
+                                format_args!("To fix this, just remove the additional, unnecessary \
+                                `async` qualifier")
+                            ))
+                        );
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
+                    }
+                    async_ = true;
+                    async_pos = Some(*pos);
+                },
                 AstFnModifier::CompTime(pos) => {
                     if let Some(comptime_pos) = comptime_pos.as_ref() {
                         // modifier is already set, which is wierd
@@ -510,10 +568,10 @@ impl AstFnSignature {
                             ],
                             Some(issue::format_type_args!(
                                 format_args!("To fix this, just remove the additional, unnecessary \
-                                `comptime` qualifier")
+                                `?comptime` qualifier")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, m: m.clone() });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
                     }
                     comptime_pos = Some(*pos);
                     comptime = true;
@@ -548,14 +606,39 @@ impl AstFnSignature {
                                 are unnecessary and make the code less readable.")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, m: m.clone() });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
                     }
+                    comptime_pos = Some(*pos);
                     comptime_only = true
                 },
                 AstFnModifier::None => (),
             }
         }
-        Ok((comptime, comptime_only))
+
+        if (comptime || comptime_only) && async_ {
+            parser.report_error(
+                issue::format_type_args!(
+                    format_args!("comptime function cannot be `async`\n")
+                ),
+                &[
+                    SrcError::Double {
+                        first: SrcRange::from(comptime_pos.unwrap()),
+                        second: SrcRange::from(async_pos.unwrap()),
+                        src: self.src.clone(),
+                        error_first: issue::format_type_args!(
+                            format_args!("function was declared as `comptime` here")
+                        ),
+                        error_second: issue::format_type_args!(
+                            format_args!("and declared as `async` here")
+                        )
+                    }
+                ],
+                None,
+            );
+            return Err(AstTranslationError::InvalidFunctionModifier { pos: comptime_pos.unwrap() });
+        }
+
+        Ok((comptime, comptime_only, async_))
     }
 }
 
@@ -563,7 +646,7 @@ impl IntoHir for AstFnSignature {
     type Output = HirFnSignature;
 
     fn hir_repr(mut self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         self.register_edl_env(parser)?;
         let Some(env_id) = self.env_id else {
             panic!();
@@ -604,6 +687,8 @@ impl IntoHir for AstFnSignature {
             annotations: self.annotations,
             comptime,
             comptime_only,
+            async_,
+            async_return: self.ret_async.is_some(),
             src: self.src,
             doc: self.doc,
         })
@@ -612,7 +697,7 @@ impl IntoHir for AstFnSignature {
 
 impl AstFnSignature {
     pub fn trait_signature(mut self, parser: &mut HirPhase) -> Result<HirTraitFnSignature, AstTranslationError> {
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         self.register_edl_env(parser)?;
         let Some(env_id) = self.env_id else {
             panic!();
@@ -652,6 +737,8 @@ impl AstFnSignature {
             annotations: self.annotations,
             comptime,
             comptime_only,
+            async_,
+            async_return: false,
             src: self.src,
             doc: self.doc,
         })
