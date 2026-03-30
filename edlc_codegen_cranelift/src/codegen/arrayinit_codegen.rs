@@ -17,7 +17,7 @@
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::mir_type::MirTypeLayout;
 use edlc_core::prelude::{MirError, MirPhase};
 
@@ -27,6 +27,7 @@ impl<Runtime> Compilable<Runtime> for MirArrayInit {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let alignment = phase.types.byte_alignment(self.ty).unwrap();
         let MirTypeLayout::Array(layout) = phase.types.get_layout(self.ty).unwrap() else {

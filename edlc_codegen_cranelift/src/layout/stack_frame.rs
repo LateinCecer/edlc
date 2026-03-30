@@ -122,6 +122,11 @@ impl StackFrameMapping {
         })
     }
 
+    pub fn call_layout(&self, mir_expr_id: &MirExprId) -> &CallLayout {
+        assert_eq!(mir_expr_id.ty, MirExprVariant::Call);
+        &self.call_layouts[mir_expr_id.ordinal()]
+    }
+
     pub fn create_ir_values(
         &self,
         builder: &mut FunctionBuilder,
@@ -205,7 +210,7 @@ impl StackFrameMapping {
         }
     }
 
-    pub fn load_eightbyte(
+    pub fn load_eightbytes(
         &self,
         value: &MirValue,
         ir_values: &CraneliftValues,
@@ -253,7 +258,7 @@ impl StackFrameMapping {
         }
     }
 
-    pub fn store_eightbyte(
+    pub fn store_eightbytes(
         &self,
         value: &[ir::Value],
         target: &MirValue,
@@ -821,7 +826,7 @@ impl FunctionLayout {
                     let (rxx, xmm) = SSARepr::sum_block_type_eightbytes(&ty_layout);
                     let num_values = (rxx + xmm) as usize;
 
-                    layout.store_eightbyte(
+                    layout.store_eightbytes(
                         &params[i..i + num_values],
                         value,
                         ir_values,
@@ -875,7 +880,7 @@ impl FunctionLayout {
     pub(crate) fn signature(
         &self,
         module: &mut JITModule,
-        layout: &StackFrameMapping,
+        cfg: &MirFlowGraph,
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
     ) -> ir::Signature {
@@ -885,7 +890,7 @@ impl FunctionLayout {
         for arg in self.args.iter() {
             match &arg.purpose {
                 FunctionParameterPurpose::Normal(val) => {
-                    let ty = layout.get_ty(val).unwrap();
+                    let ty = cfg.get_var_type(val);
                     let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
                     for ty in SSARepr::iter_eightbytes(&layout) {
                         eightbytes.push(ty);
@@ -893,7 +898,7 @@ impl FunctionLayout {
                     }
                 }
                 FunctionParameterPurpose::Struct(val) => {
-                    let ty = layout.get_ty(val).unwrap();
+                    let ty = cfg.get_var_type(val);
                     let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
                     let size = layout.byte_size() as u32;
                     let (ir_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
@@ -938,18 +943,21 @@ impl FunctionLayout {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct Argument<P> {
     pub(super) rxx: u32,
     pub(super) xmm: u32,
     pub(super) purpose: P,
 }
 
+#[derive(Clone, Debug)]
 pub(super) struct StackSpill {
     pub(super) members: Vec<(MirValue, Range<usize>)>,
     pub(super) size: usize,
     pub(super) alignment: usize,
 }
 
+#[derive(Clone, Debug)]
 pub struct CallLayout {
     pub args: Vec<Argument<ArgumentPurpose>>,
     pub stack_spill: Option<StackSpill>,
@@ -1075,7 +1083,7 @@ impl CallLayout {
                         eightbytes.push(ty);
                         sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal));
                     }
-                    backend.layout.load_eightbyte(
+                    backend.layout.load_eightbytes(
                         val,
                         &backend.ir_values,
                         &mut backend.builder,
@@ -1193,7 +1201,7 @@ pub(crate) struct CallSignature {
 }
 
 impl CallSignature {
-    fn generate<Runtime>(
+    pub(crate) fn generate<Runtime>(
         self,
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &mut MirPhase,
@@ -1220,7 +1228,7 @@ impl CallSignature {
                 .iter()
                 .cloned()
                 .collect::<Vec<_>>();
-            backend.layout.store_eightbyte(
+            backend.layout.store_eightbytes(
                 &val,
                 &target,
                 &mut backend.ir_values,

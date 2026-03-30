@@ -17,7 +17,7 @@
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirCall {
@@ -26,11 +26,12 @@ impl<Runtime> Compilable<Runtime> for MirCall {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         // build the function call using the code generator defined in the function registry
         backend.func_reg.clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase, self, target)?;
+            .generate_call_code(self.func, backend, phase, self, target, expr_id)?;
         Ok(())
     }
 }

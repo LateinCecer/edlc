@@ -23,25 +23,25 @@ use crate::compiler::JIT;
 impl<Runtime> JIT<Runtime> {
     pub fn load_bool_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
         impl_binop!(self, compiler,
-            bool::and from "core::And" -> band;
-            bool::or from "core::Or" -> bor;
-            bool::xor from "core::Xor" -> bxor;
+            bool::and from "core::And" -> band; |lhs, rhs| { (lhs && rhs) }
+            bool::or from "core::Or" -> bor; |lhs, rhs| { (lhs || rhs) }
+            bool::xor from "core::Xor" -> bxor; |lhs, rhs| { (lhs ^ rhs) }
 
-            bool::and_assign from "core::AndAssign" -> band;
-            bool::or_assign from "core::OrAssign" -> bor;
-            bool::xor_assign from "core::XorAssign" -> bxor;
+            bool::and_assign from "core::AndAssign" -> band; |lhs, rhs| { (lhs && rhs) }
+            bool::or_assign from "core::OrAssign" -> bor; |lhs, rhs| { (lhs || rhs) }
+            bool::xor_assign from "core::XorAssign" -> bxor; |lhs, rhs| { (lhs ^ rhs) }
         );
 
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<bool, bool> for bool {
                 fn partial_eq(builder, lhs: bool, rhs: bool) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
             impl ["core::Eq"]<bool, bool> for bool {
                 fn eq(builder, lhs: bool, rhs: bool) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
         );
 
@@ -51,7 +51,7 @@ impl<Runtime> JIT<Runtime> {
                     { 
                         builder.icmp_imm(IntCC::Equal, val, 0)
                     }
-                }
+                }; { (!val) }
             }
         );
 

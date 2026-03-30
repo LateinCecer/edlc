@@ -84,11 +84,11 @@ impl MirCall {
         reg: &MirTypeRegistry,
         backend: &impl Backend,
     ) {
-        let ret_value = if let Some(func) = backend.intrinsic_binding(self.func) {
+        let ret_value = if backend.is_call_intrinsic(&self.func) {
             let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
             let mut params = vec![];
-            if let Some(runtime) = func.runtime_ordinal.as_ref() {
-                let runtime_ptr = backend.runtime(*runtime).unwrap();
+            if let Some(runtime) = backend.intrinsic_runtime(&self.func) {
+                let runtime_ptr = backend.runtime(runtime).unwrap();
                 let runtime_ptr = AmorphusDataCopy::new(reg.usize(), reg, runtime_ptr.as_ptr()).unwrap();
                 params.push(runtime_ptr.as_data());
                 params.extend(self.args.iter()
@@ -96,7 +96,7 @@ impl MirCall {
                         let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
                         vm.get_data(par_range.clone(), par_ty)
                     }));
-                func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
             } else {
                 let params = self.args.iter()
                     .map(|par| {
@@ -104,7 +104,7 @@ impl MirCall {
                         vm.get_data(par_range.clone(), par_ty)
                     })
                     .collect::<Vec<_>>();
-                func.run(params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
             }
             ret_value
         } else {

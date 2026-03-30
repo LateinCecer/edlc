@@ -17,7 +17,7 @@
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_data::MirData;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirData {
@@ -26,6 +26,7 @@ impl<Runtime> Compilable<Runtime> for MirData {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         backend.layout.store_data(
             &self.data(),

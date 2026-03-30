@@ -21,7 +21,7 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_module::Module;
 use edlc_core::prelude::edl_value::EdlLiteralValue;
 use edlc_core::prelude::mir_expr::mir_constant::MirConstant;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirConstant {
@@ -30,6 +30,7 @@ impl<Runtime> Compilable<Runtime> for MirConstant {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let output_type = SSARepr::pod(&self.ty, &phase.types).unwrap();
         let val = match &self.value {

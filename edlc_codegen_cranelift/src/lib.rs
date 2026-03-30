@@ -24,6 +24,7 @@ mod error;
 pub mod prelude;
 mod executor;
 pub mod layout;
+pub mod trap;
 
 #[cfg(test)]
 fn setup_logger() -> Result<(), fern::InitError> {

@@ -118,7 +118,7 @@ impl SystemV {
 
         // insert reference to runtime if the runtime is requested
         if let Some(runtime) = call.runtime {
-            let runtime_data = *backend.runtime_data.get(runtime.as_usize())
+            let runtime_data = *backend.runtime_data.get(runtime.oridnal())
                 .ok_or(MirError::BackendError(JITError {
                     ty: JITErrorType::InvalidRuntimeData(runtime)
                 }))?;

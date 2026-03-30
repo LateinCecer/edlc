@@ -20,7 +20,7 @@ use cranelift_codegen::ir;
 use cranelift_codegen::ir::InstBuilder;
 use edlc_core::lexer::SrcPos;
 use edlc_core::prelude::mir_expr::mir_as::MirAs;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::cmp::Ordering;
@@ -31,6 +31,7 @@ impl<Runtime> Compilable<Runtime> for MirAs {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let reg = &phase.types;
         let input = *backend.layout.get_ty(&self.val).unwrap();

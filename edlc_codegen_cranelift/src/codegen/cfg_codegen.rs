@@ -25,7 +25,7 @@ impl Index<MirBlockRef> for BlockMapper {
     }
 }
 
-fn cfg_codegen<Runtime>(
+pub(crate) fn cfg_codegen<Runtime>(
     cfg: &MirFlowGraph,
     builder: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
@@ -130,6 +130,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::As => {
@@ -137,6 +138,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Call => {
@@ -144,6 +146,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Literal => {
@@ -151,6 +154,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Variable => {
@@ -158,6 +162,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Constant => {
@@ -165,6 +170,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Assign => {
@@ -172,6 +178,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Data => {
@@ -179,6 +186,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Init => {
@@ -186,6 +194,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Ref => {
@@ -193,6 +202,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::Deref => {
@@ -200,6 +210,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
                 MirExprVariant::DowncastRef => {
@@ -207,6 +218,7 @@ fn statement_codegen<Runtime>(
                         builder,
                         phase,
                         var,
+                        value,
                     )
                 }
             }
@@ -275,7 +287,7 @@ fn seal_codegen<Runtime>(
                     .return_(&[ptr]);
             } else {
                 let mut output = Vec::new();
-                builder.layout.load_eightbyte(
+                builder.layout.load_eightbytes(
                     value,
                     &mut builder.ir_values,
                     &mut builder.builder,
@@ -289,7 +301,7 @@ fn seal_codegen<Runtime>(
             }
         }
         Seal::Panic(_value, _) => {
-            builder.panic("", phase, mapping.eff_return_value)?;
+            builder.panic("")?;
         }
         Seal::Cond { cond, then_target, else_target, .. } => {
             let args_then = block_call_codegen(

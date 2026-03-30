@@ -27,7 +27,7 @@ use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{ExecutionError, MirFlowGraph, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirExprId, MirFlowGraph, MirValue, StackFrameLayout};
 pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
@@ -51,6 +51,10 @@ pub const INTR_DIV_USIZE: &str = "div_usize";
 pub struct MirFuncId(usize);
 
 impl MirFuncId {
+    pub fn ordinal(&self) -> usize {
+        self.0
+    }
+
     pub fn clean_print(&self) -> String {
         format!("{:x}", self.0)
     }
@@ -82,8 +86,6 @@ where B: Backend {
 
     impl_definitions: HashMap<EdlTypeId, usize>,
     impls: Vec<HirImpl>,
-
-    pub body_generators: Vec<MirFn>,
     func_id: FnId,
 
     /// The compiler needs some function implementations to work properly.
@@ -102,8 +104,6 @@ impl<B: Backend> Default for MirFuncRegistry<B> {
             generators: IndexMap::default(),
             definitions: HashMap::default(),
             hybrid_call_lookup: HashMap::default(),
-
-            body_generators: Vec::new(),
             func_id: FnId(0),
 
             impl_definitions: HashMap::default(),
@@ -535,6 +535,24 @@ impl<B: Backend> MirFuncRegistry<B> {
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
     }
 
+    /// Collects all functions that are ready for code generation.
+    /// The caller must make sure that each function is only generated once, if the codegen backend
+    /// does not support overwriting function definitions on the fly (hot-pluggable code via PIC).
+    pub fn collect_codegen<P: Fn(&MirFuncId) -> bool>(&self, predicate: P) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::Ready { body, .. } = &f.code_gen {
+                if predicate(body.mir_id.as_ref().unwrap()) {
+                    Some(body.as_ref().clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
     /// Collects all functions in the function registry that must be transformed during a MIR pass.
     /// This must, unfortunately, be done through explicit copies, since the transformation itself
     /// requires mutable access to the function registry itself (usually).
@@ -694,7 +712,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         types: &MirTypeRegistry,
         edl_types: &EdlTypeRegistry,
         name: &str,
-    ) -> Result<(), EdlError> {
+    ) -> Result<MirFuncId, EdlError> {
         let sig = edl_types.get_fn_signature(edl.func)?;
         assert_eq!(sig.comptime | sig.comptime_only, comptime,
                    "comptime specified in function signature must match \
@@ -711,7 +729,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         }
         let id = self.register_internal(edl, code_gen, types, edl_types, false)?;
         *self.compiler_intrinsic_functions.entry(name.to_string()).or_insert(id) = id;
-        Ok(())
+        Ok(id)
     }
 
     pub fn get_intrinsic(&self, name: &str) -> Option<&MirFuncId> {
@@ -744,6 +762,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         type_reg: &mut MirPhase,
         call: &MirCall,
         target: &MirValue,
+        expr_id: &MirExprId,
     ) -> Result<(), MirError<B>> {
         let code_gen = &mut self.generators.get_mut(id.0)
             .expect("Invalid MIR function id").code_gen;
@@ -753,7 +772,7 @@ impl<B: Backend> MirFuncRegistry<B> {
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
-                .code_gen(backend, type_reg, call, target),
+                .code_gen(backend, type_reg, call, target, expr_id),
         }
     }
 
@@ -822,14 +841,6 @@ impl<B: Backend> MirFuncRegistry<B> {
         let id = self.func_id;
         self.func_id.0 += 1;
         id
-    }
-
-    /// Returns a subset of mir functions for which instances have been requested during the last
-    /// codegen operations.
-    /// The set of MIR functions that is currently stored in this function registry will be returned
-    /// in full and its contents within the registry will be emptied.
-    pub fn get_body_generators(&self) -> &Vec<MirFn> {
-        &self.body_generators
     }
 }
 
@@ -1274,10 +1285,11 @@ pub trait FnCodeGen<B: Backend> {
     type Ret;
 
     fn gen_func(
-        self,
+        &self,
         backend: &mut B,
         phase: &mut MirPhase,
-        ip: usize
+        hir_phase: &HirPhase,
+        ip: usize,
     ) -> Result<Self::Ret, MirError<B>>;
 
     fn reserve_loc(

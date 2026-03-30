@@ -20,7 +20,7 @@ use crate::layout::SSARepr;
 use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_module::Module;
 use edlc_core::prelude::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::*;
 
 impl<Runtime> Compilable<Runtime> for MirLiteral {
@@ -29,6 +29,7 @@ impl<Runtime> Compilable<Runtime> for MirLiteral {
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let val = match self.value.clone() {
             MirLiteralValue::Char(val) => {

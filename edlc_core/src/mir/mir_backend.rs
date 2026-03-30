@@ -27,7 +27,8 @@ use crate::mir::{MirError, MirPhase};
 use crate::mir::mir_executor::FunctionBinding;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
-
+use crate::mir::mir_type::MirTypeRegistry;
+use crate::prelude::{AmorphusData, AmorphusDataMut, TypeError};
 
 pub enum WriteDest<Addr> {
     Tmp(&'static str),
@@ -45,10 +46,21 @@ pub trait Backend: Sized {
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>>;
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;
 
-    /// Returns a function binding for an intrinsic function based on a MIR function ID.
-    fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding>;
+    fn intrinsic_runtime(&self, func: &MirFuncId) -> Option<u16>;
+    fn call_intrinsic(
+        &self,
+        func: &MirFuncId,
+        params: &[AmorphusData<'_>],
+        ret_buffer: AmorphusDataMut<'_>,
+        reg: &MirTypeRegistry,
+    ) -> Result<(), TypeError>;
+    fn is_call_intrinsic(&self, func: &MirFuncId) -> bool;
+
     fn global_var_mut(&mut self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
     fn global_var(&self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
+
+    /// Allocate a chunk of static data.
+    fn alloc_static(&mut self, data: Box<[u8]>) -> std::ptr::NonNull<()>;
 
     /// A runtime can be passed to intrinsics when called.
     /// The runtime ordinal that is to be passed to the intrinsic must be marked to the function
@@ -57,22 +69,11 @@ pub trait Backend: Sized {
 }
 
 
-pub trait InstructionCount<B: Backend> {
-    /// Returns an approximation for the number of instructions emitted by an item during codegen.
-    /// This approximation should be conservative in the sense that it should never be **lower**
-    /// than the actual number of generated instructions.
-    /// However, since it is often hard to predict the exact number of instructions due to
-    /// optimizations, some padding should be applied when this method is used to allocate storage
-    /// for the instructions in memory.
-    fn count_instructions(&self, phase: &MirPhase, func_reg: &MirFuncRegistry<B>) -> Result<usize, MirError<B>>;
-}
-
-
 /// A codegen module can be used to generate code using a specified backend type.
 /// The code is usually emitted to the backend itself.
 /// From there, the backend can be used to either build an executable module, or interpret
 /// code directly.
-pub trait CodeGen<B>: InstructionCount<B>
+pub trait CodeGen<B>
 where B: Backend {
     fn code_gen(
         &self,
@@ -80,6 +81,7 @@ where B: Backend {
         type_reg: &mut MirPhase,
         call: &MirCall,
         target: &MirValue,
+        expr_id: &MirExprId,
     ) -> Result<(), MirError<B>>;
 }
 

@@ -261,6 +261,19 @@ enum TypeErrorRhs {
     MirType(MirTypeId),
 }
 
+impl FunctionBinding {
+    /// Returns a raw pointer to the internal function representation.
+    ///
+    /// # Safety
+    ///
+    /// As this method returns a raw pointer to the function, the caller must take care to provide
+    /// the correct types and FFI bindings to call the function.
+    /// Failure to do so *will* result in *UB*.
+    pub unsafe fn as_raw_ptr(&self) -> *const u8 {
+        self.func as *const _
+    }
+}
+
 macro_rules! impl_from_function(
     (fn($($P:ident : [$n:tt]),*) -> $R:ident) => {
         impl<$($P: 'static,)* $R: 'static> FromFunction<extern "C" fn($($P),*) -> $R> for FunctionBinding {

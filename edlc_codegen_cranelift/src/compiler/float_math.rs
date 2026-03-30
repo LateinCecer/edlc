@@ -26,32 +26,32 @@ use crate::jit_func;
 impl<Runtime> JIT<Runtime> {
     pub fn load_f32_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
         impl_binop!(self, compiler,
-            f32::add from "core::Add" -> fadd;
-            f32::sub from "core::Sub" -> fsub;
-            f32::mul from "core::Mul" -> fmul;
-            f32::div from "core::Div" -> fdiv;
+            f32::add from "core::Add" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f32::sub from "core::Sub" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f32::mul from "core::Mul" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f32::div from "core::Div" -> fdiv; |lhs, rhs| { (lhs / rhs) }
 
-            f32::add_assign from "core::AddAssign" -> fadd;
-            f32::sub_assign from "core::SubAssign" -> fsub;
-            f32::mul_assign from "core::MulAssign" -> fmul;
-            f32::div_assign from "core::DivAssign" -> fdiv;
+            f32::add_assign from "core::AddAssign" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f32::sub_assign from "core::SubAssign" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f32::mul_assign from "core::MulAssign" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f32::div_assign from "core::DivAssign" -> fdiv; |lhs, rhs| { (lhs / rhs) }
         );
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<f32, f32> for f32 {
                 fn partial_eq(builder, lhs: f32, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<f32, f32> for f32 {
                 fn lesser_than(builder, lhs: f32, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::LessThan, lhs, rhs) }
-                }
+                }; { (lhs < rhs) }
                 fn greater_than(builder, lhs: f32, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::GreaterThan, lhs, rhs) }
-                }
+                }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
@@ -59,7 +59,7 @@ impl<Runtime> JIT<Runtime> {
                 fn unary(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.fneg(val) }
-                }
+                }; { (-val) }
             }
         );
         impl_binop!(self, compiler,
@@ -67,76 +67,76 @@ impl<Runtime> JIT<Runtime> {
                 fn sqrt(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.sqrt(val) }
-                }
+                }; { (f32::sqrt(val)) }
             }
             impl f32 {
                 fn abs(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.fabs(val) }
-                }
+                }; { (f32::abs(val)) }
             }
             impl f32 {
                 fn ceil(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.ceil(val) }
-                }
+                }; { (f32::ceil(val)) }
             }
             impl f32 {
                 fn floor(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.floor(val) }
-                }
+                }; { (f32::floor(val)) }
             }
             impl f32 {
                 fn trunc(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.trunc(val) }
-                }
+                }; { (f32::trunc(val)) }
             }
             impl f32 {
                 fn nearest(builder, val: f32) -> f32 {
                     #[allow(unused_braces)]
                     { builder.nearest(val) }
-                }
+                }; { (f32::round(val)) }
             }
             impl f32 {
                 fn as_u32_bits(builder, val: f32) -> u32 {
                     { builder.bitcast(types::I32, MemFlags::new(), val) }
-                }
+                }; { (f32::to_bits(val)) }
             }
             impl f32 {
                 fn from_u32_bits(builder, val: u32) -> f32 {
                     { builder.bitcast(types::F32, MemFlags::new(), val) }
-                }
+                }; { (f32::from_bits(val)) }
             }
             impl f32 {
                 fn promote(builder, val: f32) -> f64 {
                     { builder.fpromote(types::F64, val) }
-                }
+                }; { (val as f64) }
             }
         );
         impl_binop!(self, compiler,
             impl f32 {
                 fn min(builder, lhs: f32, rhs: f32) -> f32 {
                     { builder.fmin(lhs, rhs) }
-                }
+                }; { (f32::min(lhs, rhs)) }
             }
             impl f32 {
                 fn max(builder, lhs: f32, rhs: f32) -> f32 {
                     { builder.fmax(lhs, rhs) }
-                }
+                }; { (f32::max(lhs, rhs)) }
             }
             impl f32 {
                 fn cpy_sign(builder, dst: f32, src: f32) -> f32 {
                     { builder.fcopysign(dst, src) }
-                }
+                }; { (f32::copysign(dst, src)) }
             }
         );
         impl_binop!(self, compiler,
             impl f32 {
                 fn fma(builder, lhs: f32, rhs: f32, add: f32) -> f32 {
                     { builder.fma(lhs, rhs, add) }
-                }
+                }; { (f32::mul_add(lhs, rhs, add)) }
             }
         );
         Ok(())
@@ -144,107 +144,107 @@ impl<Runtime> JIT<Runtime> {
 
     pub fn load_f64_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
         impl_binop!(self, compiler,
-            f64::add from "core::Add" -> fadd;
-            f64::sub from "core::Sub" -> fsub;
-            f64::mul from "core::Mul" -> fmul;
-            f64::div from "core::Div" -> fdiv;
+            f64::add from "core::Add" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f64::sub from "core::Sub" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f64::mul from "core::Mul" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f64::div from "core::Div" -> fdiv; |lhs, rhs| { (lhs / rhs) }
 
-            f64::add_assign from "core::AddAssign" -> fadd;
-            f64::sub_assign from "core::SubAssign" -> fsub;
-            f64::mul_assign from "core::MulAssign" -> fmul;
-            f64::div_assign from "core::DivAssign" -> fdiv;
+            f64::add_assign from "core::AddAssign" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f64::sub_assign from "core::SubAssign" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f64::mul_assign from "core::MulAssign" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f64::div_assign from "core::DivAssign" -> fdiv; |lhs, rhs| { (lhs / rhs) }
         );
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<f64, f64> for f64 {
                 fn partial_eq(builder, lhs: f64, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<f64, f64> for f64 {
                 fn lesser_than(builder, lhs: f64, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::LessThan, lhs, rhs) }
-                }
+                }; { (lhs < rhs) }
                 fn greater_than(builder, lhs: f64, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::GreaterThan, lhs, rhs) }
-                }
+                }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
             impl ["core::Unary"]<f64> for f64 {
                 fn unary(builder, val: f64) -> f64 {
                     { builder.fneg(val) }
-                }
+                }; { (-val) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
                 fn sqrt(builder, val: f64) -> f64 {
                     { builder.sqrt(val) }
-                }
+                }; { (f64::sqrt(val)) }
             }
             impl f64 {
                 fn abs(builder, val: f64) -> f64 {
                     { builder.fabs(val) }
-                }
+                }; { (f64::abs(val)) }
             }
             impl f64 {
                 fn ceil(builder, val: f64) -> f64 {
                     { builder.ceil(val) }
-                }
+                }; { (f64::ceil(val)) }
             }
             impl f64 {
                 fn floor(builder, val: f64) -> f64 {
                     { builder.floor(val) }
-                }
+                }; { (f64::floor(val)) }
             }
             impl f64 {
                 fn trunc(builder, val: f64) -> f64 {
                     { builder.trunc(val) }
-                }
+                }; { (f64::trunc(val)) }
             }
             impl f64 {
                 fn nearest(builder, val: f64) -> f64 {
                     { builder.nearest(val) }
-                }
+                }; { (f64::round(val)) }
             }
             impl f64 {
                 fn as_u64_bits(builder, val: f64) -> u64 {
                     { builder.bitcast(types::I64, MemFlags::new(), val) }
-                }
+                }; { (f64::as_bits(val)) }
             }
             impl f64 {
                 fn from_u64_bits(builder, val: u64) -> f64 {
                     { builder.bitcast(types::F64, MemFlags::new(), val) }
-                }
+                }; { (f64::from_bits(val)) }
             }
             impl f64 {
                 fn demote(builder, val: f64) -> f32 {
                     { builder.fdemote(types::F32, val) }
-                }
+                }; { (val as f32) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
                 fn min(builder, lhs: f64, rhs: f64) -> f64 {
                     { builder.fmin(lhs, rhs) }
-                }
+                }; { (f64::min(lhs, rhs)) }
             }
             impl f64 {
                 fn max(builder, lhs: f64, rhs: f64) -> f64 {
                     { builder.fmax(lhs, rhs) }
-                }
+                }; { (f64::max(lhs, rhs)) }
             }
             impl f64 {
                 fn cpy_sign(builder, dst: f64, src: f64) -> f64 {
                     { builder.fcopysign(dst, src) }
-                }
+                }; { (f64::copysign(dst, src)) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
                 fn fma(builder, lhs: f64, rhs: f64, add: f64) -> f64 {
                     { builder.fma(lhs, rhs, add) }
-                }
+                }; { (f64::mul_add(lhs, rhs, add)) }
             }
         );
         Ok(())

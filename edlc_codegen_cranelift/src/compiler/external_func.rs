@@ -20,13 +20,12 @@
 //! calling conventions, than SystemV.
 
 use crate::codegen::FunctionTranslator;
-use crate::compiler::calling_convention::{CallingConvention, SystemV};
 use crate::compiler::{RuntimeId, JIT};
-use edlc_core::prelude::mir_backend::{CodeGen, InstructionCount};
-use edlc_core::prelude::mir_funcs::MirFuncRegistry;
-use edlc_core::prelude::{MirError, MirPhase};
 use cranelift_module::Linkage;
-
+use edlc_core::prelude::mir_backend::CodeGen;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::{MirError, MirPhase};
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
 /// is passed to the callee from the global context.
@@ -63,23 +62,20 @@ impl JITExternCall {
     }
 }
 
-impl<Runtime> InstructionCount<JIT<Runtime>> for JITExternCall {
-    fn count_instructions(
-        &self,
-        _phase: &MirPhase,
-        _func_reg: &MirFuncRegistry<JIT<Runtime>>
-    ) -> Result<usize, MirError<JIT<Runtime>>> {
-        Ok(0)
-    }
-}
-
 impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
     fn code_gen(
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
-        phase: &mut MirPhase
+        phase: &mut MirPhase,
+        _call: &MirCall,
+        _target: &MirValue,
+        expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
-        SystemV.compile_call(backend, phase, self)
+        let call_layout = backend.layout.call_layout(expr_id).clone();
+        let sig = call_layout.compile(backend, phase).unwrap();
+        sig.generate(backend, phase, self)
+
+        // SystemV.compile_call(backend, phase, self)
 /*        let mut sig = backend.module.make_signature();
         let mut args = Vec::new();
         let ptr_type = backend.module.target_config().pointer_type();

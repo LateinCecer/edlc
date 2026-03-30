@@ -1,7 +1,7 @@
 use cranelift_codegen::ir::InstBuilder;
 use cranelift_module::Module;
 use edlc_core::prelude::mir_expr::mir_variable::MirGlobalVar;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
@@ -13,6 +13,7 @@ impl<Runtime> Compilable<Runtime> for MirGlobalVar {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let global = backend.global_vars.get(self.var.0).unwrap();
         let symbol = backend.module.declare_data_in_func(global.data_id, backend.builder.func);

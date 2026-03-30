@@ -17,7 +17,7 @@
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_assign::MirAssign;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 
@@ -27,6 +27,7 @@ impl<Runtime> Compilable<Runtime> for MirAssign {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         _target: &MirValue,
+        _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         backend.layout.write_ptr(
             &self.rhs,

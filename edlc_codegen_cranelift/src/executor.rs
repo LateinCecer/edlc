@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use edlc_core::inline_code;
 use edlc_core::parser::{InFile, Parsable};
-use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, HirContext, IntoHir, JitCompiler, MirError, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
+use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, FromFunction, FunctionBinding, HirContext, IntoHir, JitCompiler, MirError, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::edl_type::EdlTypeId;
 use edlc_core::prelude::hir_expr::HirExpression;
@@ -115,24 +115,25 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         name: &str,
     ) -> Result<(), CompilerError>
     where
-        JIT<Runtime>: InsertFunctionPtr<F> {
+        FunctionBinding: FromFunction<F> {
 
         assert!(Self::check_function_name(name),
             "External function name cannot contain whitespace characters");
         let instance = self.compiler.get_func_instance(fn_id, fn_params, associated_type)?;
 
         let symbol = self.intrinsic_symbol_name(name);
-        self.backend.insert_function(symbol.clone(), function);
-        self.backend.func_reg
+        let func_id = self.backend.func_reg
             .borrow_mut()
             .register_intrinsic(
                 instance,
-                JITCallGen::external(symbol, Linkage::Import),
+                JITExternCall::external(symbol.clone(), Linkage::Import),
                 const_expr,
                 &self.compiler.mir_phase.types,
                 &self.compiler.phase.types,
                 "",
             )?;
+        let binding = FunctionBinding::from_function(function);
+        self.backend.insert_function(symbol, &func_id, binding);
         Ok(())
     }
 
@@ -147,25 +148,27 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         runtime_id: Id,
     ) -> Result<(), CompilerError>
     where
-        JIT<Runtime>: InsertRuntimeFunctionPtr<F, Runtime>,
-        Id: Into<RuntimeId> {
+        FunctionBinding: FromFunction<F>,
+        Id: Into<RuntimeId> + Clone + Copy {
 
         assert!(Self::check_function_name(name),
                 "External function name cannot contain whitespace characters");
         let instance = self.compiler.get_func_instance(fn_id, fn_params, associated_type)?;
 
         let symbol = self.intrinsic_symbol_name(name);
-        self.backend.insert_runtime_function(symbol.clone(), function);
-        self.backend.func_reg
+        let func_id = self.backend.func_reg
             .borrow_mut()
             .register_intrinsic(
                 instance,
-                JITExternCall::external_with_runtime(symbol, runtime_id),
+                JITExternCall::external_with_runtime(symbol.clone(), runtime_id),
                 const_expr,
                 &self.compiler.mir_phase.types,
                 &self.compiler.phase.types,
                 "",
             )?;
+        let rt = runtime_id.into();
+        let binding = FunctionBinding::from_function_with_runtime(function, rt.oridnal());
+        self.backend.insert_function(symbol, &func_id, binding);
         Ok(())
     }
 

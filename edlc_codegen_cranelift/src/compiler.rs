@@ -32,15 +32,16 @@ use std::{any, mem, ptr, slice};
 use std::any::TypeId;
 use std::fmt::{Debug, Formatter};
 use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use edlc_core::prelude::mir_backend::{Backend};
-use edlc_core::prelude::{EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase};
+use edlc_core::prelude::{AmorphusData, AmorphusDataMut, EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase, TypeError};
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_expr::mir_data::MirData;
 use edlc_core::prelude::mir_funcs::{MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::mir_let::MirLet;
-use edlc_core::prelude::mir_type::{MirTypeId};
+use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use cranelift::prelude::*;
 use cranelift_codegen::ir::UserFuncName;
@@ -50,70 +51,39 @@ use log::{debug, info};
 use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue, ShortVec, CodeCtx, FunctionRetKind};
 use crate::layout::SSARepr;
 use crate::codegen::variable::{AggregateValue, PtrValue};
-use crate::compiler::code::{JITCode, OptCache};
+use crate::compiler::code::{JITCode};
 use crate::compiler::panic_handle::PanicHandle;
 use crate::error::{JITError, JITErrorType};
 use crate::prelude::RawPanicHandle;
 
 #[derive(Default)]
 struct NativeFunctionLookup {
-    funcs: HashMap<String, usize>,
+    funcs: HashMap<String, MirFuncId>,
+    function_bindings: IndexMap<FunctionBinding>,
 }
 
-pub trait InsertFunctionPtr<F: 'static> {
-    fn insert_function(&mut self, name: String, f: F);
+impl NativeFunctionLookup {
+    fn get_symbol(&self, name: &str) -> Option<&FunctionBinding> {
+        self.funcs.get(name)
+            .and_then(|idx| self.function_bindings.get(idx.ordinal()))
+    }
+
+    fn for_id(&self, id: &MirFuncId) -> Option<&FunctionBinding> {
+        self.function_bindings.get(id.ordinal())
+    }
+
+    fn insert(&mut self, symbol: String, id: &MirFuncId, binding: FunctionBinding) {
+        assert!(self.funcs.get(&symbol).is_none(), "symbol already registered");
+        assert!(self.function_bindings.get(id.ordinal()).is_none(), "function id already registered");
+        self.function_bindings.view_mut(id.ordinal()).set(binding);
+        self.funcs.insert(symbol, *id);
+    }
+
+    fn insert_anonymous(&mut self, id: &MirFuncId, binding: FunctionBinding) {
+        assert!(self.function_bindings.get(id.ordinal()).is_none(), "function id already registered");
+        self.function_bindings.view_mut(id.ordinal()).set(binding);
+    }
 }
-
-/// Does essentially the same thing as `InsertFunctionPtr`, with the exception that this
-/// implementation requests access to the executor runtime when the function is called.
-pub trait InsertRuntimeFunctionPtr<F: 'static, Runtime> {
-    fn insert_runtime_function(&mut self, name: String, f: F);
-}
-
-macro_rules! insert_function(
-    (InsertFunctionPtr $(
-        ($($A:ident),*);
-    )+) => ($(
-        impl<$($A: 'static,)* Ret: 'static> InsertFunctionPtr<extern "C" fn($($A),*) -> Ret> for NativeFunctionLookup {
-            fn insert_function(&mut self, name: String, f: extern "C" fn($($A),*) -> Ret) {
-                self.funcs.insert(name, f as *const u8 as usize);
-            }
-        }
-    )+);
-    (InsertRuntimeFunctionPtr $(
-        ($($A:ident),*);
-    )+) => ($(
-        impl<$($A: 'static,)* Ret: 'static, Runtime: 'static> InsertRuntimeFunctionPtr<extern "C" fn(&Option<RwLock<Runtime>> $(, $A)*) -> Ret, Runtime> for NativeFunctionLookup {
-            fn insert_runtime_function(&mut self, name: String, f: extern "C" fn(&Option<RwLock<Runtime>> $(, $A)*) -> Ret) {
-                self.funcs.insert(name, f as *const u8 as usize);
-            }
-        }
-    )+);
-);
-
-insert_function!(
-    InsertFunctionPtr
-    ();
-    (A);
-    (A, B);
-    (A, B, C);
-    (A, B, C, D);
-    (A, B, C, D, E);
-    (A, B, C, D, E, F);
-    (A, B, C, D, E, F, G);
-    (A, B, C, D, E, F, G, H);
-);
-insert_function!(
-    InsertRuntimeFunctionPtr
-    ();
-    (A);
-    (A, B);
-    (A, B, C);
-    (A, B, C, D);
-    (A, B, C, D, E);
-    (A, B, C, D, E, F);
-    (A, B, C, D, E, F, G);
-);
 
 #[derive(Clone, Debug)]
 pub struct GlobalVar {
@@ -171,7 +141,7 @@ impl GlobalVar {
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Ord, Eq, Hash)]
-pub struct RuntimeId(usize);
+pub struct RuntimeId(u16);
 
 impl Default for RuntimeId {
     fn default() -> Self {
@@ -179,14 +149,14 @@ impl Default for RuntimeId {
     }
 }
 
-impl From<usize> for RuntimeId {
-    fn from(value: usize) -> Self {
+impl From<u16> for RuntimeId {
+    fn from(value: u16) -> Self {
         RuntimeId(value)
     }
 }
 
 impl RuntimeId {
-    pub fn as_usize(self) -> usize {
+    pub fn oridnal(self) -> u16 {
         self.0
     }
 }
@@ -198,31 +168,12 @@ pub struct JIT<Runtime: 'static> {
     pub module: JITModule,
     native_functions: Arc<Mutex<NativeFunctionLookup>>,
     pub func_reg: Rc<RefCell<MirFuncRegistry<Self>>>,
-    pub global_vars: IndexMap<GlobalVar>,
-    pub runtime_data: IndexMap<DataId>,
-    pub function_bindings: IndexMap<FunctionBinding>,
+    pub(crate) global_vars: IndexMap<GlobalVar>,
+    pub(crate) runtime_data: IndexMap<DataId>,
     code: Rc<RefCell<JITCode>>,
     _rt: PhantomData<Runtime>,
     pub panic_handle: PanicHandle,
     pub abi: Arc<AbiConfig>,
-}
-
-impl<Runtime: 'static, F: 'static> InsertFunctionPtr<F> for JIT<Runtime>
-where NativeFunctionLookup: InsertFunctionPtr<F> {
-    fn insert_function(&mut self, name: String, f: F) {
-        self.native_functions.lock()
-            .unwrap()
-            .insert_function(name, f);
-    }
-}
-
-impl<Runtime: 'static, F: 'static> InsertRuntimeFunctionPtr<F, Runtime> for JIT<Runtime>
-where NativeFunctionLookup: InsertRuntimeFunctionPtr<F, Runtime> {
-    fn insert_runtime_function(&mut self, name: String, f: F) {
-        self.native_functions.lock()
-            .unwrap()
-            .insert_runtime_function(name, f)
-    }
 }
 
 impl<Runtime: 'static> Default for JIT<Runtime> {
@@ -244,7 +195,9 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
         builder.symbol_lookup_fn(Box::new(move |name| {
             debug!("Requesting external function with symbol `{name}`");
             let tmp = lookup_clone.lock().unwrap();
-            tmp.funcs.get(name).copied().map(|ptr| ptr as _)
+            // Safety: the compiler makes sure that intrinsic functions are only called with FFI
+            //         safe parameters.
+            tmp.get_symbol(name).map(|binding| unsafe { binding.as_raw_ptr() })
         }));
         let mem_provider = ArenaMemoryProvider::new_with_size(1 << 40)
             .unwrap();
@@ -272,7 +225,6 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
             global_vars: IndexMap::default(),
             code: Rc::new(RefCell::new(JITCode::default())),
             runtime_data: IndexMap::default(),
-            function_bindings: IndexMap::default(),
             _rt: PhantomData,
             panic_handle,
             abi: Arc::new(AbiConfig::local_system_v()),
@@ -484,7 +436,7 @@ impl<Runtime: 'static> Drop for JIT<Runtime> {
     /// live in the global memory of the JIT.
     fn drop(&mut self) {
         let ids: Vec<_> = self.runtime_data.iter()
-            .map(|(idx, _)| RuntimeId(idx))
+            .map(|(idx, _)| RuntimeId(idx as u16))
             .collect();
         for id in ids.into_iter() {
             // remove and drop
@@ -535,7 +487,7 @@ impl<Runtime: 'static> JIT<Runtime> {
                 ty: JITErrorType::ModuleErr(err)
             }))?;
         self.data_description.clear();
-        self.runtime_data.view_mut(id.0).set(data_id);
+        self.runtime_data.view_mut(id.0 as usize).set(data_id);
         Ok(())
     }
 
@@ -565,7 +517,7 @@ impl<Runtime: 'static> JIT<Runtime> {
         let ptr = ptr as *mut Option<RwLock<Runtime>>;
         let mut data: Option<RwLock<Runtime>> = None;
         ptr::swap(&mut data, ptr); // removes data from the global variables & moves it into the stack
-        self.runtime_data.view_mut(id.0).remove();
+        let _rt = self.runtime_data.view_mut(id.0 as usize).remove();
 
         let data = data.ok_or(MirError::BackendError(JITError {
             ty: JITErrorType::InvalidRuntimeData(id)
@@ -576,10 +528,20 @@ impl<Runtime: 'static> JIT<Runtime> {
         Ok(data)
     }
 
+    pub fn insert_function(&mut self, symbol: String, id: &MirFuncId, binding: FunctionBinding) {
+        let mut native_functions = self.native_functions.lock().unwrap();
+        native_functions.insert(symbol, id, binding);
+    }
+
+    pub fn insert_anonymous_function(&mut self, id: &MirFuncId, binding: FunctionBinding) {
+        let mut native_functions = self.native_functions.lock().unwrap();
+        native_functions.insert_anonymous(id, binding);
+    }
+
     /// Returns the data id for the specified runtime data.
     /// If the runtime data cannot be found, this
     pub fn get_runtime_data(&self, RuntimeId(id): RuntimeId) -> Result<DataId, MirError<JIT<Runtime>>> {
-        self.runtime_data.get(id)
+        self.runtime_data.get(id as usize)
             .ok_or(MirError::BackendError(JITError {
                 ty: JITErrorType::InvalidRuntimeData(RuntimeId(id))
             }))
@@ -649,49 +611,14 @@ impl<Runtime: 'static> JIT<Runtime> {
     /// Compiles all associated function instances that were requested by the function registry
     /// during the last compilation process.
     /// Functions that are already compiled are not recompiled by this action.
-    fn compile_associated_functions(&mut self, phase: &mut MirPhase, hir_phase: &mut HirPhase) -> Result<(), MirError<Self>> {
-        let opt = {
-            let code = self.code.clone();
-            let x = code.borrow_mut().add_from_executor(self, phase, hir_phase)?;
-            x
-        };
-        if let Some(mut opt) = opt {
-            opt.add_from_executor_optimized(self, phase, hir_phase)?;
-            let code = self.code.clone();
-            code.borrow_mut().add_optimized(opt);
-        }
-        Ok(())
-    }
-
-    /// Optimizes all functions that are currently compiled in the JIT compiler.
-    /// Internally, their code is then re-JITted, replacing the previous version of the function
-    /// bodies.
-    ///
-    /// # Note
-    ///
-    /// Functions should really be automatically optimized on the fly during code gen.
-    /// Thus, without PIC enabled, which is a feature that is no longer supported by Cranelift and
-    /// likely won't be for the foreseeable future, this function does nothing.
-    pub fn optimize_functions(&mut self, _phase: &mut MirPhase, _hir_phase: &mut HirPhase) -> Result<(), MirError<Self>> {
-        // let mut code = self.code.borrow().clone();
-        // code.optimize(self, phase, hir_phase)?;
-        // code.merge(&self.code.borrow());
-        // *self.code.borrow_mut() = code;
-
-        // let mut opt_cache = self.code.borrow().create_opt_cache();
-        // opt_cache.optimize(self, phase, hir_phase)?;
-        Ok(())
-    }
-
-    pub fn regen_functions(
+    fn compile_associated_functions(
         &mut self,
-        _phase: &mut MirPhase,
-        _hir_phase: &mut HirPhase,
-        _opt_cache: &OptCache
+        phase: &mut MirPhase,
+        hir_phase: &mut HirPhase,
     ) -> Result<(), MirError<Self>> {
-        // let code = self.code.clone();
-        // code.borrow_mut().regen(self, phase, hir_phase, opt_cache)?;
-        todo!()
+        let code = self.code.clone();
+        code.borrow_mut().add_from_executor(self, phase, hir_phase)?;
+        Ok(())
     }
 
     /// Creates an evaluation function for the evaluation of a MIR expression.
@@ -888,64 +815,7 @@ impl<Runtime: 'static> JIT<Runtime> {
 
 impl<Runtime: 'static> Backend for JIT<Runtime> {
     type Error = JITError;
-    type Module = ();
-    type Addr = *const u8;
     type FuncGen<'a> = FunctionTranslator<'a, Runtime>;
-
-    /// Evaluate a constant expression.
-    ///
-    /// # Cranelift
-    ///
-    /// How do we evaluate an expression in Cranelift?
-    /// This is not as straight forward, as it would be with the default EDL byte code interpreter.
-    /// Since Cranelift is a proper JIT compiler, it generates actual, callable machine code that
-    /// must be executed as it normally would.
-    ///
-    /// As a work-around, we can simply generate a function, were the function body contains all
-    /// the instructions that we want to execute.
-    /// Finally, we simply
-    fn eval_const_expr(
-        &mut self,
-        element: MirExpr,
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<MirExpr, MirError<Self>> {
-        // certain elements don't really make much sense to evaluate into raw data, since they are
-        // just data-blobs anyway
-        match &element {
-            MirExpr::Data(_) => return Ok(element),
-            MirExpr::Literal(_) => return Ok(element),
-            _ => (),
-        }
-
-        let pos = *element.get_pos();
-        let scope = *element.get_scope();
-        let src = element.get_src().clone();
-        let ty = element.get_type(&self.func_reg.borrow(), phase);
-
-        let data = self.eval_mir_to_bytes_unchecked(element, phase, hir_phase)?;
-
-        Ok(MirData {
-            pos,
-            scope,
-            src,
-            id: phase.new_id(),
-            ty,
-            value: data,
-        }.into())
-    }
-
-    fn eval_const_bytes(
-        &mut self, 
-        element: MirExpr, 
-        phase: &mut MirPhase,
-        hir_phase: &mut HirPhase,
-    ) -> Result<Vec<u8>, MirError<Self>> {
-        match &element {
-            MirExpr::Data(data) => Ok(data.value.clone()),
-            _ => self.eval_mir_to_bytes_unchecked(element, phase, hir_phase),
-        }
-    }
 
     fn func_reg(
         &self
@@ -957,8 +827,61 @@ impl<Runtime: 'static> Backend for JIT<Runtime> {
         self.func_reg.borrow_mut()
     }
 
-    fn is_generating_symbol(&self, _func_id: &MirFuncId) -> bool {
-        false
+    fn intrinsic_runtime(
+        &self,
+        func: &MirFuncId,
+    ) -> Option<u16> {
+        let lock = self.native_functions.lock().unwrap();
+        let rt = lock.for_id(func).and_then(|func| func.runtime_ordinal);
+        rt
+    }
+
+    fn call_intrinsic(
+        &self,
+        func: &MirFuncId,
+        params: &[AmorphusData<'_>],
+        ret_buffer: AmorphusDataMut<'_>,
+        reg: &MirTypeRegistry,
+    ) -> Result<(), TypeError> {
+        let lock = self.native_functions.lock().unwrap();
+        let func = lock
+            .for_id(func)
+            .expect("intrinsic function does not exist");
+        let res = func.run(params, ret_buffer, reg);
+        res
+    }
+
+    fn is_call_intrinsic(&self, func: &MirFuncId) -> bool {
+        let lock = self.native_functions.lock().unwrap();
+        let out = lock
+            .for_id(func)
+            .map(|func| func.runtime_ordinal.is_some());
+        out.unwrap_or(false)
+    }
+
+    fn global_var_mut(&mut self, var: EdlVarId) -> Option<NonNull<()>> {
+        self.global_var(var)
+    }
+
+    fn global_var(&self, var: EdlVarId) -> Option<NonNull<()>> {
+        self.global_vars.get(var.0)
+            .and_then(|global| {
+                let data = global.data_id;
+                let (ptr, _size) = self.module.get_finalized_data(data);
+                NonNull::new(ptr as *mut _)
+            })
+    }
+
+    fn alloc_static(&mut self, data: Box<[u8]>) -> NonNull<()> {
+        todo!()
+    }
+
+    fn runtime(&self, ordinal: u16) -> Option<NonNull<()>> {
+        self.runtime_data.get(ordinal as usize)
+            .and_then(|rt| {
+                let (ptr, _size) = self.module.get_finalized_data(*rt);
+                NonNull::new(ptr as *mut _)
+            })
     }
 }
 

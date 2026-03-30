@@ -18,14 +18,15 @@ use std::thread::current;
 use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
-use edlc_core::prelude::mir_backend::{Backend, CodeGen, InstructionCount};
+use edlc_core::prelude::mir_backend::{Backend, CodeGen};
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{AmorphusDataCopy, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos};
+use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_str::FatPtr;
+use edlc_core::prelude::mir_type::MirTypeRegistry;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
 use edlc_core::prelude::type_analysis::{InferProvider, InferState};
@@ -305,16 +306,6 @@ impl TestCompiler {
 #[derive(Clone, Copy, Debug)]
 struct TestCodegen;
 
-impl InstructionCount<TestBackend> for TestCodegen {
-    fn count_instructions(
-        &self,
-        phase: &MirPhase,
-        func_reg: &MirFuncRegistry<TestBackend>,
-    ) -> Result<usize, MirError<TestBackend>> {
-        Ok(0)
-    }
-}
-
 impl CodeGen<TestBackend> for TestCodegen {
     fn code_gen(
         &self,
@@ -322,18 +313,13 @@ impl CodeGen<TestBackend> for TestCodegen {
         type_reg: &mut MirPhase,
         call: &MirCall,
         target: &MirValue,
+        exor_id: &MirExprId,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
 }
 
 struct TestCallGen;
-
-impl InstructionCount<TestBackend> for TestCallGen {
-    fn count_instructions(&self, phase: &MirPhase, func_reg: &MirFuncRegistry<TestBackend>) -> Result<usize, MirError<TestBackend>> {
-        Ok(0)
-    }
-}
 
 impl CodeGen<TestBackend> for TestCallGen {
     fn code_gen(
@@ -342,6 +328,7 @@ impl CodeGen<TestBackend> for TestCallGen {
         type_reg: &mut MirPhase,
         mir_call: &MirCall,
         target: &MirValue,
+        exor_id: &MirExprId,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
@@ -352,9 +339,10 @@ impl FnCodeGen<TestBackend> for MirFn {
     type Ret = ();
 
     fn gen_func(
-        self,
+        &self,
         backend: &mut TestBackend,
         phase: &mut MirPhase,
+        hir_phase: &HirPhase,
         ip: usize,
     ) -> Result<Self::Ret, MirError<TestBackend>> {
         Ok(())
@@ -631,8 +619,23 @@ impl Backend for TestBackend {
         self.funcs.borrow_mut()
     }
 
-    fn intrinsic_binding(&self, func: MirFuncId) -> Option<&FunctionBinding> {
-        self.intrinsics.get(&func)
+    fn intrinsic_runtime(&self, func: &MirFuncId) -> Option<u16> {
+        self.intrinsics.get(func)
+            .and_then(|func| func.runtime_ordinal)
+    }
+
+    fn call_intrinsic(
+        &self,
+        func: &MirFuncId,
+        params: &[AmorphusData<'_>],
+        ret_buffer: AmorphusDataMut<'_>,
+        reg: &MirTypeRegistry,
+    ) -> Result<(), TypeError> {
+        self.intrinsics[func].run(params, ret_buffer, reg)
+    }
+
+    fn is_call_intrinsic(&self, func: &MirFuncId) -> bool {
+        self.intrinsics.contains_key(func)
     }
 
     fn global_var_mut(&mut self, var: EdlVarId) -> Option<NonNull<()>> {
@@ -645,6 +648,10 @@ impl Backend for TestBackend {
         self.globals.get(&var)
             .and_then(|g| NonNull::new(g.as_data().as_ptr() as *mut ()))
             .map(|ptr| ptr.cast())
+    }
+
+    fn alloc_static(&mut self, data: Box<[u8]>) -> NonNull<()> {
+        todo!()
     }
 
     fn runtime(&self, ordinal: u16) -> Option<NonNull<()>> {

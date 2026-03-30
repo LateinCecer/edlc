@@ -14,19 +14,17 @@
  *    limitations under the License.
  */
 
-use std::sync::OnceLock;
-use std::{mem, ptr, slice};
-use cranelift_codegen::ir;
-use edlc_core::prelude::{MirError, MirPhase};
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use crate::codegen::FunctionTranslator;
+use crate::compiler::JIT;
+use crate::error::{JITError, JITErrorType};
+use crate::prelude::SSARepr;
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, TrapCode, Value};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId, Linkage, Module, ModuleError};
 use edlc_core::prelude::mir_type::MirTypeId;
-use crate::codegen::{CodeCtx, FunctionTranslator};
-use crate::compiler::JIT;
-use crate::error::{JITError, JITErrorType};
-use crate::prelude::{AggregateValue, SSARepr};
+use edlc_core::prelude::{MirError, MirPhase};
+use std::sync::OnceLock;
+use std::{mem, ptr, slice};
 
 #[macro_export]
 /// Creates a panic in the JIT executor and causes the current function to return with
@@ -46,7 +44,7 @@ macro_rules! jit_intrinsic_panic(
     );
 );
 pub use jit_intrinsic_panic;
-
+use crate::trap;
 
 static mut GLOBAL_JIT_PANIC_HANDLE: OnceLock<RawPanicHandle> = OnceLock::new();
 
@@ -404,7 +402,7 @@ impl<'jit, Runtime> FunctionTranslator<'jit, Runtime> {
     }
 
     /// Causes the EDL code to panic and unwind.
-    pub fn panic(&mut self, msg: &str, phase: &MirPhase, return_type: MirTypeId) -> Result<(), MirError<JIT<Runtime>>> {
+    pub fn panic(&mut self, msg: &str) -> Result<(), MirError<JIT<Runtime>>> {
         let data = self.module.declare_data_in_func(
             self.panic_handle.location,
             self.builder.func
@@ -424,134 +422,7 @@ impl<'jit, Runtime> FunctionTranslator<'jit, Runtime> {
 
         // store message into buffer and set length
         self.store_stack_trace_entry(msg, ptr)?;
-
-        // early return from the current function body with an empty value
-        let layout = phase.types.abi_layout(self.abi.clone(), return_type).unwrap();
-        let zeros = SSARepr::iter_eightbytes(&layout)
-            .map(|eightbyte| SSARepr::zero_value(eightbyte, &mut self.builder))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.builder.ins()
-            .return_(&zeros);
-        Ok(())
-    }
-
-    /// Checks if a panic occurred in the current thread and continues unwinding if this is the
-    /// case.
-    /// This method should usually be called after every function call to make sure that panics
-    /// are propagated properly.
-    pub fn check_continue_unwind(&mut self, msg: &str, phase: &MirPhase) -> Result<(), MirError<JIT<Runtime>>> {
-        let data = self.module.declare_data_in_func(
-            self.panic_handle.location,
-            self.builder.func
-        );
-        let ptr = self.builder.ins().symbol_value(
-            self.module.target_config().pointer_type(),
-            data,
-        );
-
-        let cond = self.builder
-            .ins()
-            .load(types::I8, MemFlags::new(), ptr, 0);
-        let then_block = self.builder.create_block();
-        let merge_block = self.builder.create_block();
-
-        self.builder
-            .ins()
-            .brif(cond, then_block, &[], merge_block, &[]);
-
-        self.builder.switch_to_block(then_block);
-        self.builder.seal_block(then_block);
-
-        // increase stack trace depth and add information to the stack trace
-        let mut depth = self.builder
-            .ins()
-            .load(
-                self.module.target_config().pointer_type(),
-                MemFlags::new(),
-                ptr,
-                self.module.target_config().pointer_bytes()
-            );
-
-        // only insert message if the depth of the stack trace is below the max stack trace depth
-        let cond = self.builder
-            .ins()
-            .icmp_imm(IntCC::UnsignedLessThan, depth, self.panic_handle.stack_trace_size as i64);
-        let write_block = self.builder.create_block();
-        let exit_block = self.builder.create_block();
-
-        self.builder.ins().brif(cond, write_block, &[], exit_block, &[]);
-        self.builder.switch_to_block(write_block);
-        self.builder.seal_block(write_block);
-
-        let offset = self.builder
-            .ins()
-            .imul_imm(depth, self.panic_handle.size as i64);
-        let msg_ptr = self.builder.ins().iadd(ptr, offset);
-        self.store_stack_trace_entry(msg, msg_ptr)?;
-
-        depth = self.builder
-            .ins()
-            .iadd_imm(depth, 1);
-        self.builder
-            .ins()
-            .store(MemFlags::new(), depth, ptr, self.module.target_config().pointer_bytes());
-
-        self.builder.ins().jump(exit_block, &[]);
-        self.builder.switch_to_block(exit_block);
-        self.builder.seal_block(exit_block);
-
-        // early return from the current function body with an empty value
-        self.insert_forced_return(phase)?;
-
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        Ok(())
-    }
-
-    /// Inserts a return instruction that matches the type of the current function body and has
-    /// all-zero values.
-    /// These return instructions should only be used in the context of error handling, or for
-    /// code that should be effectively unreachable, such as after calls to functions that return
-    /// 'never'.
-    pub fn insert_forced_return(&mut self, phase: &MirPhase) -> Result<(), MirError<JIT<Runtime>>> {
-        let ret_ssa = SSARepr::abi_repr(
-            self.current_effective_return_type, self.abi.clone(), &phase.types)?;
-        let zero = ret_ssa.zeros(&mut self.builder)?;
-        // self.builder
-        //     .ins()
-        //     .return_(&zero.into_vec());
-        let mut ctx = CodeCtx {
-            abi: self.abi.clone(),
-            builder: &mut self.builder,
-            module: &mut self.module,
-            phase,
-        };
-        let data = AggregateValue::from_comp_value(zero, &mut ctx)?;
-        self.build_return(data, phase)?;
-        Ok(())
-    }
-
-    /// Resets the header of the global panic state, such that unwinding stops.
-    pub fn catch_unwind(&mut self) -> Result<(), MirError<JIT<Runtime>>> {
-        let data = self.module.declare_data_in_func(
-            self.panic_handle.location,
-            self.builder.func
-        );
-        let ptr = self.builder.ins().symbol_value(
-            self.module.target_config().pointer_type(),
-            data,
-        );
-
-        // overwrite header and length entries in the panic handler
-        let zero = self.builder
-            .ins()
-            .iconst(self.module.target_config().pointer_type(), 0);
-        self.builder
-            .ins()
-            .store(MemFlags::new(), zero, ptr, 0);
-        self.builder
-            .ins()
-            .store(MemFlags::new(), zero, ptr, self.module.target_config().pointer_bytes());
+        self.builder.ins().trap(TrapCode::unwrap_user(trap::EXPLICIT_PANIC));
         Ok(())
     }
 }

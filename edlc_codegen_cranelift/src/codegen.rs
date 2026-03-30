@@ -31,11 +31,11 @@ use cranelift_codegen::ir::StackSlot;
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::MirValue;
+use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
-use edlc_core::prelude::{FunctionBinding, HirPhase, HirUid, MirError, MirPhase};
+use edlc_core::prelude::{HirPhase, HirUid, MirError, MirPhase};
 
 mod literal_codegen;
 mod call_codegen;
@@ -51,7 +51,7 @@ mod as_codegen;
 mod type_init_codegen;
 mod ref_codegen;
 mod global_codegen;
-mod cfg_codegen;
+pub mod cfg_codegen;
 
 macro_rules! code_ctx(
     ($backend:expr, $phase:expr) => (
@@ -388,7 +388,6 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub func_reg: Rc<RefCell<MirFuncRegistry<JIT<Runtime>>>>,
     pub global_vars: &'jit mut IndexMap<GlobalVar>,
     pub runtime_data: &'jit mut IndexMap<DataId>,
-    pub function_bindings: &'jit mut IndexMap<FunctionBinding>,
 
     /// variable cache
     pub panic_handle: &'jit mut PanicHandle,
@@ -416,6 +415,7 @@ pub trait Compilable<Runtime> {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         target: &MirValue,
+        expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>>;
 }
 
@@ -447,7 +447,6 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             runtime_data: &mut jit.runtime_data,
             func_reg: jit.func_reg.clone(),
             global_vars: &mut jit.global_vars,
-            function_bindings: &mut jit.function_bindings,
             panic_handle: &mut jit.panic_handle,
             layout: mapping,
             function_layout,
