@@ -53,6 +53,8 @@ impl Display for SysVError {
 
 impl Error for SysVError {}
 
+const STRUCT_ARG_ALIGNMENT: u16 = 8;
+
 impl CallingConv for SysV {
     type Error = SysVError;
 
@@ -90,7 +92,7 @@ impl CallingConv for SysV {
         for value in call.args.iter() {
             let ty = cfg.get_var_type(value);
             let arg = if reg.byte_size(*ty).unwrap() > self.abi.large_aggregate_bytes {
-                let purpose = ArgumentPurpose::Struct(*value);
+                let purpose = ArgumentPurpose::Struct(*value, STRUCT_ARG_ALIGNMENT);
                 Argument {
                     purpose,
                     // we pass the struct completely through the stack spill
@@ -139,7 +141,7 @@ impl CallingConv for SysV {
         for value in cfg.get_root_parameters() {
             let ty = cfg.get_var_type(value);
             let arg = if reg.byte_size(*ty).unwrap() > self.abi.large_aggregate_bytes {
-                let purpose = FunctionParameterPurpose::Struct(*value);
+                let purpose = FunctionParameterPurpose::Struct(*value, STRUCT_ARG_ALIGNMENT);
                 Argument {
                     purpose,
                     xmm: 0,

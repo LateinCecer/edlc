@@ -465,7 +465,7 @@ impl StackFrameMapping {
             panic!("cannot get reference to register mapped value");
         }
         let (src_range, ty) = self.layout.local_offset(value).unwrap();
-        let ptr_type = SSARepr::pod(ty, reg).unwrap();
+        let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
         assert_eq!(ptr_type.bytes() as usize, abi.pointer_width);
         builder
             .ins()
@@ -533,6 +533,7 @@ impl StackFrameMapping {
                 let data = builder
                     .ins()
                     .load(ir_target_ty, MemFlags::trusted(), ptr, const_offset);
+                ir_values.set_value(*target, data);
             },
             Mapping::Stack => {
                 let target_layout = reg.abi_layout(abi.clone(), *target_ty).unwrap();
@@ -817,7 +818,7 @@ impl CraneliftValues {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgumentPurpose {
     Normal(MirValue),
-    Struct(MirValue),
+    Struct(MirValue, u16),
     ReturnBuffer(MirValue),
     Padding,
     StackSpill,
@@ -827,7 +828,7 @@ pub enum ArgumentPurpose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionParameterPurpose {
     Normal(MirValue),
-    Struct(MirValue),
+    Struct(MirValue, u16),
     ReturnBuffer,
     Padding,
     StackSpill,
@@ -877,7 +878,7 @@ impl FunctionLayout {
                     );
                     i += num_values;
                 }
-                FunctionParameterPurpose::Struct(value) => {
+                FunctionParameterPurpose::Struct(value, _align) => {
                     let ptr_value = params[i];
                     i += 1;
                     layout.load_raw_ptr(
@@ -938,10 +939,11 @@ impl FunctionLayout {
                         sig.params.push(ir::AbiParam::special(ty, ir::ArgumentPurpose::Normal));
                     }
                 }
-                FunctionParameterPurpose::Struct(val) => {
+                FunctionParameterPurpose::Struct(val, align) => {
                     let ty = cfg.get_var_type(val);
                     let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
-                    let size = layout.byte_size() as u32;
+                    let alignment = u32::max(reg.byte_alignment(*ty).unwrap() as u32, *align as u32);
+                    let size = (layout.byte_size() as u32).div_ceil(alignment) * alignment;
                     let (ir_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
                     eightbytes.push(ir_ty);
                     sig.params.push(ir::AbiParam::special(ir_ty, ir::ArgumentPurpose::StructArgument(size)));
@@ -1022,7 +1024,7 @@ impl<'a> Iterator for CallLayoutIter<'a> {
                 self.arg += 1;
                 return match &arg.purpose {
                     ArgumentPurpose::Normal(val) => Some((*val, CallLayoutMapping::Reg)),
-                    ArgumentPurpose::Struct(val) => Some((*val, CallLayoutMapping::Stack)),
+                    ArgumentPurpose::Struct(val, _) => Some((*val, CallLayoutMapping::Stack)),
                     ArgumentPurpose::ReturnBuffer(val) => Some((*val, CallLayoutMapping::Stack)),
                     _ => {
                         continue;
@@ -1079,7 +1081,7 @@ impl CallLayout {
                 ArgumentPurpose::Normal(val) if val == value => {
                     return Some(CallLayoutMapping::Reg);
                 }
-                ArgumentPurpose::Struct(val) if val == value => {
+                ArgumentPurpose::Struct(val, _) if val == value => {
                     return Some(CallLayoutMapping::Stack);
                 }
                 ArgumentPurpose::ReturnBuffer(val) if val == value => {
@@ -1134,10 +1136,11 @@ impl CallLayout {
                     );
                     assert_eq!(eightbytes.len(), param_values.len());
                 }
-                ArgumentPurpose::Struct(val) => {
+                ArgumentPurpose::Struct(val, align) => {
                     let ty = backend.layout.get_ty(val).unwrap();
                     let layout = phase.types.abi_layout(backend.abi.clone(), *ty).unwrap();
-                    let size = layout.byte_size() as u32; // align?
+                    let alignment = u32::max(phase.types.byte_alignment(*ty).unwrap() as u32, *align as u32);
+                    let size = (layout.byte_size() as u32).div_ceil(alignment) * alignment; // align?
                     let (ir_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
                     eightbytes.push(ir_ty);
                     sig.params.push(ir::AbiParam::special(
@@ -1180,8 +1183,6 @@ impl CallLayout {
                 ArgumentPurpose::StackSpill => (),
                 ArgumentPurpose::Runtime => {
                     let (ptr_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
-                    eightbytes.push(ptr_ty);
-                    sig.params.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::Normal));
                     let ordinal = *self.runtime_ordinal.as_ref().unwrap();
                     let data = backend.runtime_data.get(ordinal as usize).unwrap();
                     let runtime_data = backend.module

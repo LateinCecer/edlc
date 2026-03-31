@@ -603,6 +603,8 @@ impl<Runtime: 'static> JIT<Runtime> {
 
         self.module.define_data(data, &description)
             .map_err(|err| MirError::BackendError(JITError { ty: JITErrorType::ModuleErr(err) }))?;
+        self.module.finalize_definitions()
+            .map_err(|err| MirError::BackendError(JITError { ty: JITErrorType::ModuleErr(err) }))?;
         self.global_vars.view_mut(id.0).set(GlobalVar {
             ty,
             data_id: data,

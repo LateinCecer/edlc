@@ -1921,11 +1921,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         for func in funcs.iter_mut() {
             process_function(func, vm, compiler, backend)?;
 
-            // let mut std_out = std::io::stdout();
-            // writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
-            // let mut writer = AsciPrinter::new(&mut std_out);
-            // writer.print(&func.body).unwrap();
-            // std_out.flush().unwrap();
+            let mut std_out = std::io::stdout();
+            writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
+            let mut writer = AsciPrinter::new(&mut std_out);
+            writer.print(&func.body).unwrap();
+            std_out.flush().unwrap();
         }
 
         let mut func_reg = backend.func_reg_mut();

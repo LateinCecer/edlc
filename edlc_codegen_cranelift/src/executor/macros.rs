@@ -396,9 +396,10 @@ mod test {
     use crate::prelude::TypedProgram;
     use std::sync::RwLock;
     use edlc_core::inline_code;
-    use edlc_core::prelude::edl_type::{EdlRepresentation, EdlTypeId};
+    use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
     use edlc_core::prelude::{DocGenerator, Item};
     use edlc_core::prelude::ast_type_def::LayoutOptions;
+    use edlc_core::prelude::mir_expr::Context;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
     use crate::{jit_intrinsic_panic};
@@ -430,9 +431,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -459,9 +460,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -496,9 +497,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
 
         let rt = *compiler.backend.get_runtime(0.into())?
             .read().unwrap();
@@ -539,9 +540,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -592,9 +593,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -635,6 +636,11 @@ fn test() -> i32 {
                 println!("{}", val);
             }
         );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_f32<>(val: f32) -> () where; {
+                println!("{}", val);
+            }
+        );
         jit_func!(compiler, fn<"bool";>(fn_id),
             fn println_bool<>(val: bool) -> () where; {
                 println!("{}", val);
@@ -665,7 +671,7 @@ fn test() -> i32 {
             inline_code!("<T>"),
             inline_code!("MyData<T>"),
             [
-                inline_code!("fn new(key: i32, repeat: T) -> MyData<T>"),
+                inline_code!("?comptime fn new(key: i32, repeat: T) -> MyData<T>"),
                 inline_code!("fn get_buf(self: MyData<T>) -> [T; 16]"),
                 inline_code!("fn get_key(self: MyData<T>) -> i32"),
             ],
@@ -674,7 +680,7 @@ fn test() -> i32 {
 
         fn foo<Data: Copy + 'static>(compiler: &mut CraneliftJIT<()>, new: EdlTypeId) -> Result<(), anyhow::Error> {
             jit_func!(for (&format!("MyData<{}>", any::type_name::<Data>())) impl compiler, fn(new),
-                fn new_data<(T = Data), const (N = 16): usize>(key: i32, repeat: T) -> MyData<T>
+                const fn new_data<(T = Data), const (N = 16): usize>(key: i32, repeat: T) -> MyData<T>
                 where T: Copy,
                     T: 'static; {
                     info!("mem::size_of::<[{}; {}]>() = {}", any::type_name::<T>(), N, mem::size_of::<[T; N]>());
@@ -714,7 +720,7 @@ fn print_mantra() {
 
 fn test() -> i32 {
     println("creating `MyData` instance...");
-    let data: MyData<f32> = MyData::new(1234, 1.234_f32);
+    let data: MyData = MyData::new(1234, 1.234_f32);
     println("asserting key...");
     println(data.get_key());
     println(data.get_key() == 1234);
@@ -722,6 +728,9 @@ fn test() -> i32 {
 
     assert(data.get_key() == 1234, "wrong key");
     let buf: [f32; 16] = data.get_buf();
+    let mut a: [f32; 16] = [42.0f32; 16];
+    a[0] = buf[0];
+    println(a[0]);
     assert(buf[0usize] == 1.234f32, "wrong data at index 0");
     assert(buf[3usize] == 1.234f32, "wrong data at index 3");
     assert(buf[7usize] == 1.234f32, "wrong data at index 7");
@@ -733,9 +742,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), edlc_core::inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 

@@ -943,18 +943,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let output_ty = compiler.compiler.phase.types.i32();
-        let output: i32 = compiler.quick_eval(
-            &vec!["test"].into(),
-            &inline_code!("test()"),
-            &EdlMaybeType::Fixed(output_ty),
-            Context::Runtime,
-        )?;
-        assert_eq!(output, 0);
-
-        // let program: TypedProgram<i32, _> = compiler
-        //     .compile_expr(&vec!["test"].into(), edlc_core::inline_code!("test()"))?;
-        // assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 

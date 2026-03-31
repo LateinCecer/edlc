@@ -328,7 +328,7 @@ impl SSARepr {
                 }
             },
             ty if *ty == reg.empty() => None,
-            _ => panic!("not a POD data type"),
+            ty => panic!("not a POD data type: {ty} != {}", reg.f32()),
         }
     }
 

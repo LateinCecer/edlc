@@ -1885,7 +1885,7 @@ impl MakeGraph for HirFunctionCall {
 
         // get function signature for comparison
         let edl_sig = graph.hir_phase.types.get_fn_signature(type_info.fn_id)?.clone();
-        let ret = graph.mir_phase.types.mir_id(&edl_sig.ret, &graph.hir_phase.types)?;
+        let ret = graph.mir_phase.types.mir_id(&type_info.ret_ty.clone().unwrap(), &graph.hir_phase.types)?;
         let edl_func_instance = self.get_function_instance().unwrap();
         let mir_uid = graph.mir_phase.new_id();
 
