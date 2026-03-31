@@ -13,17 +13,16 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::sync::Arc;
+use crate::layout::stack_frame::{Argument, ArgumentOrdering, ArgumentPurpose, CallLayout, CallingConv, FunctionLayout, FunctionParameterPurpose};
+use crate::layout::SSARepr;
 use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirFlowGraph, MirValue};
-use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeRegistry;
-use crate::layout::SSARepr;
-use crate::layout::stack_frame::{Argument, ArgumentOrdering, ArgumentPurpose, CallLayout, CallingConv, FunctionLayout, FunctionParameterPurpose};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
 
 pub struct SysV {
     abi: Arc<AbiConfig>,
@@ -77,17 +76,13 @@ impl CallingConv for SysV {
             Some(target)
         };
 
-        let runtime_ordinal = if let Some(intr) = backend.intrinsic_binding(call.func) {
-            if let Some(ordinal) = intr.runtime_ordinal {
-                args.push(Argument {
-                    rxx: 1,
-                    xmm: 0,
-                    purpose: ArgumentPurpose::Runtime,
-                });
-                Some(ordinal)
-            } else {
-                None
-            }
+        let runtime_ordinal = if let Some(ordinal) = backend.intrinsic_runtime(&call.func) {
+            args.push(Argument {
+                rxx: 1,
+                xmm: 0,
+                purpose: ArgumentPurpose::Runtime,
+            });
+            Some(ordinal)
         } else {
             None
         };

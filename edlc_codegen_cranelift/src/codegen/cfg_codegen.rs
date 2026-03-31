@@ -8,7 +8,7 @@ use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContain
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::ops::Index;
-
+use log::{debug, info};
 
 /// Maps MIR blocks to Cranelift blocks.
 struct BlockMapper {
@@ -108,11 +108,13 @@ fn block_codegen<Runtime>(
     phase: &mut MirPhase,
     mapping: &BlockMapper,
 ) -> Result<(), MirError<JIT<Runtime>>> {
+    info!("entering block: {:?}", block_ref);
     let current_block = mapping[*block_ref];
     builder.builder.switch_to_block(current_block);
     for statement in block.statements.iter() {
         statement_codegen(expressions, statement, builder, phase)?;
     }
+    info!("exiting block: {:?}", block_ref);
     seal_codegen(block_ref, &block.seal, builder, phase, mapping)
 }
 

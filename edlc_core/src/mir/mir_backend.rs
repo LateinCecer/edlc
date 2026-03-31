@@ -13,22 +13,21 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-
+use std::any::Any;
 use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::AddAssign;
+use std::ptr::NonNull;
 use log::debug;
 use crate::core::EdlVarId;
-use crate::hir::HirPhase;
-use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirValue};
+use crate::mir::mir_expr::{MirExprId, MirValue};
 use crate::mir::{MirError, MirPhase};
-use crate::mir::mir_executor::FunctionBinding;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
-use crate::mir::mir_type::MirTypeRegistry;
-use crate::prelude::{AmorphusData, AmorphusDataMut, TypeError};
+use crate::mir::mir_type::{MirTypeRegistry};
+use crate::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, TypeError};
 
 pub enum WriteDest<Addr> {
     Tmp(&'static str),
@@ -37,6 +36,34 @@ pub enum WriteDest<Addr> {
     NewVar(EdlVarId),
     Addr(Addr)
 }
+
+pub enum StaticData {
+    Edl(AmorphusDataCopy),
+    Rust(Box<(dyn Any + 'static)>),
+    Raw(Box<[u8]>),
+}
+
+impl StaticData {
+    pub fn as_ptr(&self) -> *const u8 {
+        match self {
+            Self::Edl(a) => a.as_data().as_ptr(),
+            Self::Rust(val) => val.as_ref() as *const dyn Any as *const u8,
+            Self::Raw(val) => val.as_ptr(),
+        }
+    }
+}
+
+impl PartialEq for StaticData {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Edl(a), Self::Edl(b)) => a.eq(b),
+            (Self::Raw(a), Self::Raw(b)) => a.eq(b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for StaticData {}
 
 /// A backend is used in dynamic code generation.
 pub trait Backend: Sized {
@@ -60,7 +87,7 @@ pub trait Backend: Sized {
     fn global_var(&self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
 
     /// Allocate a chunk of static data.
-    fn alloc_static(&mut self, data: Box<[u8]>) -> std::ptr::NonNull<()>;
+    fn alloc_static(&self, data: StaticData) -> std::ptr::NonNull<()>;
 
     /// A runtime can be passed to intrinsics when called.
     /// The runtime ordinal that is to be passed to the intrinsic must be marked to the function

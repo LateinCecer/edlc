@@ -364,7 +364,7 @@ impl<'a> Iterator for EightbyteIter<'a> {
     type Item = Type;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(type_bytes) = self.layout.block_bytes(self.i) {
+        if let Some(type_bytes) = self.layout.block_bytes(self.block) {
             let (t, n) = if self.layout.is_float_block(self.block) {
                 SSARepr::ftype_for_alignment(type_bytes)
             } else {

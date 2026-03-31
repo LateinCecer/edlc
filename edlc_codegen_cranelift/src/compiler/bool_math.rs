@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use edlc_core::prelude::{CompilerError, EdlCompiler};
+use edlc_core::prelude::{CompilerError, EdlCompiler, FromFunction};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::InstBuilder;
 use crate::compiler::integer_math::*;

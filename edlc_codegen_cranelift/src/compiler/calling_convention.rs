@@ -23,12 +23,10 @@ use cranelift_codegen::gimli::{Register, X86_64};
 use cranelift_codegen::ir::{Signature, StackSlot, Value};
 use crate::compiler::RuntimeId;
 
-pub use system_v::SystemV;
 use crate::codegen::FunctionTranslator;
 use crate::prelude::external_func::JITExternCall;
 use crate::prelude::JIT;
 
-mod system_v;
 
 
 trait PointerType {

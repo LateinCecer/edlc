@@ -112,6 +112,18 @@ impl AmorphusDataCopy {
         self.data.len()
     }
 
+    pub fn mir_type(&self) -> MirTypeId {
+        self.ty
+    }
+
+    /// Deconstructs the amorphus data into a tuple that contains the raw data as a `Vec<u8>` and
+    /// the base alignment of the data.
+    /// The caller must ensure that, should the data be stored at alternative locations, the
+    /// alignment is taking into account.
+    pub fn deconstruct(self) -> (usize, Vec<u8>) {
+        (self.align, self.data)
+    }
+
     /// Creates a new data copy from the specified data value.
     /// For this function to succeed the specified MIR Type ID must match the Rust type id of `val`.
     /// If this is not the case, the program panics.

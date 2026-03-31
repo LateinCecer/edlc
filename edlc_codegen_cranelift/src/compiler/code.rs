@@ -13,15 +13,16 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::collections::HashSet;
 use crate::compiler::JIT;
 use crate::error::{JITError, JITErrorType};
+use cranelift_module::FuncId;
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFuncId};
 use edlc_core::prelude::{HirPhase, MirError, MirPhase};
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct JITCode {
-    generated: HashSet<MirFuncId>,
+    generated: HashMap<MirFuncId, FuncId>,
 }
 
 impl JITCode {
@@ -31,22 +32,28 @@ impl JITCode {
         phase: &mut MirPhase,
         hir_phase: &mut HirPhase,
     ) -> Result<(), MirError<JIT<Runtime>>> {
-        let funcs = backend.func_reg
-            .borrow()
-            .collect_codegen(|id| !self.generated.contains(id));
+        let funcs = {
+            backend.func_reg
+                .borrow()
+                .collect_codegen(|id| !self.generated.contains_key(id))
+        };
         // only retain functions that are not known up until now
         if funcs.is_empty() {
             return Ok(());
         }
 
         for func in funcs {
-            func.gen_func(backend, phase, hir_phase, 0)?;
-            self.generated.insert(func.mir_id.unwrap());
+            let func_id = func.gen_func(backend, phase, hir_phase, 0)?;
+            self.generated.insert(func.mir_id.unwrap(), func_id);
         }
 
         backend.module.finalize_definitions()
             .map_err(|err| MirError::BackendError(JITError {
                 ty: JITErrorType::ModuleErr(err)
             }))
+    }
+
+    pub fn get_func_id(&self, mir_id: MirFuncId) -> Option<FuncId> {
+        self.generated.get(&mir_id).cloned()
     }
 }

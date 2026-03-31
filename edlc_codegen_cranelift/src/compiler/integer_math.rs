@@ -15,8 +15,7 @@
  */
 
 use edlc_core::prelude::mir_backend::CodeGen;
-use edlc_core::prelude::{CompilerError, EdlCompiler, FunctionBinding, MirError, MirPhase};
-use edlc_core::prelude::mir_funcs::MirFuncRegistry;
+use edlc_core::prelude::*;
 use edlc_core::prelude::mir_type::MirTypeId;
 use cranelift::frontend::FuncInstBuilder;
 use cranelift_codegen::ir;
@@ -24,9 +23,8 @@ use cranelift_codegen::ir::{InstBuilder};
 use cranelift_codegen::ir::condcodes::IntCC;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
-use crate::codegen::{code_ctx, FunctionTranslator, IntoValue, short_vec, ShortVec};
+use crate::codegen::{FunctionTranslator, IntoValue, short_vec, ShortVec};
 use crate::compiler::JIT;
-use crate::prelude::AggregateValue;
 
 
 

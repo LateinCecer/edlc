@@ -1348,7 +1348,7 @@ impl MirFlowGraph {
         reg: &mut MirTypeRegistry,
         backend: &mut impl Backend,
         work_list: &mut VecDeque<MirBlockRef>,
-        mut params: CallParameterCopy,
+        params: CallParameterCopy,
         const_eval: &mut ConstEval,
     ) {
         let current_block = params.block;
@@ -1562,7 +1562,7 @@ impl Block {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
-        backend: &impl Backend,
+        backend: &mut impl Backend,
         const_eval: &mut ConstEval,
     ) -> bool {
         let mut changed = false;
@@ -1583,7 +1583,7 @@ impl Statement {
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
-        backend: &impl Backend,
+        backend: &mut impl Backend,
         const_eval: &mut ConstEval,
     ) -> bool {
         match self {

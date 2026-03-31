@@ -76,11 +76,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             Some(edlc_core::inline_code!($base)),
@@ -98,11 +98,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             Some(edlc_core::inline_code!($base)),
@@ -165,11 +165,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             Some(edlc_core::inline_code!($base)),
@@ -187,11 +187,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             Some(edlc_core::inline_code!($base)),
@@ -256,11 +256,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             None,
@@ -278,11 +278,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             None,
@@ -345,11 +345,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             None,
@@ -367,11 +367,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             None,
@@ -478,13 +478,12 @@ fn test() -> i32 {
             fn println<>(runtime: i32, line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
-                println!("`{}` from runtime {}", msg, runtime.as_ref().unwrap().read().unwrap());
+                println!("`{}` from runtime {}", msg, unsafe { &*runtime }.as_ref().unwrap().read().unwrap());
 
-                *runtime.as_ref().unwrap()
-                    .write()
-                    .unwrap() = 69;
+                let s = unsafe { &*runtime }.as_ref().unwrap();
+                *s.write().unwrap() = 69;
             }
         );
 
@@ -557,12 +556,14 @@ fn test() -> i32 {
         let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
         jit_func!(compiler, fn<"str";>(fn_id), 0,
             fn println_str<>(runtime: i32, line: FatPtr) -> () where; {
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
 
-                println!("`{}` in runtime `{}`", msg, runtime.as_ref().unwrap().read().unwrap());
+                println!("`{}` in runtime `{}`", msg, runtime.read().unwrap());
             }
         );
         jit_func!(compiler, fn<"i32";>(fn_id),
@@ -624,7 +625,7 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
@@ -647,7 +648,7 @@ fn test() -> i32 {
             const fn assert<>(val: bool, msg: FatPtr) -> () where; {
                 if !val {
                     let msg = unsafe { std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)) };
+                        slice::from_raw_parts(msg.ptr.0, msg.size)) };
                     eprintln!("assertion failed: {msg}");
                 }
             }
@@ -756,7 +757,7 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
@@ -813,17 +814,18 @@ fn test() -> i32 {
                 dims: [usize; 3],       // -> R8?
                 name: FatPtr            // -> stack spill
             ) -> [usize; 3] where; {
-                let runtime = runtime.as_ref().unwrap().read().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let runtime = runtime.read().unwrap();
                 println!("Running test function...");
                 println!("Runtime: {runtime:?}");
                 let fields = fields.map(|s| unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(s.ptr.0 as *const u8, s.size)
+                        std::slice::from_raw_parts(s.ptr.0, s.size)
                     )
                 });
                 let name = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(name.ptr.0 as *const u8, name.size)
+                        std::slice::from_raw_parts(name.ptr.0, name.size)
                     )
                 };
                 println!("foo ({name}):");
@@ -851,12 +853,12 @@ fn test() -> i32 {
                 info!("test: runtime = {runtime:?}, data = {data}, domain = {domain}");
                 let msg1_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg1.ptr.0 as *const u8, msg1.size)
+                        std::slice::from_raw_parts(msg1.ptr.0, msg1.size)
                     )
                 };
                 let msg2_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg2.ptr.0 as *const u8, msg2.size)
+                        std::slice::from_raw_parts(msg2.ptr.0, msg2.size)
                     )
                 };
                 println!("msg1 = {msg1:?} equal msg1 = {msg1_str}");
@@ -875,12 +877,12 @@ fn test() -> i32 {
                 println!("test: runtime = {runtime:?}, data = {data}, domain = {domain}");
                 let msg1_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg1.ptr.0 as *const u8, msg1.size)
+                        std::slice::from_raw_parts(msg1.ptr.0, msg1.size)
                     )
                 };
                 let msg2_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg2.ptr.0 as *const u8, msg2.size)
+                        std::slice::from_raw_parts(msg2.ptr.0, msg2.size)
                     )
                 };
                 println!("msg1 = {msg1:?} equal msg1 = {msg1_str}");
@@ -935,7 +937,7 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
@@ -966,12 +968,12 @@ fn test() -> i32 {
 
         jit_func!(for ("Resource") impl &mut compiler, fn(fs[0]), 0,
             const fn new<>(runtime: MyRuntime, value: FatPtr) -> usize where; {
-                let mut runtime = runtime.as_ref().unwrap()
-                    .write().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let mut runtime = runtime.write().unwrap();
                 let id = runtime.res.len();
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(value.ptr.0 as *const u8, value.size)
+                        std::slice::from_raw_parts(value.ptr.0, value.size)
                     )
                 };
                 runtime.res.push(msg.to_string());
@@ -980,8 +982,8 @@ fn test() -> i32 {
         );
         jit_func!(for ("Resource") impl &mut compiler, fn(fs[1]), 0,
             fn print_res<>(runtime: MyRuntime, this: usize) -> () where; {
-                let runtime = runtime.as_ref().unwrap()
-                    .read().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let runtime = runtime.read().unwrap();
                 if this > runtime.res.len() {
                     jit_intrinsic_panic!(&format!("invalid resource with id `{this}`"));
                 }

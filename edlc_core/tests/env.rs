@@ -18,7 +18,7 @@ use std::thread::current;
 use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
-use edlc_core::prelude::mir_backend::{Backend, CodeGen};
+use edlc_core::prelude::mir_backend::{Backend, CodeGen, StaticData};
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
@@ -76,7 +76,8 @@ struct TestBackend {
     funcs: RefCell<MirFuncRegistry<Self>>,
     intrinsics: HashMap<MirFuncId, FunctionBinding>,
     globals: HashMap<EdlVarId, AmorphusDataCopy>,
-    runtime: Rc<Mutex<TestRuntime>>
+    runtime: Rc<Mutex<TestRuntime>>,
+    static_data: Mutex<Vec<StaticData>>,
 }
 
 impl TestCompiler {
@@ -388,7 +389,8 @@ impl TestBackend {
             funcs: RefCell::new(MirFuncRegistry::default()),
             intrinsics: HashMap::new(),
             globals: HashMap::new(),
-            runtime: Rc::new(Mutex::new(TestRuntime::new()))
+            runtime: Rc::new(Mutex::new(TestRuntime::new())),
+            static_data: Mutex::new(Vec::new()),
         }
     }
 
@@ -650,8 +652,18 @@ impl Backend for TestBackend {
             .map(|ptr| ptr.cast())
     }
 
-    fn alloc_static(&mut self, data: Box<[u8]>) -> NonNull<()> {
-        todo!()
+    fn alloc_static(&self, data: StaticData) -> NonNull<()> {
+        let mut lock = self.static_data.lock().unwrap();
+        let idx = if let Some(idx) = lock
+            .iter()
+            .position(|d| d == &data) {
+            idx
+        } else {
+            let i = lock.len();
+            lock.push(data);
+            i
+        };
+        NonNull::new(lock[idx].as_ptr() as *mut ()).unwrap()
     }
 
     fn runtime(&self, ordinal: u16) -> Option<NonNull<()>> {

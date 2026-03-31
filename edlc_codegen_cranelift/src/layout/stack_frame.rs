@@ -173,13 +173,17 @@ impl StackFrameMapping {
         builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
     ) -> Option<ir::Value> {
+        let (offset, ty) = self.layout.local_offset(value).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            return None;
+        }
+
         match self.mapping.get(value.0)? {
             Mapping::Reg => {
                 // must be a POD type
                 ir_values.reg(value)
             },
             Mapping::Stack => {
-                let (offset, ty) = self.layout.local_offset(value).unwrap();
                 assert!(reg.is_plain_old_data(*ty));
                 Some(builder
                     .ins()
@@ -196,12 +200,16 @@ impl StackFrameMapping {
         builder: &mut FunctionBuilder,
         reg: &MirTypeRegistry,
     ) {
+        let (offset, ty) = self.layout.local_offset(target).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            panic!("plain old data type cannot be zero-sized!");
+        }
+
         match self.mapping.get(target.0).unwrap() {
             Mapping::Reg => {
                 ir_values.set_value(*target, value);
             }
             Mapping::Stack => {
-                let (offset, ty) = self.layout.local_offset(target).unwrap();
                 assert!(reg.is_plain_old_data(*ty));
                 builder
                     .ins()
@@ -220,6 +228,9 @@ impl StackFrameMapping {
         output: &mut Vec<ir::Value>,
     ) {
         let (offset, ty) = self.layout.local_offset(value).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            return;
+        }
         let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
 
         match self.mapping.get(value.0).unwrap() {
@@ -268,6 +279,10 @@ impl StackFrameMapping {
         abi: &Arc<AbiConfig>,
     ) {
         let (offset, ty) = self.layout.local_offset(target).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            assert_eq!(value.len(), 0);
+            return;
+        }
         let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
 
         match self.mapping.get(target.0).unwrap() {
@@ -347,6 +362,11 @@ impl StackFrameMapping {
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
     ) {
+        let (src_range, ty) = self.layout.local_offset(src).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            return;
+        }
+
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let src_ir = ir_values.reg(src).unwrap();
@@ -363,7 +383,6 @@ impl StackFrameMapping {
                 }
             },
             Mapping::Stack => {
-                let (src_range, ty) = self.layout.local_offset(src).unwrap();
                 match self.mapping.get(dst.0).unwrap() {
                     Mapping::Reg => {
                         let ty_ir = SSARepr::pod(ty, reg).unwrap();
@@ -392,6 +411,11 @@ impl StackFrameMapping {
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
     ) {
+        let (src_range, ty) = self.layout.local_offset(src).unwrap();
+        if reg.byte_size(*ty).unwrap() == 0 {
+            return;
+        }
+
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let src_ir = ir_values.reg(src).unwrap();
@@ -409,7 +433,6 @@ impl StackFrameMapping {
                 }
             },
             Mapping::Stack => {
-                let (src_range, ty) = self.layout.local_offset(src).unwrap();
                 match self.mapping.get(dst.0).unwrap() {
                     Mapping::Reg => {
                         assert_eq!(offset, 0);
@@ -481,6 +504,9 @@ impl StackFrameMapping {
             *target_ty,
             "reference type does not match target type",
         );
+        if reg.byte_size(*target_ty).unwrap() == 0 {
+            return;
+        }
 
         let ir_ptr = self.load_pod(ptr, ir_values, builder, reg).unwrap();
         self.load_raw_ptr(ir_ptr, const_offset, target, ir_values, builder, reg, abi);
@@ -497,6 +523,10 @@ impl StackFrameMapping {
         abi: &Arc<AbiConfig>,
     ) {
         let (target_offset, target_ty) = self.layout.local_offset(target).unwrap();
+        if reg.byte_size(*target_ty).unwrap() == 0 {
+            return;
+        }
+
         match self.mapping.get(target.0).unwrap() {
             Mapping::Reg => {
                 let ir_target_ty = SSARepr::pod(target_ty, reg).unwrap();
@@ -540,6 +570,9 @@ impl StackFrameMapping {
             *src_ty,
             "reference type does not match target type",
         );
+        if reg.byte_size(*src_ty).unwrap() == 0 {
+            return;
+        }
 
         let ir_ptr = self.load_pod(ptr, ir_values, builder, reg).unwrap();
         self.write_raw_ptr(src, ir_ptr, const_offset, ir_values, builder, reg, abi);
@@ -557,6 +590,10 @@ impl StackFrameMapping {
         abi: &Arc<AbiConfig>,
     ) {
         let (src_offset, src_ty) = self.layout.local_offset(src).unwrap();
+        if reg.byte_size(*src_ty).unwrap() == 0 {
+            return;
+        }
+
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let data = ir_values.reg(src).unwrap();
@@ -606,6 +643,10 @@ impl StackFrameMapping {
         let ir_dst = self.load_pod(dst, ir_values, builder, reg).unwrap();
 
         let base_ty = reg.get_ref_type(src_ty).unwrap();
+        if reg.byte_size(base_ty).unwrap() == 0 {
+            return;
+        }
+
         let layout = reg.abi_layout(abi.clone(), base_ty).unwrap();
         for eightbyte in SSARepr::iter_eightbytes(&layout) {
             let data = builder
@@ -1066,7 +1107,7 @@ impl CallLayout {
             .any(|arg| matches!(&arg.purpose, ArgumentPurpose::ReturnBuffer(_)))
     }
 
-    pub fn compile<Runtime>(
+    pub(crate) fn compile<Runtime>(
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &MirPhase,

@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::mir::mir_backend::{Backend, StaticData};
 use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
@@ -33,6 +34,7 @@ impl MirLiteral {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
+        backend: &impl Backend,
     ) {
         match &self.value {
             MirLiteralValue::Char(val) => {
@@ -42,14 +44,14 @@ impl MirLiteral {
                 vm.write(*target, *val, stack_frame, reg)
             }
             MirLiteralValue::Str(s) => {
-                let bytes = s.as_bytes();
-                let bytes_range = vm.alloc_const(bytes.len(), 16);
-                vm.copy_bytes(bytes_range.start, bytes);
-                let ptr = vm.get_ptr(bytes_range.clone());
+                let bytes = s.clone().into_bytes();
+                let len = bytes.len();
+                let ptr = backend.alloc_static(
+                    StaticData::Raw(bytes.into_boxed_slice()));
                 vm.write_fat_ptr(
                     *target,
-                    ptr,
-                    bytes_range.len(),
+                    ptr.as_ptr() as *const _,
+                    len,
                     stack_frame,
                     reg
                 );

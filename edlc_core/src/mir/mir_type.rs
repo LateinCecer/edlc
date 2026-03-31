@@ -639,7 +639,7 @@ impl MirTypeLayout {
         }
     }
 
-    fn float_bytes(&self, size: usize, types: &MirTypeRegistry, flag: &mut ByteLayout) {
+    pub fn float_bytes(&self, size: usize, types: &MirTypeRegistry, flag: &mut ByteLayout) {
         match self {
             Self::Integer => {
                 for _ in 0..size {

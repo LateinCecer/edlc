@@ -100,8 +100,6 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
         &mut self,
         id: MirFuncId,
     ) -> Result<Self::CallGen, HirTranslationError> {
-        assert!(self.mir_id.is_none());
-        self.mir_id = Some(id);
         let symbol = self.create_raw_symbol(id);
         Ok(Box::new(JITExternCall {
             symbol: symbol.finalize(),

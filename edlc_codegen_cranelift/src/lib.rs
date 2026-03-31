@@ -47,7 +47,7 @@ fn setup_logger() -> Result<(), fern::InitError> {
                                     message,
             ))
         })
-        .level(log::LevelFilter::Warn)
+        .level(log::LevelFilter::Info)
         .chain(std::io::stdout())
         .chain(fern::log_file("debug_log.log")?)
         .apply()?;

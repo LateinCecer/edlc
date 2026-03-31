@@ -29,7 +29,8 @@ impl<Runtime> Compilable<Runtime> for MirCall {
         expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         // build the function call using the code generator defined in the function registry
-        backend.func_reg.clone()
+        backend.func_reg
+            .clone()
             .borrow_mut()
             .generate_call_code(self.func, backend, phase, self, target, expr_id)?;
         Ok(())

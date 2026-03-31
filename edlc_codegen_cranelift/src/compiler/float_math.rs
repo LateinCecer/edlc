@@ -15,7 +15,7 @@
  */
 
 use edlc_core::inline_code;
-use edlc_core::prelude::{CompilerError, EdlCompiler};
+use edlc_core::prelude::{CompilerError, EdlCompiler, FromFunction};
 use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::ir::{InstBuilder, MemFlags, types};
 use crate::compiler::integer_math::*;
@@ -210,7 +210,7 @@ impl<Runtime> JIT<Runtime> {
             impl f64 {
                 fn as_u64_bits(builder, val: f64) -> u64 {
                     { builder.bitcast(types::I64, MemFlags::new(), val) }
-                }; { (f64::as_bits(val)) }
+                }; { (f64::to_bits(val)) }
             }
             impl f64 {
                 fn from_u64_bits(builder, val: u64) -> f64 {
