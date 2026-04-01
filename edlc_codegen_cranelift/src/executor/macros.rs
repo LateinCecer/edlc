@@ -397,7 +397,7 @@ mod test {
     use std::sync::RwLock;
     use edlc_core::inline_code;
     use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
-    use edlc_core::prelude::{DocGenerator, Item};
+    use edlc_core::prelude::{DocGenerator, Item, JitCompiler};
     use edlc_core::prelude::ast_type_def::LayoutOptions;
     use edlc_core::prelude::mir_expr::Context;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
@@ -914,15 +914,15 @@ fn test() -> i32 {
     let buffers = [0usize, 1usize, 2usize];
     let dims = [2usize, 1usize, 2usize];
     println("...");
-    let test: [usize; 3] = MyData::foo(fields, buffers, dims, "rino!");
+    let test: [usize; 3] = MyData::foo(fields, buffers, dims, "bar!");
     println("done testing foo!");
     0
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -1158,37 +1158,10 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
-        assert_eq!(11, compiler.backend.get_runtime(0.into())?.read().unwrap().res.len());
-
-        // test documentation function
-        struct SimpleDocPrinter {}
-
-        impl DocGenerator for SimpleDocPrinter {
-            type Error = ();
-            fn insert_definition(&mut self, item: &Item) -> Result<(), ()> {
-                println!("{item}");
-                Ok(())
-            }
-        }
-
-        println!("documentation:");
-        compiler.compiler.generate_docs(&mut SimpleDocPrinter {});
-
-        if !fs::exists("test")? {
-            fs::create_dir("test")?;
-        }
-        if !fs::exists("test/docs")? {
-            fs::create_dir("test/docs")?;
-        }
-
-        println!("\ngenerating docs...\n");
-        // let mut html_gen = edl_docs::HtmlGenerator::new(
-        //     BufWriter::new(File::create("test/docs/index.html")?));
-        // compiler.compiler.generate_docs(&mut html_gen);
-        // html_gen.finish()?;
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
+        assert_eq!(compiler.backend.get_runtime(0.into())?.read().unwrap().res.len(), 9);
         Ok(())
     }
 
@@ -1262,9 +1235,9 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_function_with_param(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
         Ok(())
     }
 
@@ -1338,9 +1311,9 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_function_with_param(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
         Ok(())
     }
 
@@ -1386,9 +1359,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -1736,19 +1709,381 @@ fn test(f: f64) -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_function_with_param(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
 
         // test external script insert
+        let output_type = compiler.compiler.phase.types.empty();
         let script: TypedProgram<(), _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"{
+            .quick_eval(&vec!["test"].into(), &inline_code!(r#"{
             println(" -------------------------------- ");
             println(" -> externally compiled script <- ");
             println("----------------------------------");
             time_step.print();
-        }"#))?;
+        }"#), &EdlMaybeType::Fixed(output_type), Context::Runtime)?;
         script.exec(&mut compiler.backend)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_function_resolve_bug_debug() -> Result<(), anyhow::Error> {
+        let _ = crate::setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn println<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                println!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn println_i32<>(val: i32) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn println_usize<>(val: usize) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn println_bool<>(val: bool) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn println_f64<>(val: f64) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_f32<>(val: f32) -> () where; {
+                println!("{}", val);
+            }
+        );
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn print<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn print<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                print!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn print_i32<>(val: i32) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn print_usize<>(val: usize) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn print_bool<>(val: bool) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn print_f64<>(val: f64) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn print_f32<>(val: f32) -> () where; {
+                print!("{}", val);
+            }
+        );
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct PhyNum<T> {
+            val: T,
+            unit: FatPtr,
+        }
+
+        impl<T: MirLayout + 'static> MirLayout for PhyNum<T> {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<T>("val".to_string(), types, mem::offset_of!(Self, val));
+                builder.add_type::<FatPtr>("unit".to_string(), types, mem::offset_of!(Self, unit));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type PhyNum<T> = struct {
+            val: T,
+            unit: str,
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<PhyNum<f64>>(inline_code!("PhyNum<f64>"))?;
+        compiler.compiler.insert_type_instance::<PhyNum<f32>>(inline_code!("PhyNum<f32>"))?;
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct SVector<T, const N: usize> {
+            data: [T; N],
+        }
+
+        impl<T: MirLayout + 'static, const N: usize> MirLayout for SVector<T, N>
+        where [T; N]: MirLayout + 'static {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<[T; N]>("data".to_string(), types, mem::offset_of!(Self, data));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type SVector<T, const N: usize> = struct {
+            data: [T; N],
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 1>>(inline_code!("SVector<f64, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 2>>(inline_code!("SVector<f64, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 3>>(inline_code!("SVector<f64, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 4>>(inline_code!("SVector<f64, 4>"))?;
+
+        compiler.compiler.insert_type_instance::<SVector<f32, 1>>(inline_code!("SVector<f32, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 2>>(inline_code!("SVector<f32, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 3>>(inline_code!("SVector<f32, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 4>>(inline_code!("SVector<f32, 4>"))?;
+
+        let env = compiler.compiler.parse_fn_signature(inline_code!("?comptime fn env<T>(name: str, def: T) -> T"))?;
+        jit_func!(compiler, fn<"PhyNum<f64>";>(env),
+            const fn env_num_f64<>(_name: FatPtr, def: PhyNum<f64>) -> PhyNum<f64> where; {
+                PhyNum {
+                    unit: def.unit,
+                    val: std::f64::consts::PI + def.val,
+                }
+            }
+        );
+
+        trait Zero {
+            fn zero() -> Self;
+        }
+
+        impl Zero for f32 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        impl Zero for f64 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        let zero_gradient = compiler.compiler
+            .parse_fn_signature(inline_code!(r#"
+            ?comptime fn zero_gradient<T, const N: usize, const DIM: usize>() -> [SVector<T, N>; DIM]
+            "#))?;
+
+        fn impl_grad<T: Zero + Copy + 'static, const N: usize, const DIM: usize>(
+            comp: &mut CraneliftJIT<()>,
+            zero_gradient: EdlTypeId,
+        ) -> Result<(), anyhow::Error> {
+            jit_func!(comp, fn<any::type_name::<T>(), &format!("{N}"), &format!("{DIM}");>(zero_gradient),
+                const fn zero_gradient_<(T_=T), const (N_=N): usize, const (DIM_=DIM): usize>()
+                -> [SVector<T_, N_>; DIM_] where T_: Zero, T_: Copy; {
+                    [0; DIM_].map(|_| SVector { data: [T_::zero(); N_] })
+                }
+            );
+            Ok(())
+        }
+        impl_grad::<f32, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f32, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 4>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 4>(&mut compiler, zero_gradient)?;
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::println;
+use std::print;
+use std::PhyNum;
+use std::SVector;
+
+/// Time step size
+let time_step: PhyNum<f64> = PhyNum { val: 1.0e-3, unit: "ns" };
+
+type MyData = struct {
+    a: i32,
+    b: i32,
+};
+
+type BoundaryField<T, const N: usize, const DIM: usize> = struct {
+    element: SVector<T, N>,
+};
+
+type BoundaryCondition<T, const N: usize, const DIM: usize> = struct {
+    name: str,
+    gradient: [SVector<T, N>; DIM],
+};
+
+impl<T, const N: usize, const DIM: usize> BoundaryField<T, N, DIM> {
+    fn set_bc(self: Self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
+        print("setting boundary for BoundaryField<");
+        print(N);
+        print(", ");
+        print(DIM);
+        print("> with id ");
+        println(id);
+        // print(" to condition ");
+        // PrintArray { data: self.element.data }.print();
+    }
+}
+
+impl<T, const N: usize, const DIM: usize> BoundaryCondition<T, N, DIM> {
+    ?comptime fn von_neumann(grad: [SVector<T, N>; DIM]) -> Self {
+        BoundaryCondition {
+            name: "von-neumann",
+            gradient: grad,
+        }
+    }
+}
+
+
+impl MyData {
+    fn print(self: Self) {
+        println(self.a);
+        println(self.b);
+    }
+}
+
+impl<T> PhyNum<T> {
+    fn new(val: T, unit: str) -> Self {
+        PhyNum { val, unit }
+    }
+
+    fn print(self: Self) {
+        print(self.val);
+        print(" ");
+        println(self.unit);
+    }
+}
+
+// fn non_dim<T>(val: PhyNum<T>) -> T {
+//     val.val
+// }
+//
+// fn add_vec<const N: usize>(mut array: [f32; N], val: f32) -> [f32; N] {
+//     let mut i: usize = 0;
+//     loop {
+//         if i >= N { break; }
+//         array[i] += val;
+//         i += 1;
+//     }
+//     array
+// }
+//
+// fn test_array<T, const N: usize>(array: [T; N], val: T) -> [T; N] {
+//     println("test_array");
+//     array
+// }
+//
+// type PrintArray<T, const N: usize> = struct {
+//     data: [T; N],
+// };
+//
+// impl<T, const N: usize> PrintArray<T, N> {
+//     fn print(self: Self) {
+//         print_array(self.data)
+//     }
+// }
+//
+// fn print_array<T, const N: usize>(val: [T; N]) {
+//     let mut i: usize = 0;
+//     print("[");
+//     loop {
+//         if i >= N { break }
+//         if i != 0 {
+//             print(", ");
+//         }
+//         print(val[i]);
+//         i += 1;
+//     }
+//     println("]");
+// }
+
+fn test(f: f64) -> i32 {
+    println("starting test");
+    let num = PhyNum::new(0.32_f64, "s");
+    num.print();
+
+    // println(non_dim(PhyNum::new(42.0_f64, "m")));
+    // let tmp: PhyNum<f64> = std::env("T", PhyNum::new(3.0_f64, "s"));
+    // println(non_dim(std::env("test", PhyNum::new(0.0_f64, "m"))));
+    // tmp.print();
+    //
+    // let val = add_vec([0.0, 0.0, 1.0, 2.0], 0.1415);
+    // print_array(val);
+    //
+    // let val = test_array([0.0; 3], 1.0_f32);
+    // PrintArray { data: val }.print();
+    //
+    // MyData {
+    //     a: 42,
+    //     b: 23,
+    // }.print();
+    //
+    //
+    // // test some deeper going type inference
+    // println("");
+    // println("-----------------------------------------------------");
+    // println("");
+    // let grad: [SVector<f32, 3>; 3] = std::zero_gradient();
+    // print_array(grad[1].data);
+    //
+    // let field: BoundaryField<f64, 3, 3> = BoundaryField {
+    //     element: SVector { data: [0.0; 3] },
+    // };
+    //
+    // let grad = std::zero_gradient::<f32, 3, 3>();
+    // field.set_bc(1, BoundaryCondition::von_neumann(std::zero_gradient()));
+    0
+}
+        "#))?;
+
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_function_with_param(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
+
+        // test external script insert
+        // let output_type = compiler.compiler.phase.types.empty();
+        // let script: TypedProgram<(), _> = compiler
+        //     .quick_eval(&vec!["test"].into(), &inline_code!(r#"{
+        //     println(" -------------------------------- ");
+        //     println(" -> externally compiled script <- ");
+        //     println("----------------------------------");
+        //     time_step.print();
+        // }"#), &EdlMaybeType::Fixed(output_type), Context::Runtime)?;
+        // script.exec(&mut compiler.backend)?;
         Ok(())
     }
 }

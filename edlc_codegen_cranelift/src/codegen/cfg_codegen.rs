@@ -43,60 +43,70 @@ pub(crate) fn cfg_codegen<Runtime>(
     };
     // insert blocks and block parameters for those blocks
     for block_ref in cfg.blocks() {
-        let block = cfg.get_block(&block_ref).unwrap();
         let ir_block = builder.builder.create_block();
-        builder.builder.switch_to_block(ir_block);
-
-        if block_ref == cfg.root() {
-            // insert block parameters from function definition
-            builder.builder.append_block_params_for_function_params(ir_block);
-            let ret_buf = builder.function_layout.map(
-                ir_block,
-                &builder.layout,
-                &mut builder.ir_values,
-                &mut builder.builder,
-                &phase.types,
-                &builder.abi,
-            );
-            if let Some(ret_bufs) = mapping.return_bufs.as_mut() {
-                ret_bufs.view_mut(block_ref.ordinal()).set(ret_buf.unwrap());
-            } else {
-                assert!(ret_buf.is_none());
-            }
-        } else {
-            // insert return buffer parameter if necessary
-            if let Some(ret_bufs) = mapping.return_bufs.as_mut() {
-                let (ir_ty, _) = SSARepr::itype_for_alignment(builder.abi.pointer_width);
-                let ret_buf = builder.builder.append_block_param(ir_block, ir_ty);
-                ret_bufs.view_mut(block_ref.ordinal()).set(ret_buf);
-            }
-            // insert block parameters
-            for param in block.parameters.iter() {
-                if !builder.layout.is_block_param_on_reg(param, &phase.types) {
-                    continue;
-                }
-                let ty = builder.layout.get_ty(param).unwrap();
-                let ir_ty = SSARepr::pod(ty, &phase.types).unwrap();
-                let value = builder.builder.append_block_param(ir_block, ir_ty);
-                builder.layout.store_pod(
-                    value,
-                    param,
-                    &mut builder.ir_values,
-                    &mut builder.builder,
-                    &phase.types,
-                );
-            }
-        }
-
         mapping.mapping.view_mut(block_ref.ordinal()).set(ir_block);
     }
 
     // translate blocks to cranelift IR
     for block_ref in cfg.blocks() {
+        prepare_block(&cfg, &block_ref, builder, phase, &mut mapping)?;
         let block = cfg.get_block(&block_ref).unwrap();
         block_codegen(&block_ref, block, &cfg.expressions, builder, phase, &mapping)?;
     }
     builder.builder.seal_all_blocks();
+    Ok(())
+}
+
+fn prepare_block<Runtime>(
+    cfg: &MirFlowGraph,
+    block_ref: &MirBlockRef,
+    builder: &mut FunctionTranslator<Runtime>,
+    phase: &mut MirPhase,
+    mapping: &mut BlockMapper,
+) -> Result<(), MirError<JIT<Runtime>>> {
+    let ir_block = mapping[*block_ref];
+    builder.builder.switch_to_block(ir_block);
+    if block_ref == &cfg.root() {
+        // insert block parameters from function definition
+        builder.builder.append_block_params_for_function_params(ir_block);
+        let ret_buf = builder.function_layout.map(
+            ir_block,
+            &builder.layout,
+            &mut builder.ir_values,
+            &mut builder.builder,
+            &phase.types,
+            &builder.abi,
+        );
+        if let Some(ret_bufs) = mapping.return_bufs.as_mut() {
+            ret_bufs.view_mut(block_ref.ordinal()).set(ret_buf.unwrap());
+        } else {
+            assert!(ret_buf.is_none());
+        }
+    } else {
+        // insert return buffer parameter if necessary
+        if let Some(ret_bufs) = mapping.return_bufs.as_mut() {
+            let (ir_ty, _) = SSARepr::itype_for_alignment(builder.abi.pointer_width);
+            let ret_buf = builder.builder.append_block_param(ir_block, ir_ty);
+            ret_bufs.view_mut(block_ref.ordinal()).set(ret_buf);
+        }
+        // insert block parameters
+        let block = cfg.get_block(&block_ref).unwrap();
+        for param in block.parameters.iter() {
+            if !builder.layout.is_block_param_on_reg(param, &phase.types) {
+                continue;
+            }
+            let ty = builder.layout.get_ty(param).unwrap();
+            let ir_ty = SSARepr::pod(ty, &phase.types).unwrap();
+            let value = builder.builder.append_block_param(ir_block, ir_ty);
+            builder.layout.store_pod(
+                value,
+                param,
+                &mut builder.ir_values,
+                &mut builder.builder,
+                &phase.types,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -109,8 +119,6 @@ fn block_codegen<Runtime>(
     mapping: &BlockMapper,
 ) -> Result<(), MirError<JIT<Runtime>>> {
     info!("entering block: {:?}", block_ref);
-    let current_block = mapping[*block_ref];
-    builder.builder.switch_to_block(current_block);
     for statement in block.statements.iter() {
         statement_codegen(expressions, statement, builder, phase)?;
     }
@@ -286,7 +294,7 @@ fn seal_codegen<Runtime>(
                 );
                 builder.builder
                     .ins()
-                    .return_(&[ptr]);
+                    .return_(&[]);
             } else {
                 let mut output = Vec::new();
                 builder.layout.load_eightbytes(

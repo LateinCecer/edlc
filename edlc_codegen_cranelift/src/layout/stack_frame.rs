@@ -85,7 +85,7 @@ impl StackFrameMapping {
 
             call_layout.iter_values().for_each(|(val, call_mapping)| {
                 match call_mapping {
-                    CallLayoutMapping::Reg => mapping.view_mut(val.0).set(Mapping::Reg),
+                    // CallLayoutMapping::Reg => mapping.view_mut(val.0).set(Mapping::Reg),
                     CallLayoutMapping::Stack => mapping.view_mut(val.0).set(Mapping::Stack),
                     _ => (),
                 }
@@ -981,6 +981,10 @@ impl FunctionLayout {
                 let layout = reg.abi_layout(abi.clone(), *val).unwrap();
                 SSARepr::iter_eightbytes(&layout).for_each(|ty| sig.returns.push(ir::AbiParam::new(ty)));
             }
+        } else {
+            // make sure we copy the return buffer from RDI to RAX when returning, following the ABI standard
+            // let (ptr_ty, _) = SSARepr::itype_for_alignment(abi.pointer_width);
+            // sig.returns.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::StructReturn));
         }
         sig
     }
@@ -1210,6 +1214,9 @@ impl CallLayout {
                 None
             }
         } else {
+            // make sure we copy the return buffer from RDI to RAX when returning, following the ABI standard
+            // let (ptr_ty, _) = SSARepr::itype_for_alignment(backend.abi.pointer_width);
+            // sig.returns.push(ir::AbiParam::special(ptr_ty, ir::ArgumentPurpose::StructReturn));
             None
         };
 

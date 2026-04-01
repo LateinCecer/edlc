@@ -327,8 +327,10 @@ impl SSARepr {
                     _ => panic!("invalid pointer size"),
                 }
             },
-            ty if *ty == reg.empty() => None,
-            ty => panic!("not a POD data type: {ty} != {}", reg.f32()),
+            ty if *ty == reg.empty() || *ty == reg.never() => None,
+            ty => {
+                panic!("not a POD data type: {ty}")
+            },
         }
     }
 

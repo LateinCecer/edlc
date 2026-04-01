@@ -412,6 +412,150 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> R>(ptr) })
     }
 
+    pub fn get_function_with_param<A: MirLayout, R: MirLayout>(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<extern "C" fn(A) -> R, anyhow::Error> {
+        let code = name.get_src()?;
+        let ast_name = AstTypeName::parse(&mut self.compiler
+            .create_parser(&code, name.clone()))
+            .in_file(name.clone())
+            .map_err(|err| self.compiler.report_ast_err(err))?;
+        let hir_name = ast_name.hir_repr(&mut self.compiler.phase)?;
+        let (last, raw_associated_type) = hir_name.extract_last();
+        let (func, ass_ty) = if let Some(mut raw) = raw_associated_type {
+            let ty = raw.as_type_instance(last.pos, &mut self.compiler.phase)?;
+            match ty {
+                SegmentType::Type(ty) => {
+                    let func = self.compiler.phase.res
+                        .find_associated_item(&ty, &last.path)
+                        .ok_or_else(|| anyhow!("no function '{}' associated to type '{:?}'", last.path, ty))?;
+                    let ItemVariant::Fn(func_id) = &func.variant else {
+                        return Err(anyhow!("item associated to type is not a function"));
+                    };
+                    (*func_id, Some(ty))
+                },
+                SegmentType::Trait(tr) => {
+                    let func = self.compiler.phase.res
+                        .find_associated_trait_item(&tr, &last.path)
+                        .ok_or_else(|| anyhow!("no function '{}' associated to trait '{:?}'", last.path, tr))?;
+                    let ItemVariant::Fn(func_id) = &func.variant else {
+                        return Err(anyhow!("item associated to trait is not a function"));
+                    };
+                    (*func_id, None)
+                },
+            }
+        } else {
+            let func = self.compiler.phase.res
+                .find_top_level_function(&last.path, &self.compiler.phase.types)
+                .ok_or_else(|| anyhow!("function does not exist"))?;
+            (func, None)
+        };
+
+        let sig = self.compiler.phase.types.get_fn_signature(func)?
+            .clone();
+        if sig.params.len() != 1 {
+            return Err(anyhow!("invalid number of function parameters provided: {} != 1", sig.params.len()));
+        }
+
+        let ast_param = last.params
+            .parse_env(sig.env, &mut self.compiler.phase)
+            .in_file(name)?;
+        let mut hir_param = ast_param.hir_repr(&mut self.compiler.phase)?;
+        let edl_param = hir_param.edl_repr(sig.env, &mut self.compiler.phase)?;
+        if !edl_param.is_fully_resolved() {
+            return Err(anyhow!("generic parameters not fully resolved"));
+        }
+
+        // format function instance
+        let instance = if let Some(ass_ty) = ass_ty {
+            let (mut stack, replacements) = self.compiler.phase
+                .find_parameter_stack(func, edl_param, ass_ty.clone())?;
+            let inv_replacements = replacements
+                .inverse(&mut self.compiler.phase.types)?;
+            stack.replace_all(&inv_replacements, &self.compiler.phase.types);
+
+            EdlFnInstance {
+                func,
+                associated_ty: Some(ass_ty),
+                param: stack,
+            }
+        } else {
+            let mut stack = EdlParamStack::default();
+            stack.insert_def(edl_param);
+
+            EdlFnInstance {
+                func,
+                associated_ty: None,
+                param: stack,
+            }
+        };
+
+        // verify that type layouts are FFI safe
+        let ret = sig
+            .return_type()
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        self.check_layout_ffi_compatible::<R>(ret)?;
+        let a = sig.params[0]
+            .ty
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        self.check_layout_ffi_compatible::<A>(a)?;
+
+        // get function id
+        let mir_id = {
+            let mut funcs = self.backend.func_reg.borrow_mut();
+            let mir_id = funcs
+                .mir_id(
+                    &instance,
+                    &mut self.compiler.phase,
+                    &mut self.compiler.mir_phase,
+                    ComptimeParams::empty(),
+                    false,
+                )?;
+            mir_id
+        };
+
+
+        // make sure function is compiled
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
+        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
+        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
+        self.backend
+            .compile_associated_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
+
+        let ptr = unsafe { self.backend.get_func_ptr(mir_id) }
+            .ok_or_else(|| anyhow!("function not compiled"))?;
+        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn(A) -> R>(ptr) })
+    }
+
+    /// Checks if an EDL type has an FFI compatible layout to a Rust type.
+    /// This method does not check if the types are actually equivalent; in many cases such a check
+    /// is actually impossible and usually also not what you want.
+    pub fn check_layout_ffi_compatible<Rust: MirLayout>(
+        &mut self,
+        edl_type: EdlMaybeType,
+    ) -> Result<(), anyhow::Error> {
+        if !edl_type.is_fully_resolved() {
+            return Err(anyhow!("return type not fully resolved"));
+        }
+        let mir_ret = self.compiler.mir_phase.types
+            .mir_id(&edl_type.unwrap(), &self.compiler.phase.types)?;
+        if self.compiler.mir_phase.types.byte_size(mir_ret).unwrap() != size_of::<Rust>() {
+            return Err(anyhow!("size of return types does not match rust type"));
+        }
+        if self.compiler.mir_phase.types.byte_alignment(mir_ret).unwrap() != align_of::<Rust>() {
+            return Err(anyhow!("alignment of return types does not match rust type"));
+        }
+        let ret_byte_layout = self.compiler.mir_phase.types.byte_layout(mir_ret).unwrap();
+        let exp_layout = Rust::layout(&self.compiler.mir_phase.types);
+        let mut exp_byte_layout = ByteLayout::default_high();
+        exp_layout.layout.float_bytes(exp_layout.size, &self.compiler.mir_phase.types, &mut exp_byte_layout);
+        if ret_byte_layout != exp_byte_layout {
+            return Err(anyhow!("layout of return types does not match rust type"));
+        }
+        Ok(())
+    }
+
     /// Compiles an entire **fracht** that compiles to a binary.
     ///
     /// # Example

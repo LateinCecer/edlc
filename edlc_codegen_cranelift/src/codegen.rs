@@ -429,7 +429,7 @@ pub trait ItemCodegen<Runtime> {
 }
 
 impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
-    pub fn new(
+    pub(crate) fn new(
         jit: &'jit mut JIT<Runtime>,
         mapping: StackFrameMapping,
         function_layout: FunctionLayout,
