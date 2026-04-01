@@ -464,6 +464,13 @@ impl DocElement for HirFnParam {
 impl HirFnSignature {
     /// This creates a MIR representation of the function signature, with the specified parameter
     /// definitions to generate the specific function implementation.
+    ///
+    /// # Parameter Env
+    ///
+    /// A side effect of this function is that it mushes the parameter environment of the signature
+    /// to the mir phases type registry.
+    /// So, somewhere after calling this function, [MirTypeRegistry::pop_layer] should be called to
+    /// reset the parameter environment.
     fn mir_repr<B: Backend>(
         &self,
         phase: &mut HirPhase,

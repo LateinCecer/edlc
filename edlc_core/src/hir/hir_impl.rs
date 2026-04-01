@@ -15,7 +15,8 @@
  */
 
 use std::collections::HashMap;
-use log::debug;
+use std::hash::DefaultHasher;
+use log::{debug, info};
 use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeInstance};
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
@@ -23,6 +24,7 @@ use crate::documentation::{DocCompilerState, DocElement};
 use crate::hir::hir_fn::HirFn;
 use crate::hir::{HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::translation::HirTranslationError;
+use crate::issue::{TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
@@ -262,6 +264,11 @@ impl HirImpl {
         let param = instance.param.get_def(self.env)
             .expect("Tries to generate function from MIR implementation without fitting \
             implementation parameters in the parameter stack of the function instance").clone();
+
+        let impl_params = TypeArguments::new(&[TypeArgument::<'_, DefaultHasher>::new_edl(&param)])
+            .to_string(&phase.types, &phase.vars);
+        info!("implementation monomorphization generic parameters: `{}`", impl_params);
+
         mir_phase.types.push_layer(param, &phase.types)
             .map_err(|err| HirError::new_edl(self.pos, err))?;
 

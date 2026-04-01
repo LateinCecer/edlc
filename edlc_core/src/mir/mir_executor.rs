@@ -334,8 +334,8 @@ macro_rules! impl_from_function(
                 )*
 
                 let param_type_id = TypeId::of::<$R>();
-                let param_ty = reg.get_rust_from_type(ret_buffer.ty);
-                if param_ty.is_none() || param_ty.unwrap() != param_type_id {
+                if reg.byte_size(ret_buffer.ty).unwrap() != std::mem::size_of::<$R>()
+                    || reg.byte_alignment(ret_buffer.ty).unwrap() != std::mem::align_of::<$R>() {
                     return Err(TypeError { type_id: param_type_id, rhs: TypeErrorRhs::MirType(ret_buffer.ty) });
                 }
 

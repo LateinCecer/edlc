@@ -585,7 +585,7 @@ impl MakeGraph for HirName {
                             pos: self.pos,
                             scope: self.scope,
                             src: self.src.clone(),
-                            ty: mir_ty,
+                            ty: target_ty,
                             var: *v,
                             id: graph.mir_phase.new_id(),
                         };

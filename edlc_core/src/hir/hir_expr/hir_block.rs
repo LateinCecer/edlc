@@ -494,8 +494,10 @@ impl HirBlock {
             let target_ty = *graph.graph.get_var_type(&target);
             let tmp = graph.graph.create_temp_variable(target_ty);
             ret.write_to_graph(graph, tmp)?;
-            graph.graph.insert_move(
-                graph.current_block, tmp, target, DebugSymbols { pos: self.pos });
+            if !graph.is_current_sealed() {
+                graph.graph.insert_move(
+                    graph.current_block, tmp, target, DebugSymbols { pos: self.pos });
+            }
         } else {
             let empty = graph.graph.expressions
                 .insert_empty(&graph.mir_phase.types);

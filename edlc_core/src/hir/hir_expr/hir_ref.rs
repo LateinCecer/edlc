@@ -226,6 +226,9 @@ impl HirRef {
         // try to resolve expr as a reference
         let mut inferer = phase.infer_from(state);
         let expr_ty = expr.get_type_uid(&mut inferer);
+        expr.resolve_types(phase, state)?;
+
+        let mut inferer = phase.infer_from(state);
         let node = inferer.state.node_gen.gen_info(&expr.pos(), &expr.src());
 
         let snapshot = inferer.snapshot();
@@ -237,6 +240,7 @@ impl HirRef {
         } else {
             // expr already has the right type
             inferer.confirm(snapshot);
+            expr.resolve_types(phase, state)?;
             return Ok(());
         }
 

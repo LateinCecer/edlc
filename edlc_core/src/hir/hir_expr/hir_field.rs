@@ -711,25 +711,25 @@ impl ResolveTypes for HirField {
         let infer = &mut phase.infer_from(infer_state);
         let lhs = self.lhs.get_type_uid(infer);
 
+        // at this point we must assume that LHS is a reference
+        let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
+            return Ok(());
+        };
+        // find reference base type to extract field offset
+        let lhs_ty = lhs_ty.get_ref_type()
+            .expect("lhs of field expression must be auto-referenced to a local reference");
+        // infer mutability
+        let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
+        let mutable = self.info.as_ref().unwrap().mutable;
+        if let Err(err) = infer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(lhs_mut)) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+        let lhs: TypeUid = infer.get_generic_type(lhs, 0).unwrap().into();
+
         if let Some(env_constraint) = infer.find_env_constraints(lhs) {
             // insert additional constraints based on the member types
             let mut stack = EnvConstraintStack::default();
             stack.insert(env_constraint);
-
-            let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
-                return Ok(());
-            };
-
-            // find reference base type to extract field offset
-            let lhs_ty = lhs_ty.get_ref_type()
-                .expect("lhs of field expression must be auto-referenced to a local reference");
-
-            // infer mutability
-            let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
-            let mutable = self.info.as_ref().unwrap().mutable;
-            if let Err(err) = infer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(lhs_mut)) {
-                return Err(report_infer_error(err, infer_state, phase));
-            }
 
             let EdlType::Type { state, .. } = phase.types.get_type(lhs_ty.ty)
                 .ok_or(HirError::new_edl(self.pos, EdlError::E011(lhs_ty.ty)))? else {
@@ -768,6 +768,8 @@ impl ResolveTypes for HirField {
                             });
                         }
                     };
+
+                    // get parameter environment
                     match infer.at_env(node, &stack).eq(&own_uid, &ty) {
                         Ok(_) => Ok(()),
                         Err(err) => Err(report_infer_error(err, infer_state, phase)),

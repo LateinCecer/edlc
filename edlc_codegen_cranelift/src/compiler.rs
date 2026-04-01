@@ -212,8 +212,7 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
             128,
             32,
         ).expect("Failed to create panic handle");
-        panic_handle.set_global(&module)
-            .expect("Failed to set global panic handler");
+        let _ = panic_handle.set_global(&module); // may fail if it already exists
 
         Self {
             builder_context: FunctionBuilderContext::new(),

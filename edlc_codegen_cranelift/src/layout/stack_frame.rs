@@ -163,7 +163,7 @@ impl StackFrameMapping {
 
     pub fn is_block_param_on_reg(&self, value: &MirValue, reg: &MirTypeRegistry) -> bool {
         let ty = *self.get_ty(value).unwrap();
-        reg.is_plain_old_data(ty)
+        reg.is_plain_old_data(ty) && reg.byte_size(ty).unwrap() > 0
     }
 
     pub fn load_pod(
