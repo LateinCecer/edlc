@@ -282,13 +282,15 @@ impl MakeGraph for HirLoop {
         let block_value = graph.graph.create_temp_variable(block_ty);
         self.block.write_to_graph_plane(graph, block_value)?;
 
-        // seal loop body by inserting a jump instruction back to the head of the loop and continue
-        // writing in the merge block after the loop.
-        graph.graph.insert_jump(
-            graph.current_block,
-            header_block,
-            DebugSymbols { pos: self.pos },
-        );
+        if !graph.is_current_sealed() {
+            // seal loop body by inserting a jump instruction back to the head of the loop and continue
+            // writing in the merge block after the loop.
+            graph.graph.insert_jump(
+                graph.current_block,
+                header_block,
+                DebugSymbols { pos: self.pos },
+            );
+        }
         graph.current_block = merge_block;
         Ok(())
     }

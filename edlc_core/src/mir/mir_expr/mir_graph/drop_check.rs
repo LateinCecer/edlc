@@ -287,7 +287,7 @@ impl DropAnalysis {
                         .filter_map(|var_use| match var_use {
                             VarUse::Seal(_, _) => Some(block.statements.len()),
                             VarUse::Statement(_, _, uid) => block
-                                .find_current_index(&uid)
+                                .find_current_index(&uid).map(|idx| idx + 1)
                         })
                         .max();
                     if let Some(other_idx) = other_idx {

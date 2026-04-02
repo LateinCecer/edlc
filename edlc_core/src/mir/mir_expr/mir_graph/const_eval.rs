@@ -739,6 +739,19 @@ impl ConstEval {
                             MirExprVariant::Assign | MirExprVariant::Call);
                         buf.view_mut(var.0).set(info);
                         for u in cfg.expressions.collect_vars(*value) {
+                            // if let Some(item) = buf.get_mut(u.0) {
+                            //     item.in_use = true;
+                            // } else {
+                            //     eprintln!(" !missing variable info {u} in block {:x}! ", block_ref.0);
+                            //     eprintln!("=== statements in block: ===");
+                            //     for statement in block.statements.iter() {
+                            //         if let Some(x) = statement.defines() {
+                            //             eprintln!("{x}=..");
+                            //         }
+                            //     }
+                            //     eprintln!("===");
+                            //     panic!();
+                            // }
                             buf.get_mut(u.0).unwrap().in_use = true;
                         }
                     }
@@ -801,8 +814,9 @@ impl ConstEval {
 
         // remove all values that we can consider to be dropped
         let mut remove_counter = 0;
-        for (_val_raw, info) in buf.iter() {
+        for (val_raw, info) in buf.iter() {
             if !info.in_use && info.remove_allowed {
+                // eprintln!("removing var {}  ({:?})", MirValue(val_raw), info);
                 cfg.remove_def(&info.init);
                 if let Some(drop) = info.drop.as_ref() {
                     cfg.remove_use(drop);
@@ -1145,7 +1159,7 @@ impl MirFlowGraph {
                         (var, *uid, debug.clone())
                     }
                     Statement::VarDef { var, value, uid, debug, .. } => {
-                        if value.ty == MirExprVariant::Assign {
+                        if value.ty == MirExprVariant::Assign || value.ty == MirExprVariant::Data || value.ty == MirExprVariant::Literal {
                             continue;
                         }
                         (var, *uid, debug.clone())
@@ -1175,27 +1189,30 @@ impl MirFlowGraph {
     fn replace_constant_parameters(&mut self, consts: &ConstEval) {
         let mut retain_list = vec![]; // for each block, maintain a list of block parameter
         // indices that we *want to keep*
-        for block in self.blocks.iter_mut() {
+        for (block_ref, block) in self.blocks.iter_mut().enumerate() {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
             // check parameters
             let debug = block.pos.clone();
 
-            let mut statements = params
+            let mut prev_statements = Vec::new();
+            mem::swap(&mut prev_statements, &mut block.statements);
+
+            params
                 .iter()
                 .filter_map(|val| consts.get_constant_value(val)
                     .map(|data| (*val, data)))
-                .map(|(val, data)| {
-                    Statement::VarDef {
+                .for_each(|(val, data)| {
+                    let statement = Statement::VarDef {
                         uid: block.new_uid(),
                         var: val,
                         value: self.expressions.insert_data(data.clone().into_mir()),
                         debug: debug.clone(),
-                    }
-                })
-                .collect::<Vec<_>>();
-            statements.append(&mut block.statements);
-            block.statements = statements;
+                    };
+                    block.statements.push(statement);
+                });
+
+            block.statements.append(&mut prev_statements);
             // filter parameters to input into block again
             let mut retain_indices = vec![];
             params.into_iter().enumerate().for_each(|(idx, param)| {
@@ -1887,7 +1904,10 @@ fn process_function(
         .ok::<OptimizationError>()?;
 
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
-    let deconstruction = body.body.deconstruct(&lifeness)?;
+    let mut deconstruction = body.body.deconstruct(&lifeness)?;
+    deconstruction.merge_moves(&body.body);
+    deconstruction.merge_same_type(&body.body);
+
     let options = StackFrameOptions {
         store_plane: true,
         .. Default::default()
@@ -1921,11 +1941,13 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         for func in funcs.iter_mut() {
             process_function(func, vm, compiler, backend)?;
 
-            let mut std_out = std::io::stdout();
-            writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
-            let mut writer = AsciPrinter::new(&mut std_out);
-            writer.print(&func.body).unwrap();
-            std_out.flush().unwrap();
+            #[cfg(feature = "debug_printouts")] {
+                let mut std_out = std::io::stdout();
+                writeln!(&mut std_out, "function {:?} body:", func.mir_id).unwrap();
+                let mut writer = AsciPrinter::new(&mut std_out);
+                writer.print(&func.body).unwrap();
+                std_out.flush().unwrap();
+            }
         }
 
         let mut func_reg = backend.func_reg_mut();
@@ -1949,11 +1971,13 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     for func in funcs.iter_mut() {
         process_function(func, vm, compiler, backend)?;
 
-        // let mut std_out = std::io::stdout();
-        // writeln!(&mut std_out, "comptime function {:?} body:", func.mir_id).unwrap();
-        // let mut writer = AsciPrinter::new(&mut std_out);
-        // writer.print(&func.body).unwrap();
-        // std_out.flush().unwrap();
+        #[cfg(feature = "debug_printouts")] {
+            let mut std_out = std::io::stdout();
+            writeln!(&mut std_out, "comptime function {:?} body:", func.mir_id).unwrap();
+            let mut writer = AsciPrinter::new(&mut std_out);
+            writer.print(&func.body).unwrap();
+            std_out.flush().unwrap();
+        }
     }
     // println!("processed {} comptime functions", funcs.len());
 
@@ -2030,15 +2054,16 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     body.insert_drops_with_dependencies(&borrow_graph)?;
     process_comptime_functions(vm, compiler, backend)?;
 
-    let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
-    let mut writer = AsciPrinter::new(&mut out);
-    writer.print(body).unwrap();
-    out.flush().unwrap();
+    #[cfg(feature = "debug_printouts")] {
+        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(body).unwrap();
+        out.flush().unwrap();
+    }
 
     // create stack frame
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
     let deconstruction = body.deconstruct(&lifeness)?;
-
 
     let options = StackFrameOptions {
         store_plane: true,
@@ -2076,6 +2101,14 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     body.check_scopes(&borrow_graph, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+
+    #[cfg(feature = "debug_printouts")] {
+        let mut out = BufWriter::new(File::create("../test_mir/debug.mir").unwrap());
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(body).unwrap();
+        out.flush().unwrap();
+    }
+
     body.insert_drops_with_dependencies(&borrow_graph)?;
 
     body.validate_call_context(
@@ -2085,7 +2118,23 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     ).ok::<OptimizationError>()?;
 
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
-    let deconstruction = body.deconstruct(&lifeness)?;
+    let mut deconstruction = body.deconstruct(&lifeness)?;
+
+    #[cfg(feature = "debug_printouts")] {
+        let mut out = BufWriter::new(File::create("../test_mir/optimized.layout").unwrap());
+        deconstruction.print_block_ranges(&mut out).unwrap();
+        out.flush().unwrap();
+    }
+
+    deconstruction.merge_moves(body);
+    deconstruction.merge_same_type(body);
+
+    #[cfg(feature = "debug_printouts")] {
+        let mut out = BufWriter::new(File::create("../test_mir/final.layout").unwrap());
+        deconstruction.print_block_ranges(&mut out).unwrap();
+        out.flush().unwrap();
+    }
+
     let options = StackFrameOptions {
         store_plane: true,
         .. Default::default()

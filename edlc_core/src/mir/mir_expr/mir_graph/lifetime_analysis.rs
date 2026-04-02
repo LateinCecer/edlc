@@ -45,8 +45,10 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use std::ops::{BitOr, Range};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
+use crate::mir::mir_expr::mir_ref::RefOffset;
 
 /// Lifetime analysis data for a MIR call graph.
 /// Since we perform this lifetime analysis on SSA values that are not necessarily linked to
@@ -231,6 +233,191 @@ impl CurrentRegion {
     }
 }
 
+pub struct BlockRanges {
+    blocks: Vec<Range<usize>>,
+    flags: Vec<u64>,
+    is_static: bool,
+}
+
+impl BlockRanges {
+    pub fn complete(cfg: &MirFlowGraph) -> Self {
+        let mut flags = Vec::new();
+        let mut blocks = Vec::new();
+
+        for block in cfg.blocks.iter() {
+            let num_locations = block.statements.len() + 1; // + 1 for seal statement
+            let n = usize::div_ceil(num_locations, 64);
+            blocks.push(flags.len()..(flags.len() + n));
+            (0..n).for_each(|_| flags.push(0));
+        }
+
+        BlockRanges {
+            blocks,
+            flags,
+            is_static: false,
+        }
+    }
+
+    pub fn empty(cfg: &MirFlowGraph) -> Self {
+        BlockRanges {
+            blocks: vec![const { 0..0 }; cfg.blocks.len()],
+            flags: Vec::new(),
+            is_static: false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.is_static && self.flags.is_empty()
+    }
+
+    pub fn set_static(&mut self) {
+        if !self.is_static {
+            self.is_static = true;
+            self.blocks.clear();
+            self.flags.clear();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.blocks.iter_mut().for_each(|block| {
+            block.start = 0;
+            block.end = 0;
+        });
+        self.flags.clear();
+        self.is_static = false;
+    }
+
+    pub fn set(&mut self, cfg: &MirFlowGraph, block: &MirBlockRef, range: Range<usize>) {
+        if self.is_static {
+            return;
+        }
+
+        let flag_range = &mut self.blocks[block.0];
+        if flag_range.start == flag_range.end {
+            let n = usize::div_ceil(cfg.blocks[block.0].statements.len() + 1, 64);
+            *flag_range = self.flags.len()..(self.flags.len() + n);
+            (0..n).for_each(|_| self.flags.push(0));
+        }
+        for el in range {
+            let idx = flag_range.start + el / 64;
+            let mask = 1u64 << (el % 64);
+            self.flags[idx] |= mask;
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        assert!(!self.overlaps(other), "cannot merge overlapping ranges!");
+        if other.is_static {
+            self.set_static();
+            return;
+        }
+        if self.is_static {
+            return;
+        }
+
+        for (block_other, block_self) in other.blocks.iter()
+            .zip(self.blocks.iter_mut()) {
+
+            if block_other.start == block_other.end {
+                continue;
+            }
+            let flags_other = &other.flags[block_other.clone()];
+            if block_self.start == block_self.end {
+                block_self.start = self.flags.len();
+                block_self.end = block_self.start + flags_other.len();
+                self.flags.extend(flags_other);
+            } else {
+                flags_other.iter().zip(self.flags[block_self.clone()].iter_mut())
+                    .for_each(|(lhs, rhs)| *rhs |= *lhs);
+            }
+        }
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        if self.is_static && other.is_static {
+            return true;
+        }
+        assert_eq!(self.blocks.len(), other.blocks.len());
+        (0..self.blocks.len())
+            .any(|block_index| {
+                self.overlaps_block(&MirBlockRef(block_index), other)
+            })
+    }
+
+    pub fn overlaps_block(&self, block: &MirBlockRef, other: &Self) -> bool {
+        if self.is_static && other.is_static {
+            return true;
+        }
+
+        let flags_self = &self.flags[self.blocks[block.0].clone()];
+        let flags_other = &other.flags[other.blocks[block.0].clone()];
+        if self.is_static && flags_other.iter().any(|flag| *flag != 0) {
+            return true;
+        }
+        if other.is_static && flags_self.iter().any(|flag| *flag != 0) {
+            return true;
+        }
+
+        if flags_self.is_empty() {
+            return false;
+        }
+        if flags_other.is_empty() {
+            return false;
+        }
+
+        assert_eq!(flags_self.len(), flags_other.len());
+        flags_self.iter().zip(flags_other.iter()).any(|(lhs, rhs)| {
+            *lhs & *rhs != 0
+        })
+    }
+
+    pub fn print<W: Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+        if self.is_static {
+            writeln!(writer, "        'static")?;
+            return Ok(());
+        }
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            if block.start == block.end {
+                continue;
+            }
+            self.print_block(writer, &MirBlockRef(block_idx))?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
+    pub fn print_block<W: Write>(
+        &self,
+        writer: &mut W,
+        block_idx: &MirBlockRef,
+    ) -> Result<(), std::io::Error> {
+        let block = &self.blocks[block_idx.0];
+        write!(writer, "        @{:x}[", block_idx.0)?;
+        if self.is_static {
+            write!(writer, "'static")?;
+        } else {
+            for flag in self.flags[block.clone()].iter() {
+                Self::print_flag(writer, *flag)?;
+            }
+        }
+        write!(writer, "]")
+    }
+
+    pub fn print_flag<W: Write>(
+        writer: &mut W,
+        flag: u64,
+    ) -> Result<(), std::io::Error> {
+        for bit in 0..64 {
+            if (flag >> bit) & 1 != 0 {
+                writer.write_all(b"x")?;
+            } else {
+                writer.write_all(b"-")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl RegionLifenessList {
     pub fn new(nodes: &HashNodeState<MirValue, LifetimeSpan>, cfg: &MirFlowGraph) -> Self {
         let mut regions = Vec::new();
@@ -257,6 +444,46 @@ impl RegionLifenessList {
             }
         }
         RegionLifenessList { regions, scopes }
+    }
+
+    pub fn print_region<W: Write>(
+        &self,
+        writer: &mut W,
+        value: &MirValue,
+    ) -> Result<(), std::io::Error> {
+        let region = &self.regions[value.0];
+        match region {
+            CurrentRegion::Static => {
+                write!(writer, "'static")
+            }
+            CurrentRegion::Scoped(scope) => {
+                write!(writer, "[")?;
+                let mut first = true;
+                for (block, var, range) in self.scopes[scope.clone()].iter() {
+                    if first {
+                        first = false;
+                    } else {
+                        write!(writer, ", ")?;
+                    }
+                    write!(writer, "@{:x}({var}) {}..{}", block.0, range.start, range.end)?;
+                }
+                write!(writer, "]")
+            }
+        }
+    }
+
+    pub fn set_block_range(&self, value: &MirValue, block_range: &mut BlockRanges, cfg: &MirFlowGraph) {
+        match self.regions.get(value.0) {
+            Some(CurrentRegion::Static) => {
+                block_range.set_static();
+            },
+            Some(CurrentRegion::Scoped(scope)) => {
+                for (block, _var, range) in self.scopes[scope.clone()].iter() {
+                    block_range.set(cfg, block, range.clone());
+                }
+            },
+            None => (),
+        }
     }
 
     pub fn overlaps(&self, lhs: &MirValue, rhs: &MirValue) -> bool {
@@ -716,7 +943,44 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirRef {
         let mut changed = input
             .element_value_mut(&self.value)
             .add_use(MirLoc::GraphLoc(*loc), self.value);
-        let target_region = input.element_value(&target);
+        match &self.offset {
+            RefOffset::Entire => {}
+            RefOffset::Const(_) => {}
+            RefOffset::ArrayIndex { index, .. } => {
+                changed |= input
+                    .element_value_mut(index)
+                    .add_use(MirLoc::GraphLoc(*loc), *index);
+            }
+            RefOffset::SliceIndex { index, slice_size, .. } => {
+                changed |= input
+                    .element_value_mut(index)
+                    .add_use(MirLoc::GraphLoc(*loc), *index);
+                changed |= input
+                    .element_value_mut(slice_size)
+                    .add_use(MirLoc::GraphLoc(*loc), *slice_size);
+            }
+            RefOffset::ArrayRange { start, end, .. } => {
+                changed |= input
+                    .element_value_mut(start)
+                    .add_use(MirLoc::GraphLoc(*loc), *start);
+                changed |= input
+                    .element_value_mut(end)
+                    .add_use(MirLoc::GraphLoc(*loc), *end);
+            }
+            RefOffset::SliceRange { start, end, slice_size, .. } => {
+                changed |= input
+                    .element_value_mut(start)
+                    .add_use(MirLoc::GraphLoc(*loc), *start);
+                changed |= input
+                    .element_value_mut(end)
+                    .add_use(MirLoc::GraphLoc(*loc), *end);
+                changed |= input
+                    .element_value_mut(slice_size)
+                    .add_use(MirLoc::GraphLoc(*loc), *slice_size);
+            }
+        }
+
+        let target_region = input.element_value(target);
         let value_region = input.element_value(&self.value);
         changed |= input.replace(&self.value, value_region.union(&target_region)?);
         Ok(changed)
@@ -763,12 +1027,18 @@ impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirDowncastRef {
 impl ExprEval<LifetimeSpan, LifetimeAnalysis> for MirTypeInit {
     fn eval(
         &self,
-        _input: &mut HashNodeState<MirValue, LifetimeSpan>,
+        input: &mut HashNodeState<MirValue, LifetimeSpan>,
         _ctx: &mut LifetimeAnalysis,
-        _loc: &MirGraphLoc,
+        loc: &MirGraphLoc,
         _target: &MirValue,
     ) -> Result<bool, RegionError> {
-        Ok(false)
+        let mut changed = false;
+        for init in self.inits.iter() {
+            changed |= input
+                .element_value_mut(&init.val)
+                .add_use(MirLoc::GraphLoc(*loc), init.val);
+        }
+        Ok(changed)
     }
 }
 

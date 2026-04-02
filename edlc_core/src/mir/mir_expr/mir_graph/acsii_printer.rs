@@ -341,11 +341,13 @@ impl<'writer, W: Write> AsciPrinter<'writer, W> {
 
         // write body
         const SPACER: &[u8] = b"    ";
-        for statement in block.statements.iter() {
+        for (line, statement) in block.statements.iter().enumerate() {
+            write!(self.writer, " {:>3} |", line)?;
             self.writer.write_all(SPACER)?;
             self.write_statement(statement, graph)?;
             self.writer.write_all(b"\n")?;
         }
+        write!(self.writer, " {:>3} |", block.statements.len())?;
         self.writer.write_all(SPACER)?;
         self.write_seal(&block.seal, graph)
     }

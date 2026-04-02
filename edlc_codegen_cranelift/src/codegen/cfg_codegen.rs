@@ -8,13 +8,12 @@ use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContain
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::ops::Index;
-use log::{debug, info};
 
 /// Maps MIR blocks to Cranelift blocks.
 struct BlockMapper {
     mapping: IndexMap<ir::Block>,
     return_bufs: Option<IndexMap<ir::Value>>,
-    eff_return_value: MirTypeId,
+    _eff_return_value: MirTypeId,
 }
 
 impl Index<MirBlockRef> for BlockMapper {
@@ -37,7 +36,7 @@ pub(crate) fn cfg_codegen<Runtime>(
         } else {
             None
         },
-        eff_return_value: builder.function_layout
+        _eff_return_value: builder.function_layout
             .return_type
             .unwrap_or_else(|| phase.types.usize()),
     };
@@ -49,7 +48,7 @@ pub(crate) fn cfg_codegen<Runtime>(
 
     // translate blocks to cranelift IR
     for block_ref in cfg.blocks() {
-        prepare_block(&cfg, &block_ref, builder, phase, &mut mapping)?;
+        prepare_block(cfg, &block_ref, builder, phase, &mut mapping)?;
         let block = cfg.get_block(&block_ref).unwrap();
         block_codegen(&block_ref, block, &cfg.expressions, builder, phase, &mapping)?;
     }
@@ -118,11 +117,9 @@ fn block_codegen<Runtime>(
     phase: &mut MirPhase,
     mapping: &BlockMapper,
 ) -> Result<(), MirError<JIT<Runtime>>> {
-    info!("entering block: {:?}", block_ref);
     for statement in block.statements.iter() {
         statement_codegen(expressions, statement, builder, phase)?;
     }
-    info!("exiting block: {:?}", block_ref);
     seal_codegen(block_ref, &block.seal, builder, phase, mapping)
 }
 
@@ -299,7 +296,7 @@ fn seal_codegen<Runtime>(
                 let mut output = Vec::new();
                 builder.layout.load_eightbytes(
                     value,
-                    &mut builder.ir_values,
+                    &builder.ir_values,
                     &mut builder.builder,
                     &phase.types,
                     &builder.abi,
@@ -335,7 +332,7 @@ fn seal_codegen<Runtime>(
             let default_args = block_call_codegen(
                 current_block, default, builder, phase, mapping)?;
             let default_call = ir::BlockCall::new(
-                mapping[default.target], default_args.into_iter(), &mut value_list);
+                mapping[default.target], default_args, &mut value_list);
 
             let mut target_calls = Vec::new();
             for target in targets.iter() {
@@ -348,7 +345,7 @@ fn seal_codegen<Runtime>(
                 )?;
                 let target_call = ir::BlockCall::new(
                     mapping[target.block_call.target],
-                    target_args.into_iter(),
+                    target_args,
                     &mut value_list,
                 );
                 target_calls.push(target_call);

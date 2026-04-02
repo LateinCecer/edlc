@@ -811,6 +811,7 @@ pub struct Block {
     pub src: ModuleSrc,
     pub pos: DebugSymbols,
     scope: ScopeId,
+    pub uid_counter: usize,
 }
 
 impl Block {
@@ -1320,14 +1321,9 @@ impl Block {
         BlockParameterIndex(self.parameters.len() - 1)
     }
 
-    fn new_uid(&self) -> BlockLocalStatementUid {
-        let mut idx = self.statements
-            .last()
-            .map(|last| last.uid().0)
-            .unwrap_or(0);
-        while self.statements.iter().any(|s| s.uid().0 == idx) {
-            idx += 1;
-        }
+    fn new_uid(&mut self) -> BlockLocalStatementUid {
+        let idx = self.uid_counter;
+        self.uid_counter += 1;
         BlockLocalStatementUid(idx)
     }
 
@@ -1442,6 +1438,7 @@ impl<'a> BlockBuilder<'a> {
             src: src_info.0,
             pos: src_info.1,
             scope: src_info.2,
+            uid_counter: 0,
         });
         MirBlockRef(self.graph.blocks.len() - 1)
     }
@@ -1544,6 +1541,7 @@ impl MirFlowGraph {
             src,
             pos,
             scope: scope_id,
+            uid_counter: 0,
         });
         out
     }
@@ -2480,8 +2478,8 @@ impl MirFlowGraph {
         state.1.insert_root_parameters(self, &mut state.0);
         WorkListFixpointForward.solve(self, &mut state, DataOrigin::upper)?;
 
-        state.1.consolidate(&mut state.0, lifeness);
-        state.1.reduce_further(lifeness, self);
+        state.1.consolidate(&mut state.0, lifeness, self);
+        // state.1.reduce_further(lifeness, self);
         Ok(state.1)
     }
 

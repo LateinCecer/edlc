@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use std::ops;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Statement};
-use crate::mir::mir_expr::lifetime_analysis::{RangeOverlap, RegionLifenessList};
+use crate::mir::mir_expr::lifetime_analysis::{BlockRanges, RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
@@ -32,6 +33,7 @@ pub struct PartialSsaDeconstruction {
     ranges: IndexMap<HashSet<MirValue>>,
     /// Mapping from [MirValue]s to [DataSource]s.
     mapping: IndexMap<DataSource>,
+    block_ranges: IndexMap<BlockRanges>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,6 +77,7 @@ impl PartialSsaDeconstruction {
             transition_mapping: IndexMap::default(),
             ranges: IndexMap::default(),
             mapping: IndexMap::default(),
+            block_ranges: IndexMap::default(),
         }
     }
 
@@ -132,7 +135,7 @@ impl PartialSsaDeconstruction {
         // copy over the ranges from the old source to the new source
         let old_ranges = self.ranges
             .get(old.0)
-            .map(|set| set.clone())
+            .cloned()
             .unwrap_or_else(HashSet::new);
         self.ranges
             .view_mut(new.0)
@@ -259,6 +262,7 @@ impl PartialSsaDeconstruction {
         &mut self,
         state: &mut HashNodeState<MirValue, DataOrigin>,
         lifeness: &RegionLifenessList,
+        cfg: &MirFlowGraph,
     ) {
         let mut worklist = state
             .iter()
@@ -282,6 +286,108 @@ impl PartialSsaDeconstruction {
             .mapping
             .iter_mut()
             .for_each(|(_, src)| *src = self.transition_mapping[src.0]);
+
+        // populate block ranges
+        for (data_source, values) in self.ranges.iter() {
+            let mut block_range = BlockRanges::empty(cfg);
+            for value in values.iter() {
+                lifeness.set_block_range(value, &mut block_range, cfg);
+            }
+            if block_range.is_empty() && !values.is_empty() {
+                let mut out = std::io::stderr();
+                writeln!(&mut out, "[warn] block range is empty for values:").unwrap();
+                for value in values.iter() {
+                    write!(&mut out, "{}", value).unwrap();
+                    lifeness.print_region(&mut out, value).unwrap();
+                    writeln!(&mut out).unwrap();
+                }
+                writeln!(&mut out, "this is likely to result in an error!").unwrap();
+            }
+            self.block_ranges.view_mut(data_source).set(block_range);
+        }
+    }
+
+    fn try_merge_sources(&mut self, a: DataSource, b: DataSource) {
+        if a == b || self.is_source_empty(&a) || self.is_source_empty(&b) {
+            return;
+        }
+
+        let [range_a, range_b] = self.block_ranges
+            .get_many_mut([a.0, b.0])
+            .unwrap();
+        if !range_a.overlaps(range_b) {
+            #[cfg(feature = "debug_printouts")]
+            println!("[debug] merging data sources {} and {}", a, b);
+            range_a.merge(range_b);
+            range_b.clear();
+            self.transition_value(b, a);
+        }
+    }
+
+    pub fn merge_moves(&mut self, cfg: &MirFlowGraph) {
+        for statement in cfg.iter_statements() {
+            let Statement::VarMove { var, value, .. } = statement else {
+                continue;
+            };
+            let source_a = self.mapping[var.0];
+            let source_b = self.mapping[value.0];
+            self.try_merge_sources(source_a, source_b);
+        }
+    }
+
+    fn is_source_empty(&self, src: &DataSource) -> bool {
+        self.ranges[src.0].is_empty()
+    }
+
+    pub fn merge_same_type(&mut self, cfg: &MirFlowGraph) {
+        let mut mapping = HashMap::new();
+        self.mapping.iter().for_each(|(idx, src)| {
+            let value = MirValue(idx);
+            let ty = cfg.get_var_type(&value);
+            mapping.entry(*ty).or_insert_with(HashSet::new).insert(*src);
+        });
+
+        for (ty, sources) in mapping {
+            #[cfg(feature = "debug_printouts")]
+            println!("[debug] merging sources for type {ty}");
+            for a in sources.iter() {
+                if self.is_source_empty(a) {
+                    continue;
+                }
+                for b in sources.iter() {
+                    self.try_merge_sources(*a, *b);
+                }
+            }
+        }
+    }
+
+    pub fn print<W: Write>(
+        &self,
+        writer: &mut W,
+        lifeness: &RegionLifenessList,
+    ) -> Result<(), std::io::Error> {
+        writeln!(writer, " == SSA deconstruction ==")?;
+        for (src_id, values) in self.ranges.iter() {
+            if values.is_empty() {
+                continue;
+            }
+            writeln!(writer, "    ~ data slot {} ~", src_id)?;
+            for value in values.iter() {
+                write!(writer, "        {value} ")?;
+                lifeness.print_region(writer, value)?;
+                writeln!(writer)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn print_block_ranges<W: Write>(&self, writer: &mut W) -> Result<(), std::io::Error> {
+        writeln!(writer, " == SSA deconstruction ==")?;
+        for (src_id, values) in self.block_ranges.iter() {
+            writeln!(writer, "    ~ data slot {} ~", src_id)?;
+            values.print(writer)?;
+        }
+        Ok(())
     }
 
     pub fn reduce_further(&mut self, lifeness: &RegionLifenessList, cfg: &MirFlowGraph) {

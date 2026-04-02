@@ -2298,11 +2298,60 @@ impl<T> PhyNum<T> {
     }
 }
 
+impl core::Add<PhyNum<f64>, PhyNum<f64>> for PhyNum<f64> {
+    fn add(lhs: Self, rhs: Self) -> Self {
+        PhyNum { val: lhs.val + rhs.val, unit: lhs.unit }
+    }
+}
+
 fn test(f: f64) -> i32 {
     println("starting test");
     let num: PhyNum<f64> = PhyNum::new(0.32_f64, "s");
     num.print();
     let val = time_step.val;
+
+    let other: PhyNum<f64> = PhyNum::new(10.0_f64, "s");
+    let res = num + other;
+    res.print();
+
+    let names = ["a", "b", "c", "d"];
+    let matrix: [[f64; 4]; 4] = [
+        [0.0, 0.1, 0.2, 0.3],
+        [1.0, 1.1, 1.2, 1.3],
+        [2.0, 2.1, 2.2, 2.3],
+        [3.0, 3.1, 3.2, 3.3],
+    ];
+
+    // print some matrix is an example of nested loops, because that apparently lead to some issues
+    // previously
+    let mut i = 0usize;
+    loop {
+        if i >= 4 { break }
+        let mut j = 0usize;
+        print(names[i]);
+        print("  [");
+        loop {
+            if j >= 4 { break }
+            if j > 0 {
+                print(", ");
+            }
+
+            print("(");
+            let mut k = 0usize;
+            loop {
+                if k >= 2 { break }
+                if k > 0 {
+                    print(", ");
+                }
+                print(matrix[i][j] + k as f64 * 100.0);
+                k += 1;
+            }
+            print(")");
+            j += 1;
+        }
+        println("]");
+        i += 1;
+    }
     0
 }
         "#))?;

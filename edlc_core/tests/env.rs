@@ -272,10 +272,12 @@ impl TestCompiler {
         body.seal();
 
         // write MIR code to file for debugging
-        let mut out = BufWriter::new(File::create("../test_mir/raw.mir")?);
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&body)?;
-        out.flush()?;
+        #[cfg(feature = "debug_printouts")] {
+            let mut out = BufWriter::new(File::create("../test_mir/raw.mir")?);
+            let mut writer = AsciPrinter::new(&mut out);
+            writer.print(&body)?;
+            out.flush()?;
+        }
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         let options = CompileOptions::default();
@@ -284,10 +286,13 @@ impl TestCompiler {
 
         // print result
         // write MIR code to file for debugging
-        let mut out = BufWriter::new(File::create("../test_mir/optimized.mir")?);
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(&body)?;
-        out.flush()?;
+        #[cfg(feature = "debug_printouts")] {
+            let mut out = BufWriter::new(File::create("../test_mir/optimized.mir")?);
+            let mut writer = AsciPrinter::new(&mut out);
+            writer.print(&body)?;
+            out.flush()?;
+        }
+
 
         vm.alloc_stack_frame(&stack_frame);
         let res = body
@@ -1063,6 +1068,121 @@ comptime fn min_c(x: i32, y: i32) -> i32 {
             index += 1;
         }
         std::print("]\n");
+    }
+    "#))?;
+    Ok(())
+}
+
+#[test]
+fn test_matrix() -> Result<(), anyhow::Error> {
+    let mut comp = TestCompiler::new();
+    comp.init()?;
+
+    comp.compiler.prepare_module(&vec!["std"].into())?;
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
+    extern "C" fn input_binding() -> i32 {
+        10
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+    // comp.compile_module(&vec!["test"].into(), &inline_code!(r#""#))?;
+    comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
+    {
+        std::print("hello, world!\n");
+        let matrix: [[i32; 3]; 3] = [
+            [1, 2, 3],
+            [4, 5, 6],
+            [7, 8, 9],
+        ];
+
+        let mut i = 0usize;
+        loop {
+            if i == 3 { break; }
+
+            let mut j = 0usize;
+            loop {
+                if j == 3 { break; }
+                std::print(matrix[i][j]);
+                j += 1;
+            }
+            std::print("\n");
+            i += 1;
+        }
     }
     "#))?;
     Ok(())
