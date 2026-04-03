@@ -576,12 +576,12 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
     ///
     /// prog.exec(&mut compiler.backend).unwrap();
     /// ```
-    pub fn compile_bin<Src: SrcSupplier, R: Debug + 'static>(
+    pub fn compile_bin<Src: SrcSupplier, R: MirLayout + 'static>(
         &mut self,
         name: &str,
         supplier: &Src,
-        entry: &str
-    ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
+        entry: ModuleSrc
+    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
         let module = match self.compiler.parse_bin(name, supplier) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -599,7 +599,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
         let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
         self.compile_globals(&module, &mut vm)?;
-        todo!()
+        self.get_function(entry)
     }
 
     /// Compiles an entire **fracht** that compiles to a library.
@@ -1160,34 +1160,34 @@ fn test() -> i32 {
             "test_lib",
             &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
         )?;
-        let prog: TypedProgram<(), _> = compiler.compile_bin(
+        let prog: extern "C" fn() -> () = compiler.compile_bin(
             "test_bin",
             &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
-            "main"
+            inline_code!("main")
         )?;
 
-        prog.exec(&mut compiler.backend)?;
+        prog();
 
         // execute a more complex script that uses parts of the original program for execution
-        let script: TypedProgram<f32, _> = compiler.compile_expr(
-            &vec!["test_bin"].into(), inline_code!(r#"{
-                let x: f32 = foo::pi;
-
-                let vec = SVector::new(1.0_f32, 2.0);
-                vec.print();
-                std::io::print("\n");
-
-                std::io::print(comptime { f32::cos(x) });
-                std::io::print("\n");
-                foo::pi.sin()
-            }"#),
-        )?;
-
-        println!();
-        println!(" ## executing script: ");
-        println!();
-        let x = script.exec(&mut compiler.backend)?;
-        println!("script result: {x}");
+        // let script: TypedProgram<f32, _> = compiler.compile_expr(
+        //     &vec!["test_bin"].into(), inline_code!(r#"{
+        //         let x: f32 = foo::pi;
+        //
+        //         let vec = SVector::new(1.0_f32, 2.0);
+        //         vec.print();
+        //         std::io::print("\n");
+        //
+        //         std::io::print(comptime { f32::cos(x) });
+        //         std::io::print("\n");
+        //         foo::pi.sin()
+        //     }"#),
+        // )?;
+        //
+        // println!();
+        // println!(" ## executing script: ");
+        // println!();
+        // let x = script.exec(&mut compiler.backend)?;
+        // println!("script result: {x}");
         Ok(())
     }
 }

@@ -11,7 +11,7 @@ keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { path="../edlc_core", version="0.1.1" }
+edlc_core = { path="../edlc_core", version="0.1.1", features=["debug_printouts"] }
 edlc_layout = { path="../edlc_layout", version="0.1.1" }
 
 log = "0.4.22"

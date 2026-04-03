@@ -49,8 +49,7 @@ pub(crate) fn cfg_codegen<Runtime>(
     // translate blocks to cranelift IR
     for block_ref in cfg.blocks() {
         prepare_block(cfg, &block_ref, builder, phase, &mut mapping)?;
-        let block = cfg.get_block(&block_ref).unwrap();
-        block_codegen(&block_ref, block, &cfg.expressions, builder, phase, &mapping)?;
+        block_codegen(cfg, &block_ref, builder, phase, &mapping)?;
     }
     builder.builder.seal_all_blocks();
     Ok(())
@@ -91,7 +90,7 @@ fn prepare_block<Runtime>(
         // insert block parameters
         let block = cfg.get_block(&block_ref).unwrap();
         for param in block.parameters.iter() {
-            if !builder.layout.is_block_param_on_reg(param, &phase.types) {
+            if !builder.layout.is_block_param_on_reg(param, &phase.types, cfg) {
                 continue;
             }
             let ty = builder.layout.get_ty(param).unwrap();
@@ -110,17 +109,17 @@ fn prepare_block<Runtime>(
 }
 
 fn block_codegen<Runtime>(
+    cfg: &MirFlowGraph,
     block_ref: &MirBlockRef,
-    block: &Block,
-    expressions: &MirExprContainer,
     builder: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
     mapping: &BlockMapper,
 ) -> Result<(), MirError<JIT<Runtime>>> {
+    let block = cfg.get_block(&block_ref).unwrap();
     for statement in block.statements.iter() {
-        statement_codegen(expressions, statement, builder, phase)?;
+        statement_codegen(&cfg.expressions, statement, builder, phase)?;
     }
-    seal_codegen(block_ref, &block.seal, builder, phase, mapping)
+    seal_codegen(cfg, block_ref, &block.seal, builder, phase, mapping)
 }
 
 fn statement_codegen<Runtime>(
@@ -265,6 +264,7 @@ fn statement_codegen<Runtime>(
 }
 
 fn seal_codegen<Runtime>(
+    cfg: &MirFlowGraph,
     current_block: &MirBlockRef,
     seal: &Seal,
     builder: &mut FunctionTranslator<Runtime>,
@@ -273,7 +273,7 @@ fn seal_codegen<Runtime>(
 ) -> Result<(), MirError<JIT<Runtime>>> {
     match seal {
         Seal::Jump(call, _) => {
-            let args = block_call_codegen(current_block, call, builder, phase, mapping)?;
+            let args = block_call_codegen(cfg, current_block, call, builder, phase, mapping)?;
             builder.builder.ins()
                 .jump(mapping[call.target], args.iter());
         }
@@ -312,9 +312,9 @@ fn seal_codegen<Runtime>(
         }
         Seal::Cond { cond, then_target, else_target, .. } => {
             let args_then = block_call_codegen(
-                current_block, then_target, builder, phase, mapping)?;
+                cfg, current_block, then_target, builder, phase, mapping)?;
             let args_else = block_call_codegen(
-                current_block, else_target, builder, phase, mapping)?;
+                cfg, current_block, else_target, builder, phase, mapping)?;
             let cond = builder.layout.load_pod(
                 cond, &builder.ir_values, &mut builder.builder, &phase.types).unwrap();
             builder.builder
@@ -330,13 +330,14 @@ fn seal_codegen<Runtime>(
         Seal::Switch { cond, targets, default, .. } => {
             let mut value_list = ir::ValueListPool::new();
             let default_args = block_call_codegen(
-                current_block, default, builder, phase, mapping)?;
+                cfg, current_block, default, builder, phase, mapping)?;
             let default_call = ir::BlockCall::new(
                 mapping[default.target], default_args, &mut value_list);
 
             let mut target_calls = Vec::new();
             for target in targets.iter() {
                 let target_args = block_call_codegen(
+                    cfg,
                     current_block,
                     &target.block_call,
                     builder,
@@ -365,6 +366,7 @@ fn seal_codegen<Runtime>(
 }
 
 fn block_call_codegen<Runtime>(
+    cfg: &MirFlowGraph,
     current_block: &MirBlockRef,
     call: &BlockCall,
     builder: &mut FunctionTranslator<Runtime>,
@@ -377,7 +379,7 @@ fn block_call_codegen<Runtime>(
     }
     params.extend(call.params
         .iter()
-        .filter_map(|param| if builder.layout.is_block_param_on_reg(param, &phase.types) {
+        .filter_map(|param| if builder.layout.is_block_param_on_reg(param, &phase.types, cfg) {
             let value = builder.layout
                 .load_pod(param, &builder.ir_values, &mut builder.builder, &phase.types)
                 .expect("IR value for JUMP instruction parameters missing");

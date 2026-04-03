@@ -18,7 +18,6 @@ mod acsii_printer;
 mod deconstruction;
 mod const_propagation;
 pub mod lifetime_analysis;
-mod sese;
 mod const_eval;
 mod borrow;
 mod scope_check;
@@ -2503,8 +2502,8 @@ impl MirFlowGraph {
     }
 
     /// Iterates over all blocks in the CFG.
-    pub fn blocks(&self) -> BlockIter {
-        BlockIter { range: 0..self.blocks.len(), index: 0 }
+    pub fn blocks(&self) -> BlockIter<'_> {
+        BlockIter { cfg: self, range: 0..self.blocks.len(), index: 0 }
     }
 
     /// Iterates over the exit blocks in the CFG.
@@ -2513,6 +2512,10 @@ impl MirFlowGraph {
             cfg: self,
             index: 0,
         }
+    }
+
+    pub fn is_block_unreachable(&self, block: &MirBlockRef) -> bool {
+        block != &self.root() && self.backlinks[block.0].is_empty()
     }
 
     pub fn remove_def(&mut self, point: &DefPoint) {
@@ -2572,18 +2575,24 @@ impl<'cfg> Iterator for ExitBlockIter<'cfg> {
     }
 }
 
-pub struct BlockIter {
+pub struct BlockIter<'cfg> {
+    cfg: &'cfg MirFlowGraph,
     range: Range<usize>,
     index: usize,
 }
 
-impl Iterator for BlockIter {
+impl<'cfg> Iterator for BlockIter<'cfg> {
     type Item = MirBlockRef;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.range.contains(&self.index) {
             self.index += 1;
-            Some(MirBlockRef(self.index - 1))
+            let id = MirBlockRef(self.index - 1);
+            if self.cfg.is_block_unreachable(&id) {
+                self.next()
+            } else {
+                Some(id)
+            }
         } else {
             None
         }

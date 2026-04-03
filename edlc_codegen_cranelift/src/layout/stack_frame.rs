@@ -161,9 +161,14 @@ impl StackFrameMapping {
         matches!(self.mapping.get(value.0), Some(Mapping::Reg))
     }
 
-    pub fn is_block_param_on_reg(&self, value: &MirValue, reg: &MirTypeRegistry) -> bool {
-        let ty = *self.get_ty(value).unwrap();
-        reg.is_plain_old_data(ty) && reg.byte_size(ty).unwrap() > 0
+    pub fn is_block_param_on_reg(&self, value: &MirValue, reg: &MirTypeRegistry, cfg: &MirFlowGraph) -> bool {
+        if let Some(ty) = self.get_ty(value) {
+            reg.is_plain_old_data(*ty) && reg.byte_size(*ty).unwrap() > 0
+        } else {
+            println!("value {value} with type {} is not on the stack layout mapping", cfg.get_var_type(value));
+            println!("never type is {}", reg.never());
+            panic!();
+        }
     }
 
     pub fn load_pod(
