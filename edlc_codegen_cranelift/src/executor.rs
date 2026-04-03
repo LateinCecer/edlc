@@ -1158,6 +1158,11 @@ fn test() -> i32 {
                 print!("{msg}");
             }
         );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
         jit_func!((&mut compiler), fn<"usize";>(print_fs),
             fn print_usize<>(msg: usize) -> () where; {
                 print!("{msg}");

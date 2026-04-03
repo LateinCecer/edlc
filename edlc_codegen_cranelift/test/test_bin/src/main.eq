@@ -152,5 +152,24 @@ fn main() {
         max = usize::max(max, data[i]);
         i += 1;
     }
+
+    test_array();
     // todo()
+}
+
+fn test_array() {
+    println("testing weird bug with array accesses...");
+    let A_0 = 1.0_f64;
+    let A_1 = 1.0_f64;
+    let A_2 = 1.0_f64;
+
+    let pi = 3.14159265358979_f64;
+    let twopi = pi * 2.0;
+
+    let A: [f64; 3] = [1.0, 1.0, 1.0];
+    let sigma: [f64; 3] = [0.1, 0.1, 0.1];
+
+    let prefactor: f64 = 1.0 / (f64::sqrt(twopi * twopi * twopi) * sigma[0] * sigma[1] * sigma[2]);
+    println(prefactor);
+    println("success!");
 }
