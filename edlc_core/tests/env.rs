@@ -1160,7 +1160,55 @@ fn test_matrix() -> Result<(), anyhow::Error> {
     };
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
 
-    // comp.compile_module(&vec!["test"].into(), &inline_code!(r#""#))?;
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<f32>"), None,
+    )?;
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_f32",
+        )?;
+    extern "C" fn print_f32(val: f32) {
+        print!("{val}");
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_f32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
+
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+type Data<T> = struct {
+    data: T,
+};
+
+impl<T> Data<T> {
+    fn get_value(self: Self) -> T {
+        self.data
+    }
+}
+
+impl Data<f32> {
+    fn print(self: Self) {
+        std::print("Data: ");
+        std::print(self.data);
+        std::print("\n");
+    }
+}
+
+impl Data<i32> {
+    fn print(self: Self) {
+        std::print("Data i32: ");
+        std::print(self.data);
+        std::print("\n");
+    }
+}
+    "#))?;
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
         std::print("hello, world!\n");
@@ -1183,6 +1231,13 @@ fn test_matrix() -> Result<(), anyhow::Error> {
             std::print("\n");
             i += 1;
         }
+
+        let data = Data { data: 3.0_f32 };
+        data.print();
+        let val = data.get_value();
+
+        let data = Data { data: 32_i32 };
+        data.print();
     }
     "#))?;
     Ok(())

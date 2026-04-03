@@ -19,7 +19,7 @@ mod namespace;
 use std::collections::{HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use crate::core::edl_error::EdlError;
@@ -212,8 +212,8 @@ pub struct ScopeId(usize, usize);
 
 impl ScopeId {
     pub fn rand() -> Self {
-        let mut rng = thread_rng();
-        ScopeId(rng.gen(), rng.gen())
+        let mut rng = rand::rng();
+        ScopeId(rng.next_u64() as usize, rng.next_u64() as usize)
     }
 }
 

@@ -23,6 +23,7 @@ use std::fmt::{Arguments, Debug, Display, Formatter};
 use std::hash::DefaultHasher;
 use std::rc::Rc;
 use log::warn;
+use regex::Regex;
 use crate::core::{edl_type, EdlVarId};
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlRecoverableError};
@@ -683,6 +684,51 @@ impl HirModule {
         phase.report_mode.print_errors = false;
         phase.report_mode.print_warnings = false;
         errors
+    }
+
+    /// Finds all surface level functions in the module and its submodules that have annotations
+    /// matching the specified regex.
+    /// This can be used to, for example, identity test cases / benchmarks, find entry points, etc.
+    ///
+    /// # Return Type
+    ///
+    /// This function returns a `Vec` containing tuples with the [EdlTypeId] for the identified
+    /// function, as well as the annotation string from the function signature that matched
+    /// the regex.
+    pub fn find_function_with_annotation(&self, regex: &Regex) -> Option<Vec<(EdlTypeId, String)>> {
+        let mut buf = Vec::new();
+        self.find_function_with_annotation_internal(regex, &mut buf);
+        if buf.is_empty() {
+            None
+        } else {
+            Some(buf)
+        }
+    }
+
+    fn find_function_with_annotation_internal(&self, regex: &Regex, ret_buf: &mut Vec<(EdlTypeId, String)>) {
+        let mut worklist = vec![self]; // remember kids, recursion is ass
+        while let Some(item) = worklist.pop() {
+            for item in item.items.iter() {
+                match item {
+                    HirItem::Func(func) => {
+                        // to clippy: this match is not collapsible in edition 2021
+                        // we can adjust this if we ever update to 2024 with chained let-matches
+                        let annotation = func.signature.annotations.iter()
+                            .find(|sig| regex.is_match(*sig));
+                        #[allow(clippy::collapsible_match)]
+                        if let Some(annotation) = annotation {
+                            if let Some(id) = func.signature.get_id() {
+                                ret_buf.push((id, annotation.to_string()));
+                            }
+                        }
+                    },
+                    HirItem::Submod(submod, _) => {
+                        worklist.push(submod.as_ref())
+                    },
+                    _ => (),
+                }
+            }
+        }
     }
 
     /// Recursively goes through this module and all child modules and registers the function

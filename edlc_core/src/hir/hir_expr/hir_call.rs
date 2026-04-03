@@ -1885,7 +1885,11 @@ impl MakeGraph for HirFunctionCall {
 
         // get function signature for comparison
         let edl_sig = graph.hir_phase.types.get_fn_signature(type_info.fn_id)?.clone();
-        let ret = graph.mir_phase.types.mir_id(&type_info.ret_ty.clone().unwrap(), &graph.hir_phase.types)?;
+        let ret = if edl_sig.ret == graph.hir_phase.types.never() {
+            graph.mir_phase.types.never()
+        } else {
+            graph.mir_phase.types.mir_id(&type_info.ret_ty.clone().unwrap(), &graph.hir_phase.types)?
+        };
         let edl_func_instance = self.get_function_instance().unwrap();
         let mir_uid = graph.mir_phase.new_id();
 
@@ -1964,10 +1968,16 @@ impl MakeGraph for HirFunctionCall {
                 is_recursive: false,
                 context: call_context,
             });
-        graph.graph.insert_def(graph.current_block, target, expr, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
-
         // seal block if the function is marked as 'never-return'
-        if matches!(&type_info.ret_ty, EdlMaybeType::Fixed(inst) if inst.ty == edl_type::EDL_NEVER) {
+        if ret == graph.mir_phase.types.never() {
+            let temp_val = graph.graph.create_temp_variable(ret);
+            graph.graph.insert_def(
+                graph.current_block,
+                temp_val,
+                expr,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
             // function call is expected to never actually return.
             // to make sure that this is actually represented in the flow graph, insert a panic.
             // this acts as a guard in case the function call does return after all
@@ -1977,6 +1987,14 @@ impl MakeGraph for HirFunctionCall {
                 .insert_empty(&graph.mir_phase.types);
             graph.graph.insert_def(graph.current_block, panic_value, empty, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
             graph.graph.insert_panic(graph.current_block, panic_value, DebugSymbols { pos: self.pos });
+        } else {
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                expr,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
         }
         Ok(())
     }

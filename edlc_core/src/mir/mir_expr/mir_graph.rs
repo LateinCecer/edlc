@@ -534,6 +534,13 @@ impl<'a> Iterator for StatementIter<'a> {
     type Item = &'a Statement;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // skip unreachable blocks
+        while self.block < self.cfg.blocks.len()
+            && self.cfg.is_block_unreachable(&MirBlockRef(self.block)) {
+            self.statement = 0;
+            self.block += 1;
+        }
+
         if self.block >= self.cfg.blocks.len() {
             return None;
         }

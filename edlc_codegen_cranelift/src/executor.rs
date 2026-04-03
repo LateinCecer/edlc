@@ -19,20 +19,22 @@ pub mod macros;
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use anyhow::anyhow;
+use anyhow::{anyhow};
 use edlc_core::inline_code;
 use edlc_core::parser::{InFile, Parsable};
 use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
 use edlc_core::prelude::ast_expression::AstExpr;
-use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId};
+use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance};
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_str::{FatPtr, MemPtr};
 use edlc_core::resolver::{ItemVariant, QualifierName};
 use cranelift_module::{Linkage, Module};
 use edlc_core::lexer::SrcPos;
 use edlc_core::prelude::ast_type::AstTypeName;
-use edlc_core::prelude::edl_param_env::EdlParamStack;
-use edlc_core::prelude::hir_expr::hir_type::SegmentType;
+use edlc_core::prelude::edl_fn::EdlFnSignature;
+use edlc_core::prelude::edl_impl::AssociatedType;
+use edlc_core::prelude::edl_param_env::{EdlParamStack, EdlParameterDef};
+use edlc_core::prelude::hir_expr::hir_type::{HirTypeNameSegment, SegmentType};
 use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, CompileOptions, Context, DebugSymbols, MirFlowGraph};
 use edlc_core::prelude::mir_funcs::ComptimeParams;
@@ -45,6 +47,81 @@ use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
 use crate::error::{JITError, JITErrorType};
 use crate::prelude::{Program, JIT};
 
+
+pub trait FunctionContainer<F> {
+    fn get_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<F, anyhow::Error>;
+
+    fn get_named_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<F, anyhow::Error>;
+}
+
+macro_rules! impl_function_container(
+    (fn($($P:ident),*) -> $R:ident) => (
+impl<$($P,)* $R, Runtime: 'static> FunctionContainer<extern "C" fn($($P),*) -> $R> for CraneliftJIT<Runtime>
+where
+    $($P: MirLayout,)*
+    $R: MirLayout,
+{
+    fn get_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<extern "C" fn($($P),*) -> $R, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(id)?
+            .clone();
+
+        // format function instance
+        let instance = self.format_function_instance(id, params, associated_type)?;
+        // verify that type layouts are FFI safe
+        let ret = sig
+            .return_type()
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        self.check_layout_ffi_compatible::<$R>(ret)?;
+        #[allow(unused_mut)]
+        let mut i: usize = 0;
+        $(
+            let a = sig.params[i]
+                .ty
+                .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+            self.check_layout_ffi_compatible::<$P>(a)?;
+            i += 1;
+        )*
+        if sig.params.len() != i {
+            return Err(anyhow!("invalid number of function parameters provided: {} != {i}", sig.params.len()));
+        }
+
+        // get function id
+        let ptr = unsafe { self.get_function_ptr(&instance) }?;
+        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn($($P),*) -> $R>(ptr) })
+    }
+
+    fn get_named_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<extern "C" fn($($P),*) -> $R, anyhow::Error> {
+        let (id, associated_type, params) = self
+            .find_function_from_name(name)?;
+        <Self as FunctionContainer<_>>::get_function(self, id, params, associated_type)
+    }
+}
+    );
+);
+
+impl_function_container!(fn() -> R);
+impl_function_container!(fn(A) -> R);
+impl_function_container!(fn(A, B) -> R);
+impl_function_container!(fn(A, B, C) -> R);
+impl_function_container!(fn(A, B, C, D) -> R);
+impl_function_container!(fn(A, B, C, D, E) -> R);
+impl_function_container!(fn(A, B, C, D, E, F) -> R);
 
 
 pub struct CraneliftJIT<Runtime: 'static> {
@@ -283,10 +360,10 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(())
     }
 
-    pub fn get_function<R: MirLayout>(
+    fn find_function_from_name(
         &mut self,
         name: ModuleSrc,
-    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
+    ) -> Result<(EdlTypeId, Option<EdlTypeInstance>, EdlParameterDef), anyhow::Error> {
         let code = name.get_src()?;
         let ast_name = AstTypeName::parse(&mut self.compiler
             .create_parser(&code, name.clone()))
@@ -325,10 +402,6 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
 
         let sig = self.compiler.phase.types.get_fn_signature(func)?
             .clone();
-        if !sig.params.is_empty() {
-            return Err(anyhow!("cannot pass arguments to functions (for now)"));
-        }
-
         let ast_param = last.params
             .parse_env(sig.env, &mut self.compiler.phase)
             .in_file(name)?;
@@ -337,30 +410,54 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         if !edl_param.is_fully_resolved() {
             return Err(anyhow!("generic parameters not fully resolved"));
         }
+        Ok((func, ass_ty, edl_param))
+    }
 
-        // format function instance
-        let instance = if let Some(ass_ty) = ass_ty {
+    fn format_function_instance(
+        &mut self,
+        func_ty: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<EdlFnInstance, anyhow::Error> {
+        if let Some(ass_ty) = associated_type {
             let (mut stack, replacements) = self.compiler.phase
-                .find_parameter_stack(func, edl_param, ass_ty.clone())?;
+                .find_parameter_stack(func_ty, params, ass_ty.clone())?;
             let inv_replacements = replacements
                 .inverse(&mut self.compiler.phase.types)?;
             stack.replace_all(&inv_replacements, &self.compiler.phase.types);
 
-            EdlFnInstance {
-                func,
+            Ok(EdlFnInstance {
+                func: func_ty,
                 associated_ty: Some(ass_ty),
                 param: stack,
-            }
+            })
         } else {
             let mut stack = EdlParamStack::default();
-            stack.insert_def(edl_param);
+            stack.insert_def(params);
 
-            EdlFnInstance {
-                func,
+            Ok(EdlFnInstance {
+                func: func_ty,
                 associated_ty: None,
                 param: stack,
-            }
-        };
+            })
+        }
+    }
+
+    pub fn get_function<R: MirLayout>(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
+        let (func, ass_ty, last) = self
+            .find_function_from_name(name.clone())?;
+        let sig = self.compiler.phase.types.get_fn_signature(func)?
+            .clone();
+        if !sig.params.is_empty() {
+            return Err(anyhow!("cannot pass arguments to functions (for now)"));
+        }
+
+        // format function instance
+        let instance = self
+            .format_function_instance(func, last, ass_ty)?;
 
         // verify that type layouts are FFI safe
         let ret = sig
@@ -416,81 +513,16 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         &mut self,
         name: ModuleSrc,
     ) -> Result<extern "C" fn(A) -> R, anyhow::Error> {
-        let code = name.get_src()?;
-        let ast_name = AstTypeName::parse(&mut self.compiler
-            .create_parser(&code, name.clone()))
-            .in_file(name.clone())
-            .map_err(|err| self.compiler.report_ast_err(err))?;
-        let hir_name = ast_name.hir_repr(&mut self.compiler.phase)?;
-        let (last, raw_associated_type) = hir_name.extract_last();
-        let (func, ass_ty) = if let Some(mut raw) = raw_associated_type {
-            let ty = raw.as_type_instance(last.pos, &mut self.compiler.phase)?;
-            match ty {
-                SegmentType::Type(ty) => {
-                    let func = self.compiler.phase.res
-                        .find_associated_item(&ty, &last.path)
-                        .ok_or_else(|| anyhow!("no function '{}' associated to type '{:?}'", last.path, ty))?;
-                    let ItemVariant::Fn(func_id) = &func.variant else {
-                        return Err(anyhow!("item associated to type is not a function"));
-                    };
-                    (*func_id, Some(ty))
-                },
-                SegmentType::Trait(tr) => {
-                    let func = self.compiler.phase.res
-                        .find_associated_trait_item(&tr, &last.path)
-                        .ok_or_else(|| anyhow!("no function '{}' associated to trait '{:?}'", last.path, tr))?;
-                    let ItemVariant::Fn(func_id) = &func.variant else {
-                        return Err(anyhow!("item associated to trait is not a function"));
-                    };
-                    (*func_id, None)
-                },
-            }
-        } else {
-            let func = self.compiler.phase.res
-                .find_top_level_function(&last.path, &self.compiler.phase.types)
-                .ok_or_else(|| anyhow!("function does not exist"))?;
-            (func, None)
-        };
-
+        let (func, ass_ty, last) = self
+            .find_function_from_name(name.clone())?;
         let sig = self.compiler.phase.types.get_fn_signature(func)?
             .clone();
         if sig.params.len() != 1 {
             return Err(anyhow!("invalid number of function parameters provided: {} != 1", sig.params.len()));
         }
 
-        let ast_param = last.params
-            .parse_env(sig.env, &mut self.compiler.phase)
-            .in_file(name)?;
-        let mut hir_param = ast_param.hir_repr(&mut self.compiler.phase)?;
-        let edl_param = hir_param.edl_repr(sig.env, &mut self.compiler.phase)?;
-        if !edl_param.is_fully_resolved() {
-            return Err(anyhow!("generic parameters not fully resolved"));
-        }
-
         // format function instance
-        let instance = if let Some(ass_ty) = ass_ty {
-            let (mut stack, replacements) = self.compiler.phase
-                .find_parameter_stack(func, edl_param, ass_ty.clone())?;
-            let inv_replacements = replacements
-                .inverse(&mut self.compiler.phase.types)?;
-            stack.replace_all(&inv_replacements, &self.compiler.phase.types);
-
-            EdlFnInstance {
-                func,
-                associated_ty: Some(ass_ty),
-                param: stack,
-            }
-        } else {
-            let mut stack = EdlParamStack::default();
-            stack.insert_def(edl_param);
-
-            EdlFnInstance {
-                func,
-                associated_ty: None,
-                param: stack,
-            }
-        };
-
+        let instance = self.format_function_instance(func, last, ass_ty)?;
         // verify that type layouts are FFI safe
         let ret = sig
             .return_type()
@@ -502,11 +534,16 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         self.check_layout_ffi_compatible::<A>(a)?;
 
         // get function id
+        let ptr = unsafe { self.get_function_ptr(&instance) }?;
+        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn(A) -> R>(ptr) })
+    }
+
+    unsafe fn get_function_ptr(&mut self, instance: &EdlFnInstance) -> Result<*const u8, anyhow::Error> {
         let mir_id = {
             let mut funcs = self.backend.func_reg.borrow_mut();
             let mir_id = funcs
                 .mir_id(
-                    &instance,
+                    instance,
                     &mut self.compiler.phase,
                     &mut self.compiler.mir_phase,
                     ComptimeParams::empty(),
@@ -525,7 +562,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
 
         let ptr = unsafe { self.backend.get_func_ptr(mir_id) }
             .ok_or_else(|| anyhow!("function not compiled"))?;
-        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn(A) -> R>(ptr) })
+        Ok(ptr)
     }
 
     /// Checks if an EDL type has an FFI compatible layout to a Rust type.

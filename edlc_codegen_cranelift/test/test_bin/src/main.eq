@@ -14,9 +14,10 @@ fn min(x: i32, y: i32) -> i32 {
     } else {
         // print test message and return y through the return value if the if-else chain
         println("what?");
-        y
+        todo()
+        // y
         // std::panic("your code is ass");
-//        ret todo();
+        // ret todo();
     }
 }
 
@@ -136,7 +137,7 @@ fn main() {
     let data: [usize; _] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     println(TESTOS);
     foo::boa::i_am_testos();
-    println(min(3, -3));
+    println(min(-5, -3));
 
     let mut i = 0usize;
     let mut max: usize = 0;

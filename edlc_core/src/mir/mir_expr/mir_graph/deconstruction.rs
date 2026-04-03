@@ -7,7 +7,7 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
-use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Statement};
+use crate::mir::mir_expr::{AsciPrinter, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirPrinter, MirRef, MirValue, Statement};
 use crate::mir::mir_expr::lifetime_analysis::{BlockRanges, RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -330,6 +330,17 @@ impl PartialSsaDeconstruction {
                 continue;
             };
             let source_a = self.mapping[var.0];
+
+            let Some(source_b) = self.mapping.get(value.0) else {
+                eprintln!("error during SSA value deconstruction in CFG:");
+                let mut out = std::io::stderr();
+                let mut writer = AsciPrinter::new(&mut out);
+                writer.print(cfg).unwrap();
+                out.flush().unwrap();
+                eprintln!("source value {value} is not mapped!");
+                panic!("value not mapped");
+            };
+
             let source_b = self.mapping[value.0];
             self.try_merge_sources(source_a, source_b);
         }
