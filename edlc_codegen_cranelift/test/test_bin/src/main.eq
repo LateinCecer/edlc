@@ -152,11 +152,21 @@ fn main() {
         max = usize::max(max, data[i]);
         i += 1;
     }
-
-    test_array();
     // todo()
 }
 
+#[setup]
+fn simple_setup() {
+    println("setting up testing environment");
+}
+
+#[teardown]
+fn simple_teardown() {
+    println("tearing down testing environment");
+}
+
+#[bench(setup=simple_setup, teardown=simple_teardown)]
+#[test(setup=simple_setup, teardown=simple_teardown)]
 fn test_array() {
     println("testing weird bug with array accesses...");
     let A_0 = 1.0_f64;
@@ -172,4 +182,16 @@ fn test_array() {
     let prefactor: f64 = 1.0 / (f64::sqrt(twopi * twopi * twopi) * sigma[0] * sigma[1] * sigma[2]);
     println(prefactor);
     println("success!");
+}
+
+#[bench]
+fn benchmark() {
+    let mut i: usize = 0;
+    let mut out: f64 = 1.0;
+    loop {
+        if i >= 1000_000 { break; }
+        out = f64::sin(out * 1.5);
+        i += 1;
+    }
+    println(out);
 }

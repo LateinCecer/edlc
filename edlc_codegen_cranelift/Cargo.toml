@@ -11,7 +11,7 @@ keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { path="../edlc_core", version="0.1.1", features=["debug_printouts"] }
+edlc_core = { path="../edlc_core", version="0.1.1", features=[] }
 edlc_layout = { path="../edlc_layout", version="0.1.1" }
 
 log = "0.4.22"
@@ -21,7 +21,7 @@ cranelift-jit = { version= "0.130.0", features = ["memmap2"] }
 cranelift-module = { version="0.130.0" }
 cranelift-native = { version="0.130.0" }
 anyhow = "1.0.99"
-
+regex = "1.12.3"
 
 [dev-dependencies]
 fern = { version= "0.7.1", features=["colored"] }

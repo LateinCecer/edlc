@@ -1625,6 +1625,14 @@ impl EdlTypeRegistry {
         }
     }
 
+    pub fn get_fn_qualifier(&self, id: EdlTypeId) -> Result<&Option<QualifierName>, EdlError> {
+        match self.types.get(id.0) {
+            Some(EdlType::Function { name, .. }) => Ok(name),
+            Some(_) => Err(EdlError::E027(id)),
+            None => Err(EdlError::E007(id)),
+        }
+    }
+
     pub fn finalize_function(&mut self, id: EdlTypeId, sig: EdlFnSignature, body: EdlFunctionBody) -> Result<(), EdlError> {
         match self.types.get_mut(id.0) {
             Some(EdlType::Function { state, .. }) => {

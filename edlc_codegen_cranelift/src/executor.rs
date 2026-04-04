@@ -22,13 +22,14 @@ use std::marker::PhantomData;
 use anyhow::{anyhow};
 use edlc_core::inline_code;
 use edlc_core::parser::{InFile, Parsable};
-use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
+use edlc_core::prelude::{edl_type, CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance};
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_str::{FatPtr, MemPtr};
 use edlc_core::resolver::{ItemVariant, QualifierName};
 use cranelift_module::{Linkage, Module};
+use log::info;
 use edlc_core::lexer::SrcPos;
 use edlc_core::prelude::ast_type::AstTypeName;
 use edlc_core::prelude::edl_fn::EdlFnSignature;
@@ -41,6 +42,7 @@ use edlc_core::prelude::mir_funcs::ComptimeParams;
 use edlc_core::prelude::mir_type::abi::ByteLayout;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::type_analysis::{InferEq, InferProvider, InferState};
+use regex::{Regex, RegexBuilder};
 use crate::codegen::ItemCodegen;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
@@ -114,6 +116,23 @@ where
 }
     );
 );
+
+pub trait JITBencher {
+    /// Start a benchmark for a specific function.
+    /// The return value of this method should be the number of rounds for which the function should
+    /// be executed for.
+    fn start_bench(&mut self, name: &QualifierName) -> usize;
+
+    /// Starts a single benchmarking round for the currently running benchmark.
+    fn start_round(&mut self);
+
+    /// Ends a single benchmarking round for the currently running benchmark.
+    fn stop_round(&mut self);
+
+    /// Ends the benchmark for the current function.
+    /// This should be called exactly once after [Self::start_bench].
+    fn end_bench(&mut self);
+}
 
 impl_function_container!(fn() -> R);
 impl_function_container!(fn(A) -> R);
@@ -443,101 +462,6 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         }
     }
 
-    pub fn get_function<R: MirLayout>(
-        &mut self,
-        name: ModuleSrc,
-    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
-        let (func, ass_ty, last) = self
-            .find_function_from_name(name.clone())?;
-        let sig = self.compiler.phase.types.get_fn_signature(func)?
-            .clone();
-        if !sig.params.is_empty() {
-            return Err(anyhow!("cannot pass arguments to functions (for now)"));
-        }
-
-        // format function instance
-        let instance = self
-            .format_function_instance(func, last, ass_ty)?;
-
-        // verify that type layouts are FFI safe
-        let ret = sig
-            .return_type()
-            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
-        if !ret.is_fully_resolved() {
-            return Err(anyhow!("return type not fully resolved"));
-        }
-        let mir_ret = self.compiler.mir_phase.types
-            .mir_id(&ret.unwrap(), &self.compiler.phase.types)?;
-        if self.compiler.mir_phase.types.byte_size(mir_ret).unwrap() != size_of::<R>() {
-            return Err(anyhow!("size of return types does not match rust type"));
-        }
-        if self.compiler.mir_phase.types.byte_alignment(mir_ret).unwrap() != align_of::<R>() {
-            return Err(anyhow!("alignment of return types does not match rust type"));
-        }
-        let ret_byte_layout = self.compiler.mir_phase.types.byte_layout(mir_ret).unwrap();
-        let exp_layout = R::layout(&self.compiler.mir_phase.types);
-        let mut exp_byte_layout = ByteLayout::default_high();
-        exp_layout.layout.float_bytes(exp_layout.size, &self.compiler.mir_phase.types, &mut exp_byte_layout);
-        if ret_byte_layout != exp_byte_layout {
-            return Err(anyhow!("layout of return types does not match rust type"));
-        }
-
-        // get function id
-        let mir_id = {
-            let mut funcs = self.backend.func_reg.borrow_mut();
-            let mir_id = funcs
-                .mir_id(
-                    &instance,
-                    &mut self.compiler.phase,
-                    &mut self.compiler.mir_phase,
-                    ComptimeParams::empty(),
-                    false,
-                )?;
-            mir_id
-        };
-
-
-        // make sure function is compiled
-        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
-        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
-        self.backend
-            .compile_associated_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
-
-        let ptr = unsafe { self.backend.get_func_ptr(mir_id) }
-            .ok_or_else(|| anyhow!("function not compiled"))?;
-        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn() -> R>(ptr) })
-    }
-
-    pub fn get_function_with_param<A: MirLayout, R: MirLayout>(
-        &mut self,
-        name: ModuleSrc,
-    ) -> Result<extern "C" fn(A) -> R, anyhow::Error> {
-        let (func, ass_ty, last) = self
-            .find_function_from_name(name.clone())?;
-        let sig = self.compiler.phase.types.get_fn_signature(func)?
-            .clone();
-        if sig.params.len() != 1 {
-            return Err(anyhow!("invalid number of function parameters provided: {} != 1", sig.params.len()));
-        }
-
-        // format function instance
-        let instance = self.format_function_instance(func, last, ass_ty)?;
-        // verify that type layouts are FFI safe
-        let ret = sig
-            .return_type()
-            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
-        self.check_layout_ffi_compatible::<R>(ret)?;
-        let a = sig.params[0]
-            .ty
-            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
-        self.check_layout_ffi_compatible::<A>(a)?;
-
-        // get function id
-        let ptr = unsafe { self.get_function_ptr(&instance) }?;
-        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn(A) -> R>(ptr) })
-    }
-
     unsafe fn get_function_ptr(&mut self, instance: &EdlFnInstance) -> Result<*const u8, anyhow::Error> {
         let mir_id = {
             let mut funcs = self.backend.func_reg.borrow_mut();
@@ -593,6 +517,20 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(())
     }
 
+    fn prepare_module(&mut self, module: &HirModule) -> Result<(), anyhow::Error> {
+        match self.compiler.prepare_mir() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
+                Err(err)
+            }
+        }?;
+        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
+        self.compile_globals(module, &mut vm)?;
+        Ok(())
+    }
+
     /// Compiles an entire **fracht** that compiles to a binary.
     ///
     /// # Example
@@ -619,6 +557,15 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         supplier: &Src,
         entry: ModuleSrc
     ) -> Result<extern "C" fn() -> R, anyhow::Error> {
+        let _module = self.load_bin(name, supplier)?;
+        self.get_named_function(entry)
+    }
+
+    pub fn load_bin<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+    ) -> Result<HirModule, anyhow::Error> {
         let module = match self.compiler.parse_bin(name, supplier) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -626,17 +573,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             },
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        self.compile_globals(&module, &mut vm)?;
-        self.get_function(entry)
+        self.prepare_module(&module)?;
+        Ok(module)
     }
 
     /// Compiles an entire **fracht** that compiles to a library.
@@ -645,6 +583,15 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         name: &str,
         supplier: &Src
     ) -> Result<(), anyhow::Error> {
+        let _module = self.load_lib(name, supplier)?;
+        Ok(())
+    }
+
+    pub fn load_lib<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src
+    ) -> Result<HirModule, anyhow::Error> {
         let module = match self.compiler.parse_lib(name, supplier) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -652,25 +599,179 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             }
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        self.compile_globals(&module, &mut vm)?;
-        Ok(())
+        self.prepare_module(&module)?;
+        Ok(module)
     }
 
-    pub fn compile_script<Src: SrcSupplier, R: Debug + 'static>(
+    pub fn run_test<Src: SrcSupplier>(
         &mut self,
         name: &str,
         supplier: &Src,
-        entry: &str,
-    ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
+        is_lib: bool,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Result<(), anyhow::Error> {
+        let module = if is_lib {
+            self.load_lib(name, supplier)?
+        } else {
+            self.load_bin(name, supplier)?
+        };
+        self.prepare_module(&module)?;
+        for (id, test, setup, teardown) in self
+            .get_test_cases(test_name, &module, path, "test")? {
+
+            setup.into_iter().for_each(|f| f());
+            test();
+            teardown.into_iter().for_each(|f| f());
+        }
+        Ok(())
+    }
+
+    pub fn run_bench<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+        is_lib: bool,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+        bencher: &mut impl JITBencher,
+    ) -> Result<(), anyhow::Error> {
+        let module = if is_lib {
+            self.load_lib(name, supplier)?
+        } else {
+            self.load_bin(name, supplier)?
+        };
+        self.prepare_module(&module)?;
+        for (id, bench, setup, teardown) in self
+            .get_test_cases(test_name, &module, path, "bench")? {
+
+            let full_name = self.compiler.phase.types.get_fn_qualifier(id)?
+                .as_ref()
+                .unwrap();
+            let n = bencher.start_bench(full_name);
+            for _ in 0..n {
+                setup.iter().for_each(|f| f());
+                bencher.start_round();
+                bench();
+                bencher.stop_round();
+                teardown.iter().for_each(|f| f());
+            }
+            bencher.end_bench();
+        }
+        Ok(())
+    }
+
+    fn get_test_cases(
+        &mut self,
+        name: &Regex,
+        module: &HirModule,
+        path: Option<&QualifierName>,
+        ident_str: &str,
+    ) -> Result<Vec<(EdlTypeId, extern "C" fn(), Vec<extern "C" fn()>, Vec<extern "C" fn()>)>, anyhow::Error> {
+        let regex = Regex::new(&format!(
+            r"^{}{}",
+            ident_str,
+            r"(?:\(((?:\s*([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)\s*,?\s*)*)\))?"
+        ))?;
+        let key_value_regex = Regex::new(r"([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)")?;
+        let setup_regex = Regex::new(r"^setup")?;
+        let teardown_regex = Regex::new(r"^teardown")?;
+
+        let Some(test_cases) = module.find_function_with_annotation(&regex, name, path) else {
+            return Ok(vec![]);
+        };
+        let mut test_cases_out = Vec::new();
+        for (test_function, annotation) in test_cases {
+            let Some(func) = self.get_surface_function(test_function)? else {
+                continue;
+            };
+
+            // get signature name
+            let full_name = self.compiler.phase.types
+                .get_fn_qualifier(test_function)?
+                .as_ref()
+                .and_then(|name| name.trim(1));
+
+            // capture setup and teardown
+            let mut setup_functions = Vec::new();
+            let mut teardown_functions = Vec::new();
+            if let Some(captures) = regex.captures(&annotation) {
+                if let Some(g1) = captures.get(1) {
+                    for (_, [key, value]) in key_value_regex
+                        .captures_iter(g1.as_str())
+                        .map(|c| c.extract()) {
+                        match key {
+                            "setup" => {
+                                let mut setup = self.get_surface_functions(
+                                    module,
+                                    &setup_regex,
+                                    full_name.as_ref(),
+                                    &Regex::new(value)?,
+                                )?;
+                                setup_functions.append(&mut setup);
+                            },
+                            "teardown" => {
+                                let mut teardown = self.get_surface_functions(
+                                    module,
+                                    &teardown_regex,
+                                    full_name.as_ref(),
+                                    &Regex::new(value)?,
+                                )?;
+                                teardown_functions.append(&mut teardown);
+                            },
+                            _ => (),
+                        }
+                    }
+                }
+            }
+
+            test_cases_out.push((
+                test_function,
+                func,
+                setup_functions,
+                teardown_functions,
+            ));
+        }
+        Ok(test_cases_out)
+    }
+
+    fn get_surface_function(&mut self, func: EdlTypeId) -> Result<Option<extern "C" fn()>, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(func)?;
+        let env = self.compiler.phase.types.get_env(sig.env).unwrap();
+        if sig.params.is_empty() && sig.ret.ty == edl_type::EDL_EMPTY && env.params.is_empty() {
+            let param = EdlParameterDef::new(env, sig.env);
+            let func: extern "C" fn() = self.get_function(func, param, None)?;
+            Ok(Some(func))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_surface_functions(
+        &mut self,
+        module: &HirModule,
+        regex: &Regex,
+        path: Option<&QualifierName>,
+        name: &Regex,
+    ) -> Result<Vec<extern "C" fn()>, anyhow::Error> {
+        let mut out = Vec::new();
+        let Some(setup_funcs) = module.find_function_with_annotation(regex, name, path) else {
+            return Ok(out);
+        };
+        for (func, _annotation) in setup_funcs {
+            if let Some(func) = self.get_surface_function(func)? {
+                out.push(func);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn compile_script<Src: SrcSupplier, R: MirLayout>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+        entry: ModuleSrc,
+    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
         let module = match self.compiler.parse_script(name, supplier, name) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -678,17 +779,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             },
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        self.compile_globals(&module, &mut vm)?;
-        todo!()
+        self.prepare_module(&module)?;
+        self.get_named_function(entry)
     }
 
     /// Evaluates an expression inside the compiler internal VM.
@@ -819,17 +911,21 @@ impl<Runtime: 'static> JitCompiler for CraneliftJIT<Runtime> {
 #[cfg(test)]
 mod test {
     use std::{any, slice};
+    use std::collections::HashMap;
     use std::path::Path;
+    use std::time::SystemTime;
     use edlc_core::inline_code;
     use edlc_core::prelude::FileSupplier;
     use edlc_core::prelude::mir_str::FatPtr;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
     use log::{error, info};
+    use regex::Regex;
     use edlc_core::prelude::edl_type::{EdlMaybeType, EdlTypeId};
     use edlc_core::prelude::mir_expr::Context;
+    use edlc_core::resolver::QualifierName;
     use crate::compiler::{TypedProgram};
-    use crate::executor::CraneliftJIT;
+    use crate::executor::{CraneliftJIT, FunctionContainer, JITBencher};
     use crate::{jit_func, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
@@ -966,7 +1062,7 @@ fn test() -> i32 {
 
         // execute in JIT compiler
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 13);
         Ok(())
     }
@@ -1125,7 +1221,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -1231,5 +1327,276 @@ fn test() -> i32 {
         // let x = script.exec(&mut compiler.backend)?;
         // println!("script result: {x}");
         Ok(())
+    }
+
+    #[test]
+    fn test_test_bin() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
+        )?;
+
+        jit_func!((&mut compiler), fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                jit_intrinsic_panic!(msg);
+            }
+        );
+
+        compiler.compile_lib(
+            "test_lib",
+            &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
+        )?;
+        compiler.run_test(
+            "test_bin",
+            &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
+            false,
+            &Regex::new(r".*").unwrap(),
+            None,
+        )?;
+
+        // execute a more complex script that uses parts of the original program for execution
+        // let script: TypedProgram<f32, _> = compiler.compile_expr(
+        //     &vec!["test_bin"].into(), inline_code!(r#"{
+        //         let x: f32 = foo::pi;
+        //
+        //         let vec = SVector::new(1.0_f32, 2.0);
+        //         vec.print();
+        //         std::io::print("\n");
+        //
+        //         std::io::print(comptime { f32::cos(x) });
+        //         std::io::print("\n");
+        //         foo::pi.sin()
+        //     }"#),
+        // )?;
+        //
+        // println!();
+        // println!(" ## executing script: ");
+        // println!();
+        // let x = script.exec(&mut compiler.backend)?;
+        // println!("script result: {x}");
+        Ok(())
+    }
+
+
+    #[test]
+    fn test_bench_bin() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
+        )?;
+
+        jit_func!((&mut compiler), fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                jit_intrinsic_panic!(msg);
+            }
+        );
+
+        compiler.compile_lib(
+            "test_lib",
+            &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
+        )?;
+
+        struct SimpleBencher {
+            start_time: SystemTime,
+            end_time: SystemTime,
+            current_fn: Option<String>,
+            current_sum: u128,
+            averages: HashMap<String, u64>,
+        }
+
+        impl JITBencher for SimpleBencher {
+            fn start_bench(&mut self, name: &QualifierName) -> usize {
+                self.current_fn = Some(name.to_string());
+                self.current_sum = 0;
+                20
+            }
+
+            fn start_round(&mut self) {
+                self.start_time = SystemTime::now();
+            }
+
+            fn stop_round(&mut self) {
+                self.end_time = SystemTime::now();
+                self.current_sum += self.end_time.duration_since(self.start_time).unwrap().as_micros();
+            }
+
+            fn end_bench(&mut self) {
+                self.averages.insert(
+                    self.current_fn.as_ref().unwrap().to_string(),
+                    (self.current_sum / 20) as u64,
+                );
+            }
+        }
+
+        let mut bencher = SimpleBencher {
+            start_time: SystemTime::now(),
+            end_time: SystemTime::now(),
+            current_fn: None,
+            current_sum: 0,
+            averages: HashMap::new(),
+        };
+        compiler.run_bench(
+            "test_bin",
+            &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
+            false,
+            &Regex::new(r".*").unwrap(),
+            None,
+            &mut bencher,
+        )?;
+
+        println!("benchmarking result:");
+        for (func, mu) in bencher.averages.iter() {
+            println!(" - {func}: {mu} µs");
+        }
+
+        // execute a more complex script that uses parts of the original program for execution
+        // let script: TypedProgram<f32, _> = compiler.compile_expr(
+        //     &vec!["test_bin"].into(), inline_code!(r#"{
+        //         let x: f32 = foo::pi;
+        //
+        //         let vec = SVector::new(1.0_f32, 2.0);
+        //         vec.print();
+        //         std::io::print("\n");
+        //
+        //         std::io::print(comptime { f32::cos(x) });
+        //         std::io::print("\n");
+        //         foo::pi.sin()
+        //     }"#),
+        // )?;
+        //
+        // println!();
+        // println!(" ## executing script: ");
+        // println!();
+        // let x = script.exec(&mut compiler.backend)?;
+        // println!("script result: {x}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_regex() {
+        let input = "test";
+        // let re = Regex::new(r"^test(?:\((\s*[a-zA-Z_]\w*\s*=\s*[^,)\s]+(?:\s*,\s*[a-zA-Z_]\w*\s*=\s*[^,)\s]+)*\s*)\))?$").unwrap();
+        let re = Regex::new(r"test(?:\(((?:\s*([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)\s*,?\s*)*)\))?").unwrap();
+
+        if re.is_match(input) {
+            println!("Matched!");
+            let caps = re.captures(input).unwrap();
+            if let Some(params) = caps.get(1) {
+                let param_re = Regex::new(r"([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)").unwrap();
+                for cap in param_re.captures_iter(params.as_str()) {
+                    println!("Key: {}, Value: {}", &cap[1], &cap[2]);
+                }
+            }
+        }
     }
 }

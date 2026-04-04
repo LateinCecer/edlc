@@ -392,7 +392,7 @@ mod test {
     use std::{any, fs, mem, slice};
     use edlc_core::prelude::mir_str::FatPtr;
     use log::info;
-    use crate::executor::CraneliftJIT;
+    use crate::executor::{CraneliftJIT, FunctionContainer};
     use crate::prelude::TypedProgram;
     use std::sync::RwLock;
     use edlc_core::inline_code;
@@ -432,7 +432,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -461,7 +461,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -498,7 +498,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
 
         let rt = *compiler.backend.get_runtime(0.into())?
@@ -541,7 +541,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -594,7 +594,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -743,7 +743,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -921,7 +921,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -1159,7 +1159,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         assert_eq!(compiler.backend.get_runtime(0.into())?.read().unwrap().res.len(), 9);
         Ok(())
@@ -1236,7 +1236,7 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
         "#))?;
 
         let program: extern "C" fn(f64) -> i32 = compiler
-            .get_function_with_param(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(3.14), 0);
         Ok(())
     }
@@ -1312,7 +1312,7 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
         "#))?;
 
         let program: extern "C" fn(f64) -> i32 = compiler
-            .get_function_with_param(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(3.14), 0);
         Ok(())
     }
@@ -1360,7 +1360,7 @@ fn test() -> i32 {
         "#))?;
 
         let program: extern "C" fn() -> i32 = compiler
-            .get_function(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(), 0);
         Ok(())
     }
@@ -1710,7 +1710,7 @@ fn test(f: f64) -> i32 {
         "#))?;
 
         let program: extern "C" fn(f64) -> i32 = compiler
-            .get_function_with_param(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(3.14), 0);
         Ok(())
     }
@@ -2064,7 +2064,7 @@ fn test(f: f64) -> i32 {
         "#))?;
 
         let program: extern "C" fn(f64) -> i32 = compiler
-            .get_function_with_param(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(3.14), 0);
 
         // test external script insert
@@ -2357,7 +2357,7 @@ fn test(f: f64) -> i32 {
         "#))?;
 
         let program: extern "C" fn(f64) -> i32 = compiler
-            .get_function_with_param(inline_code!("test"))?;
+            .get_named_function(inline_code!("test"))?;
         assert_eq!(program(3.14), 0);
         Ok(())
     }

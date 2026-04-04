@@ -695,9 +695,14 @@ impl HirModule {
     /// This function returns a `Vec` containing tuples with the [EdlTypeId] for the identified
     /// function, as well as the annotation string from the function signature that matched
     /// the regex.
-    pub fn find_function_with_annotation(&self, regex: &Regex) -> Option<Vec<(EdlTypeId, String)>> {
+    pub fn find_function_with_annotation(
+        &self,
+        regex: &Regex,
+        name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Option<Vec<(EdlTypeId, String)>> {
         let mut buf = Vec::new();
-        self.find_function_with_annotation_internal(regex, &mut buf);
+        self.find_function_with_annotation_internal(regex, name, &mut buf, path);
         if buf.is_empty() {
             None
         } else {
@@ -705,16 +710,35 @@ impl HirModule {
         }
     }
 
-    fn find_function_with_annotation_internal(&self, regex: &Regex, ret_buf: &mut Vec<(EdlTypeId, String)>) {
+    fn find_function_with_annotation_internal(
+        &self,
+        regex: &Regex,
+        name: &Regex,
+        ret_buf: &mut Vec<(EdlTypeId, String)>,
+        path: Option<&QualifierName>,
+    ) {
         let mut worklist = vec![self]; // remember kids, recursion is ass
         while let Some(item) = worklist.pop() {
+            let (this_module, exit_early) = if let Some(search_path) = path {
+                let matches = search_path == &item.full_name;
+                (matches, matches)
+            } else {
+                (true, false)
+            };
+
             for item in item.items.iter() {
                 match item {
-                    HirItem::Func(func) => {
+                    HirItem::Func(func) if this_module => {
                         // to clippy: this match is not collapsible in edition 2021
                         // we can adjust this if we ever update to 2024 with chained let-matches
                         let annotation = func.signature.annotations.iter()
-                            .find(|sig| regex.is_match(*sig));
+                            .find(|sig| {
+                                regex.is_match(sig)
+                            });
+                        if !name.is_match(&func.signature.name) {
+                            continue;
+                        }
+
                         #[allow(clippy::collapsible_match)]
                         if let Some(annotation) = annotation {
                             if let Some(id) = func.signature.get_id() {
@@ -727,6 +751,10 @@ impl HirModule {
                     },
                     _ => (),
                 }
+            }
+
+            if exit_early {
+                break;
             }
         }
     }
