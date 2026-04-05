@@ -21,7 +21,7 @@ use crate::error::{JITError, JITErrorType};
 use crate::layout::SSARepr;
 use cranelift::frontend::FunctionBuilder;
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::{InstBuilder, MemFlags, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{InstBuilder, MemFlags, StackSlotData, StackSlotKey, StackSlotKind};
 use cranelift_module::Module;
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_backend::Backend;
@@ -131,11 +131,13 @@ impl StackFrameMapping {
         &self,
         builder: &mut FunctionBuilder,
     ) -> CraneliftValues {
-        let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+        let mut stack_slot_data = StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             self.layout.size as u32,
             u8::max(self.layout.alignment as u8, 16),
-        ));
+        );
+        stack_slot_data.key = Some(StackSlotKey::new(666));
+        let stack_slot = builder.create_sized_stack_slot(stack_slot_data);
         let mappings: IndexMap<ir::Value> = IndexMap::default();
         CraneliftValues {
             stack_slot,

@@ -23,6 +23,7 @@ pub mod panic_handle;
 mod float_math;
 mod bool_math;
 mod calling_convention;
+mod unwind_info;
 
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -54,6 +55,9 @@ use crate::compiler::code::{JITCode};
 use crate::compiler::panic_handle::PanicHandle;
 use crate::error::{JITError, JITErrorType};
 use crate::prelude::RawPanicHandle;
+
+pub use unwind_info::eh_frames;
+use crate::compiler::unwind_info::UnwindInfo;
 
 #[derive(Default)]
 struct NativeFunctionLookup {
@@ -174,6 +178,7 @@ pub struct JIT<Runtime: 'static> {
     _rt: PhantomData<Runtime>,
     pub panic_handle: PanicHandle,
     pub abi: Arc<AbiConfig>,
+    unwind_info: UnwindInfo,
 }
 
 impl<Runtime: 'static> Default for JIT<Runtime> {
@@ -182,6 +187,7 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
         flag_builder.set("is_pic", "false").unwrap();
         flag_builder.set("enable_llvm_abi_extensions", "true").unwrap();
+        flag_builder.set("unwind_info", "true").unwrap();
         let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
             panic!("host machine is not supported: {}", msg);
         });
@@ -228,6 +234,7 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
             _rt: PhantomData,
             panic_handle,
             abi: Arc::new(AbiConfig::local_system_v()),
+            unwind_info: UnwindInfo::new(),
         }
     }
 }
@@ -446,6 +453,18 @@ impl<Runtime: 'static> Drop for JIT<Runtime> {
 }
 
 impl<Runtime: 'static> JIT<Runtime> {
+    pub fn finalize_definitions(&mut self) -> Result<(), MirError<JIT<Runtime>>> {
+        self.module.finalize_definitions()
+            .map_err(|err| MirError::BackendError(JITError {
+                ty: JITErrorType::ModuleErr(err),
+            }))?;
+        self.unwind_info.rebuild(&self.module)
+            .map_err(|err| MirError::BackendError(JITError {
+                ty: JITErrorType::Gimli(err),
+            }))?;
+        Ok(())
+    }
+
     /// Inserts a runtime definition into the global memory pool of the JIT executor.
     ///
     /// # Safety

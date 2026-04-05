@@ -21,10 +21,12 @@ use edlc_core::prelude::{HirPhase, MirError, MirPhase};
 use edlc_core::prelude::mir_backend::{CodeGen};
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::translation::HirTranslationError;
-use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Signature, UserFuncName};
+use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Signature, SourceLoc, UserFuncName};
+use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
+use cranelift_codegen::{Final, MachSrcLoc};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
-use log::info;
+use log::{error, info};
 use crate::codegen::{FunctionTranslator};
 use crate::codegen::cfg_codegen::cfg_codegen;
 use crate::layout::SSARepr;
@@ -90,6 +92,30 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
             .map_err(|err| MirError::<JIT<Runtime>>::BackendError(JITError {
                 ty: JITErrorType::ModuleErr(err)
             }))?;
+
+        let code = backend.ctx.compiled_code()
+            .expect("failed to fetch code artifacts after compiling function");
+        if let Some(UnwindInfo::SystemV(info)) = code
+            .create_unwind_info_of_kind(backend.module.isa(), UnwindInfoKind::SystemV)
+            .map_err(|err| MirError::BackendError(JITError {
+                ty: JITErrorType::Codegen(err)
+            }))? {
+            backend.unwind_info.insert_fde(id, info);
+        } else {
+            error!("code generation did not yield unwinding information in the correct format");
+        }
+
+        // process other debugging information
+        /*code.buffer.get_srclocs_sorted().iter().for_each(|loc| {
+            let id = loc.loc.bits();
+        });
+        code.buffer.traps().iter().for_each(|trap| {
+            let code = trap.code;
+            let offset= trap.offset;
+        });
+        code.buffer.frame_layout().unwrap().stackslots.iter().for_each(|(slot, loc)| {
+            let offset = loc.offset;
+        });*/
 
         // now that compilation is finished, we can clear out the context state
         backend.module.clear_context(&mut backend.ctx);

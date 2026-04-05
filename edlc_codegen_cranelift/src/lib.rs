@@ -25,6 +25,7 @@ pub mod prelude;
 mod executor;
 pub mod layout;
 pub mod trap;
+mod unwind;
 
 #[cfg(test)]
 fn setup_logger() -> Result<(), fern::InitError> {

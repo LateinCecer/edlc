@@ -929,6 +929,7 @@ mod test {
     use crate::{jit_func, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
+    use crate::unwind::{PanicData, TrapHandler};
 
     #[derive(Debug)]
     #[repr(C)]
@@ -1598,5 +1599,101 @@ fn test() -> i32 {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_unwind() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
+        )?;
+
+        jit_func!((&mut compiler), fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{}", msg);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::panic;
+
+fn foo(i: usize) -> usize {
+    32 / i
+}
+
+fn test(i: usize) {
+    print("hello, world!\n");
+    let x = foo(i);
+    // panic("s")
+}
+        "#))?;
+
+        let prog: extern "C" fn(usize) = compiler.get_named_function(inline_code!("test"))?;
+
+        {
+            let i = 0;
+            let _handler = unsafe { TrapHandler::new() };
+            prog(i);
+            // _handler goes out of scope here and the normal trap handler should take over
+        }
+        assert!(PanicData::fetch(&compiler.backend).is_err());
+        println!("panic handling was a success!");
+        Ok(())
     }
 }

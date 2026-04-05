@@ -17,6 +17,7 @@
 use std::any::TypeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use cranelift_codegen::CodegenError;
 use edlc_core::prelude::mir_type::MirTypeId;
 use cranelift_module::ModuleError;
 use crate::prelude::RuntimeId;
@@ -33,6 +34,8 @@ pub enum JITErrorType {
     RuntimePanic(Vec<String>),
     NoRustRepr(MirTypeId),
     RustTypeMismatch(TypeId, TypeId),
+    Codegen(CodegenError),
+    Gimli(gimli::write::Error),
 }
 
 #[derive(Debug)]

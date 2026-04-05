@@ -14,7 +14,6 @@
  *    limitations under the License.
  */
 use crate::compiler::JIT;
-use crate::error::{JITError, JITErrorType};
 use cranelift_module::FuncId;
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFuncId};
 use edlc_core::prelude::{HirPhase, MirError, MirPhase};
@@ -46,11 +45,7 @@ impl JITCode {
             let func_id = func.gen_func(backend, phase, hir_phase, 0)?;
             self.generated.insert(func.mir_id.unwrap(), func_id);
         }
-
-        backend.module.finalize_definitions()
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))
+        backend.finalize_definitions()
     }
 
     pub fn get_func_id(&self, mir_id: MirFuncId) -> Option<FuncId> {
