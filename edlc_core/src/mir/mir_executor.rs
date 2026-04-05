@@ -98,6 +98,10 @@ pub struct AmorphusDataCopy {
 }
 
 impl AmorphusDataCopy {
+    pub unsafe fn from_raw_parts(ty: MirTypeId, align: usize, data: Vec<u8>) -> Self {
+        Self { align, data, ty }
+    }
+
     pub fn uninit(ty: MirTypeId, reg: &MirTypeRegistry) -> Option<Self> {
         let size = reg.byte_size(ty)?;
         let align = reg.byte_alignment(ty)?;
@@ -106,6 +110,14 @@ impl AmorphusDataCopy {
             data: vec![0u8; size],
             ty,
         })
+    }
+
+    pub unsafe fn uninit_raw(ty: MirTypeId, size: usize, align: usize) -> Self {
+        Self {
+            align,
+            data: vec![0u8; size],
+            ty,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -149,6 +161,13 @@ impl AmorphusDataCopy {
         }
         std::mem::forget(val);
         Some(out)
+    }
+
+    pub unsafe fn new_unchecked<T: 'static>(ty: MirTypeId, val: T) -> Self {
+        let mut out = Self::uninit_raw(ty, size_of::<T>(), align_of::<T>());
+        std::ptr::copy(&val as *const T, out.data.as_mut_ptr() as *mut T, 1);
+        std::mem::forget(val);
+        out
     }
 
     /// # Safety

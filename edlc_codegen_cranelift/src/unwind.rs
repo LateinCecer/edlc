@@ -21,11 +21,13 @@ mod unix;
 mod signal_stack;
 mod cfi;
 
-use std::cell::LazyCell;
+use std::cell::{LazyCell, RefCell};
 use std::ops::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use log::error;
+use edlc_core::prelude::AmorphusDataCopy;
+use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
 pub use unix::TrapHandler;
 use crate::compiler::JIT;
@@ -162,11 +164,53 @@ impl PanicData {
                 error!("host function was not reached during unwinding – graceful panic not possible");
                 panic!("unrecoverable panic during JIT code execution");
             }
-            Err(PanicError {})
+
+            let msg = PanicMessage::take().map(|msg| msg.data);
+            Err(PanicError {
+                msg,
+                graceful: payload.reached_host,
+                panic_type: PanicType::Explicit,
+            })
         } else {
             Ok(())
         })
     }
 }
 
-pub struct PanicError {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanicType {
+    DivideByZero,
+    ArrayIndexOutOfBounds,
+    SliceIndexOutOfBounds,
+    ArrayRangeOutOfBounds,
+    SliceRangeOutOfBounds,
+    Assertion,
+    Explicit,
+    Segfault,
+}
+
+#[derive(Debug)]
+pub struct PanicError {
+    pub msg: Option<String>,
+    pub graceful: bool,
+    pub panic_type: PanicType,
+}
+
+/// User-defined panic message, that can be passed to a manual call to core::panic.
+pub struct PanicMessage {
+    pub data: String,
+}
+
+thread_local! {
+    static PANIC_MSG: RefCell<Option<PanicMessage>> = const { RefCell::new(None) };
+}
+
+impl PanicMessage {
+    pub fn set(msg: PanicMessage) {
+        PANIC_MSG.set(Some(msg));
+    }
+
+    fn take() -> Option<PanicMessage> {
+        PANIC_MSG.take()
+    }
+}

@@ -915,7 +915,7 @@ mod test {
     use std::path::Path;
     use std::time::SystemTime;
     use edlc_core::inline_code;
-    use edlc_core::prelude::FileSupplier;
+    use edlc_core::prelude::{AmorphusDataCopy, FileSupplier};
     use edlc_core::prelude::mir_str::FatPtr;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
@@ -929,7 +929,7 @@ mod test {
     use crate::{jit_func, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
-    use crate::unwind::{PanicData, TrapHandler};
+    use crate::unwind::{PanicData, PanicMessage, TrapHandler};
 
     #[derive(Debug)]
     #[repr(C)]
@@ -1665,7 +1665,9 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                print!("{}", msg);
+                PanicMessage::set(PanicMessage {
+                    data: msg.to_string(),
+                });
             }
         );
 
@@ -1680,12 +1682,14 @@ fn foo(i: usize) -> usize {
 fn test(i: usize) {
     print("hello, world!\n");
     let x = foo(i);
-    // panic("s")
+}
+
+fn test_other() {
+    panic("this is an error message");
 }
         "#))?;
 
         let prog: extern "C" fn(usize) = compiler.get_named_function(inline_code!("test"))?;
-
         {
             let i = 0;
             let _handler = unsafe { TrapHandler::new() };
@@ -1693,6 +1697,19 @@ fn test(i: usize) {
             // _handler goes out of scope here and the normal trap handler should take over
         }
         assert!(PanicData::fetch(&compiler.backend).is_err());
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test_other"))?;
+        {
+            let _handler = unsafe { TrapHandler::new() };
+            prog();
+            // _handler goes out of scope here and the normal trap handler should take over
+        }
+        match PanicData::fetch(&compiler.backend) {
+            Ok(_) => panic!("that method should have paniced!"),
+            Err(err) => {
+                assert_eq!(err.msg.as_ref(), Some(&"this is an error message".to_string()));
+            }
+        }
         println!("panic handling was a success!");
         Ok(())
     }
