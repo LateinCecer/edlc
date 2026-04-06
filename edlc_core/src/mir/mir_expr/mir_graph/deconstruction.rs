@@ -464,6 +464,54 @@ impl PartialSsaDeconstruction {
     }
 }
 
+pub struct UnwindDropFrame {
+    trap_locs: Vec<ops::Range<usize>>,
+    offsets: Vec<(usize, MirTypeId)>,
+}
+
+impl UnwindDropFrame {
+    fn insert_trap(
+        &mut self,
+        trap_loc: &MirLoc,
+        cfg: &MirFlowGraph,
+        lifeness: &RegionLifenessList,
+        layout: &StackFrameLayout,
+    ) {
+        let block_ref = trap_loc.block_ref();
+        let defines = if let MirLoc::GraphLoc(MirGraphLoc(_, uid)) = trap_loc {
+            let block = &cfg.blocks[block_ref.0];
+            block.statements.iter().find(|statement| statement.uid() == uid)
+                .and_then(|statement| statement.defines().cloned())
+        } else {
+            None
+        };
+        let range_start = self.offsets.len();
+        for var in cfg
+            .iter_vars()
+            .filter(|var| lifeness.is_alive_after(var, trap_loc, cfg)) {
+            // if this variable is defined by the faulting statement, we don't drop it as it is
+            // not initialized
+            if let Some(defines) = defines.as_ref() {
+                if &var == defines {
+                    continue;
+                }
+            }
+            let Some((offset, ty)) = layout.local_offset(&var) else {
+                continue;
+            };
+            if Self::has_drop_impl(ty) {
+                self.offsets.push((offset.start, *ty));
+            }
+        }
+        let range_end = self.offsets.len();
+        self.trap_locs.push(range_start..range_end);
+    }
+
+    fn has_drop_impl(_ty: &MirTypeId) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct StackFrameLayout {
     pub alignment: usize,

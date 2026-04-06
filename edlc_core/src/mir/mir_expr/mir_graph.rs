@@ -150,6 +150,12 @@ impl MirGraphLoc {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct BlockLocalStatementUid(usize);
 
+impl BlockLocalStatementUid {
+    pub fn ordinal(&self) -> usize {
+        self.0
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub enum VarUse {
     Statement(MirBlockRef, MirValue, BlockLocalStatementUid),

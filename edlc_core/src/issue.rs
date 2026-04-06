@@ -154,6 +154,7 @@ impl_edl_display!(type EdlTypeInstance);
 impl_edl_display!(type EdlMaybeType);
 impl_edl_display!(type EdlParameterDef);
 impl_edl_display!(type EdlFnInstance);
+impl_edl_display!(type EdlFnSignature);
 impl_edl_display!(var EdlVarId);
 
 impl EdlDisplay for EdlTypeId {
@@ -377,6 +378,7 @@ macro_rules! format_type_args(
     )
 );
 pub(crate) use format_type_args;
+use crate::core::edl_fn::EdlFnSignature;
 use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_var::{EdlVarRegistry, FmtVar};
 use crate::core::EdlVarId;

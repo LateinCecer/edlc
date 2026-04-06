@@ -25,7 +25,7 @@ use crate::resolver::ScopeId;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlFnSignature {
     pub name: String,
     pub env: EdlEnvId,
@@ -38,7 +38,7 @@ pub struct EdlFnSignature {
     pub params: Vec<EdlFnParam>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlPreSignature {
     pub name: String,
     pub env: EdlEnvId,
@@ -65,13 +65,17 @@ impl FmtType for EdlFnSignature {
             write!(fmt, "?comptime ")?;
         }
 
+        if self.async_ {
+            write!(fmt, "async  ")?;
+        }
+
         write!(fmt, "fn {}", self.name)?;
         types.fmt_env(self.env, fmt)?;
 
         // print parameters
+        write!(fmt, "(")?;
         let mut iter = self.params.iter();
         if let Some(i) = iter.next() {
-            write!(fmt, "(")?;
             i.fmt_type(fmt, types)?;
         }
         for i in iter {
@@ -85,6 +89,9 @@ impl FmtType for EdlFnSignature {
             Ok(())
         } else {
             write!(fmt, " -> ")?;
+            if self.async_return {
+                write!(fmt, "async ")?;
+            }
             self.ret.fmt_type(fmt, types)
         }
     }
@@ -123,6 +130,10 @@ impl EdlFnSignature {
             write!(fmt, "?comptime")?;
         }
 
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "fn {}", self.name)?;
         if let Some(params) = stack.get_def(self.env) {
             params.fmt_type(fmt, types)?;
@@ -145,6 +156,9 @@ impl EdlFnSignature {
             Ok(())
         } else {
             write!(fmt, " -> ")?;
+            if self.async_return {
+                write!(fmt, "async ")?;
+            }
             self.ret.resolve_generics(stack, types).fmt_type(fmt, types)
         }
     }
@@ -163,6 +177,13 @@ impl EdlFnParam {
         if self.mutable {
             write!(fmt, "mut ")?;
         }
+        if self.comptime {
+            write!(fmt, "comptime ")?;
+        }
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "{}: ", self.name)?;
         ty.fmt_type(fmt, types)
     }
@@ -173,12 +194,19 @@ impl FmtType for EdlFnParam {
         if self.mutable {
             write!(fmt, "mut ")?;
         }
+        if self.comptime {
+            write!(fmt, "comptime ")?;
+        }
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "{}: ", self.name)?;
         self.ty.fmt_type(fmt, types)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlFnParam {
     pub name: String,
     pub mutable: bool,

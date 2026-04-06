@@ -16,11 +16,12 @@
 use cranelift_codegen::isa::unwind::CfaUnwindInfo;
 use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
+use edlc_core::prelude::mir_funcs::MirFuncId;
 use gimli::write::{Address, CommonInformationEntry, EhFrame, EndianVec, FrameTable};
 use gimli::{Encoding, Format, NativeEndian};
 use std::collections::BTreeMap;
-use std::ops::AddAssign;
 use std::sync::{LazyLock, RwLock};
+use log::warn;
 
 /// Contains the unwinding and debugging data that a normal ELF object file would hold in the
 /// .eh_frames section.
@@ -44,18 +45,34 @@ pub fn eh_frames() -> &'static RwLock<EndianVec<NativeEndian>> {
     &*EH_FRAMES
 }
 
+pub(crate) struct FunctionInfo {
+    pub unwind_info: CfaUnwindInfo,
+    pub id: MirFuncId,
+}
+
+struct DebugFrames {
+    id: MirFuncId,
+}
+
 pub struct UnwindInfo {
-    frame_description_entries: BTreeMap<FuncId, CfaUnwindInfo>,
+    frame_description_entries: BTreeMap<FuncId, FunctionInfo>,
+    debug_frames: BTreeMap<usize, DebugFrames>,
 }
 
 impl UnwindInfo {
     pub fn new() -> Self {
         UnwindInfo {
             frame_description_entries: BTreeMap::new(),
+            debug_frames: BTreeMap::new(),
         }
     }
 
-    pub fn insert_fde(&mut self, func: FuncId, fde: CfaUnwindInfo) {
+    pub fn find_id(&self, function_ptr: &usize) -> Option<MirFuncId> {
+        self.debug_frames.get(function_ptr)
+            .map(|debug| debug.id)
+    }
+
+    pub fn insert_fde(&mut self, func: FuncId, fde: FunctionInfo) {
         self.frame_description_entries.insert(func, fde);
     }
 
@@ -67,6 +84,7 @@ impl UnwindInfo {
     /// Since each finalization can cause the JIT module to relocate functions and data objects,
     /// we need to rebuild the frame descriptors every time a new set of functions is finalized.
     pub fn rebuild(&mut self, module: &JITModule) -> Result<(), gimli::write::Error> {
+        self.debug_frames.clear();
         let mut frames = FrameTable::default();
         // formate common information entry
         let encoding = Encoding {
@@ -85,10 +103,20 @@ impl UnwindInfo {
         let cie_id = frames.add_cie(cie);
 
         // add frame descriptor entries for all JIT generated functions
-        for (func_id, unwind_info) in self.frame_description_entries.iter() {
+        for (func_id, FunctionInfo {
+            unwind_info,
+            id,
+            ..
+        }) in self.frame_description_entries.iter() {
             let addr = module.get_finalized_function(*func_id);
             let fde = unwind_info.to_fde(Address::Constant(addr as u64));
             frames.add_fde(cie_id, fde);
+
+            let debug_frame = DebugFrames {
+                id: *id,
+            };
+            warn!("inserting debug info for function at {:p}", addr);
+            self.debug_frames.insert(addr as usize, debug_frame);
         }
 
         // format fde

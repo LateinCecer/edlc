@@ -797,6 +797,15 @@ impl<B: Backend> MirFuncRegistry<B> {
         }
     }
 
+    pub fn get_source_information(&self, id: MirFuncId) -> Option<(SrcPos, ModuleSrc)> {
+        self.get_inline_body(id)
+            .ok()
+            .and_then(|s| s.map(|func| (
+                func.signature.pos,
+                func.signature.src.clone())
+            ))
+    }
+
     /// Returns the dependencies of one function to other functions.
     ///
     /// # Unresolved Functions
@@ -945,6 +954,7 @@ impl ComptimeParams {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFnSignature {
     pub pos: SrcPos,
+    pub src: ModuleSrc,
     pub id: MirUid,
     pub scope: ScopeId,
     pub name: String,

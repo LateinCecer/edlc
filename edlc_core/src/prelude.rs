@@ -16,6 +16,10 @@
 
 pub use crate::lexer::SrcPos;
 pub use crate::lexer::Punct;
+pub use crate::issue::TypeFormatter;
+pub use crate::issue::TypeArgument;
+pub use crate::issue::TypeArguments;
+pub use crate::issue::IssueFormatter;
 pub use crate::core::*;
 pub use crate::ast::*;
 pub use crate::hir::*;

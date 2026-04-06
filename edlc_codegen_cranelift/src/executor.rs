@@ -1696,7 +1696,7 @@ fn test_other() {
             prog(i);
             // _handler goes out of scope here and the normal trap handler should take over
         }
-        assert!(PanicData::fetch(&compiler.backend).is_err());
+        assert!(PanicData::fetch(&compiler.backend, &compiler.compiler.phase).is_err());
 
         let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test_other"))?;
         {
@@ -1704,7 +1704,7 @@ fn test_other() {
             prog();
             // _handler goes out of scope here and the normal trap handler should take over
         }
-        match PanicData::fetch(&compiler.backend) {
+        match PanicData::fetch(&compiler.backend, &compiler.compiler.phase) {
             Ok(_) => panic!("that method should have paniced!"),
             Err(err) => {
                 assert_eq!(err.msg.as_ref(), Some(&"this is an error message".to_string()));

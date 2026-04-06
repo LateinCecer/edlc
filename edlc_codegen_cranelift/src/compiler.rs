@@ -57,7 +57,7 @@ use crate::error::{JITError, JITErrorType};
 use crate::prelude::RawPanicHandle;
 
 pub use unwind_info::eh_frames;
-use crate::compiler::unwind_info::UnwindInfo;
+pub(crate) use crate::compiler::unwind_info::UnwindInfo;
 
 #[derive(Default)]
 struct NativeFunctionLookup {
@@ -178,7 +178,7 @@ pub struct JIT<Runtime: 'static> {
     _rt: PhantomData<Runtime>,
     pub panic_handle: PanicHandle,
     pub abi: Arc<AbiConfig>,
-    unwind_info: UnwindInfo,
+    pub(crate) unwind_info: UnwindInfo,
 }
 
 impl<Runtime: 'static> Default for JIT<Runtime> {

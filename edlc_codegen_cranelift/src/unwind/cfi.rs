@@ -13,7 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use gimli::{NativeEndian, UnwindContext, UnwindSection};
+use gimli::{NativeEndian, Register, UnwindContext, UnwindSection};
 use log::error;
 use crate::unwind::BacktraceEntry;
 
@@ -85,17 +85,17 @@ pub fn unwind_gimli(
     let bases = gimli::BaseAddresses::default();
     let eh_frame = gimli::EhFrame::new(unwind_data, NativeEndian);
 
-    let table = eh_frame.unwind_info_for_address(
+    let base_addr = eh_frame.fde_for_address(
         &bases,
-        ctx,
         lookup_addr,
         gimli::EhFrame::cie_from_offset,
     )?;
-    let start_addr = table.start_address();
-    let entry = BacktraceEntry {
-        func: start_addr as usize,
-        loc: (lookup_addr - start_addr) as usize,
-    };
+    let table = base_addr.unwind_info_for_address(
+        &eh_frame,
+        &bases,
+        ctx,
+        lookup_addr,
+    )?;
 
     let cfa = table.cfa();
     let resolve_cfa = eval_cfa(cfa, registers)
@@ -103,10 +103,10 @@ pub fn unwind_gimli(
 
     for (reg_num, rule) in table.registers() {
         match *reg_num {
-            gimli::X86_64::RBP => if let Some(val) = eval_rule(rule, resolve_cfa, registers) {
+            gimli::X86_64::RBP => if let Some(val) = eval_rule(rule, resolve_cfa, registers, gimli::X86_64::RBP) {
                 registers.rbp = val;
             }
-            gimli::X86_64::RA => if let Some(val) = eval_rule(rule, resolve_cfa, registers) {
+            gimli::X86_64::RA => if let Some(val) = eval_rule(rule, resolve_cfa, registers, gimli::X86_64::RA) {
                 registers.rip = val;
             }
             _ => ()
@@ -114,6 +114,12 @@ pub fn unwind_gimli(
     }
     // the callers RSP is the CFA itself
     registers.rsp = resolve_cfa;
+
+    let start_addr = base_addr.initial_address();
+    let entry = BacktraceEntry {
+        func: start_addr as usize,
+        loc: (lookup_addr - start_addr) as usize,
+    };
     Ok(entry)
 }
 
@@ -127,7 +133,7 @@ fn eval_cfa(cfa: &gimli::CfaRule<usize>, regs: &Registers) -> Option<u64> {
     }
 }
 
-fn eval_rule(rule: &gimli::RegisterRule<usize>, cfa: u64, regs: &Registers) -> Option<u64> {
+fn eval_rule(rule: &gimli::RegisterRule<usize>, cfa: u64, regs: &Registers, this_reg: Register) -> Option<u64> {
     match rule {
         gimli::RegisterRule::Offset(offset) => {
             let addr = (cfa as i64 + offset) as *const u64;
@@ -140,7 +146,7 @@ fn eval_rule(rule: &gimli::RegisterRule<usize>, cfa: u64, regs: &Registers) -> O
         gimli::RegisterRule::ValOffset(offset) => {
             Some((cfa as i64 + offset) as u64)
         },
-        gimli::RegisterRule::SameValue => regs.get(gimli::X86_64::RBP).map(|val| *val as u64),
+        gimli::RegisterRule::SameValue => regs.get(this_reg).cloned(),
         _ => None,
     }
 }

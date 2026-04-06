@@ -506,6 +506,7 @@ impl HirFnSignature {
 
         Ok(MirFnSignature {
             pos: self.pos,
+            src: self.src.clone(),
             scope: self.scope,
             id: mir_phase.new_id(),
             name: self.name.clone(),

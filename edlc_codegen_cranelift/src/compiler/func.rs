@@ -32,6 +32,7 @@ use crate::codegen::cfg_codegen::cfg_codegen;
 use crate::layout::SSARepr;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::JIT;
+use crate::compiler::unwind_info::FunctionInfo;
 use crate::error::{JITError, JITErrorType};
 use crate::layout::stack_frame::native_calling_conv;
 
@@ -100,13 +101,17 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
             .map_err(|err| MirError::BackendError(JITError {
                 ty: JITErrorType::Codegen(err)
             }))? {
+            let info = FunctionInfo {
+                unwind_info: info,
+                id: self.mir_id.unwrap(),
+            };
             backend.unwind_info.insert_fde(id, info);
         } else {
             error!("code generation did not yield unwinding information in the correct format");
         }
 
         // process other debugging information
-        /*code.buffer.get_srclocs_sorted().iter().for_each(|loc| {
+        code.buffer.get_srclocs_sorted().iter().for_each(|loc| {
             let id = loc.loc.bits();
         });
         code.buffer.traps().iter().for_each(|trap| {
@@ -115,7 +120,7 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
         });
         code.buffer.frame_layout().unwrap().stackslots.iter().for_each(|(slot, loc)| {
             let offset = loc.offset;
-        });*/
+        });
 
         // now that compilation is finished, we can clear out the context state
         backend.module.clear_context(&mut backend.ctx);

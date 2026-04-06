@@ -22,15 +22,18 @@ mod signal_stack;
 mod cfi;
 
 use std::cell::{LazyCell, RefCell};
+use std::hash::DefaultHasher;
 use std::ops::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use log::error;
-use edlc_core::prelude::AmorphusDataCopy;
+use edlc_core::prelude::{AmorphusDataCopy, HirPhase, MirPhase, TypeArgument, TypeArguments};
+use edlc_core::prelude::mir_backend::Backend;
+use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
 pub use unix::TrapHandler;
-use crate::compiler::JIT;
+use crate::compiler::{UnwindInfo, JIT};
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct BacktraceEntry {
@@ -83,6 +86,36 @@ impl Backtrace {
 
     fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    fn print<B: Backend>(
+        &self,
+        phase: &HirPhase,
+        funcs: &MirFuncRegistry<B>,
+        debug_frames: &UnwindInfo,
+    ) {
+        for trace in self.slice() {
+            if let Some(id) = debug_frames.find_id(&trace.func) {
+                let edl_func = funcs.get_edl_id(id)
+                    .expect("failed to get EDL function id from MIR function id");
+                let sig = phase.types.get_fn_signature(edl_func)
+                    .expect("failed to get function signature");
+
+                if let Some((pos, src)) = funcs.get_source_information(id) {
+                    error!("    {} at {}", TypeArguments::<'_, DefaultHasher>::new(&[
+                        TypeArgument::new_edl(sig)
+                    ]).printable(&phase.types, &phase.vars), src.format_pos(pos));
+                } else {
+                    error!("    {}", TypeArguments::<'_, DefaultHasher>::new(&[
+                        TypeArgument::new_edl(sig),
+                    ]).printable(&phase.types, &phase.vars));
+                }
+                error!("        at offset {:p}", trace.loc as *const ());
+            } else {
+                error!("    <unknown> {:p}", trace.func as *const ());
+                error!("        at offset {:p}", trace.loc as *const ());
+            }
+        }
     }
 }
 
@@ -144,7 +177,7 @@ impl PanicData {
 
     /// Fetches the local panic handling data from thread local storage.
     /// If there was no panic since the last time this function was called, it will return `None`.
-    pub fn fetch<Runtime: 'static>(jit: &JIT<Runtime>) -> Result<(), PanicError> {
+    pub fn fetch<Runtime: 'static>(jit: &JIT<Runtime>, hir_phase: &HirPhase) -> Result<(), PanicError> {
         PANIC.with(|panic| if panic
             .panic
             .fetch_and(false, Ordering::Relaxed) {
@@ -153,10 +186,7 @@ impl PanicData {
             error!("encountered panic while executing JIT code in thread: {}",
                 std::thread::current().name().unwrap_or("unknown"));
             error!("stack trace:");
-            for trace in payload.backtrace.slice() {
-                error!("    {:p}", trace.func as *const ());
-                error!("        at offset {:p}", trace.loc as *const ());
-            }
+            payload.backtrace.print(hir_phase, &*jit.func_reg.borrow(), &jit.unwind_info);
             error!("end of stack trace.");
             if payload.reached_host {
                 error!("host function reached – attempting to recover through graceful panic protocol");
