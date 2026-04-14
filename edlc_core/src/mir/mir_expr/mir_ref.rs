@@ -1,7 +1,8 @@
 //! this module implements referencing and dereferencing logic for MirValues
 
+use crate::mir::debug::{DebugInformation, SourceInfo, TrapInfo};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
 
@@ -384,10 +385,30 @@ impl MirRef {
         }
     }
 
-    /// The reference operator creates a subset of another reference, if the source is already a
-    /// reference type.
-    pub fn is_reference_from_owner(&self, reg: &MirTypeRegistry) -> bool {
-        reg.is_ref(&self.src_ty)
+    pub fn collect_debug_info(
+        &self,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+    ) -> bool {
+        match &self.offset {
+            RefOffset::Entire | RefOffset::Const(_) => false,
+            RefOffset::ArrayIndex { .. } => {
+                info.insert_trap_info(loc, TrapInfo::ArrayIndex);
+                true
+            }
+            RefOffset::SliceIndex { .. } => {
+                info.insert_trap_info(loc, TrapInfo::SliceIndex);
+                true
+            }
+            RefOffset::ArrayRange { .. } => {
+                info.insert_trap_info(loc, TrapInfo::ArrayRange);
+                true
+            }
+            RefOffset::SliceRange { .. } => {
+                info.insert_trap_info(loc, TrapInfo::SliceRange);
+                true
+            }
+        }
     }
 
     pub fn execute(

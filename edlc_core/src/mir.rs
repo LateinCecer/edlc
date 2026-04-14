@@ -26,6 +26,8 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::mem;
 
+pub use debug::{DebugInformation, SourceInfo, DebugDataId, TrapInfo};
+
 pub mod mir_type;
 pub mod mir_funcs;
 pub mod mir_backend;

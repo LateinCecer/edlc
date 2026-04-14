@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
-use std::{collections, mem, ops};
+use std::{cmp, collections, mem, ops};
 
 /// The type of borrow.
 /// A borrow can be either complete or partial.
@@ -1190,6 +1190,16 @@ impl BorrowGraph {
 
     pub fn get_paths(&self, value: &MirValue) -> Option<&BorrowState> {
         self.graph.get(value)
+    }
+
+    pub fn drop_ordering(&self, lhs: &MirValue, rhs: &MirValue) -> cmp::Ordering {
+        let lhs_ordinal = self.get_paths(lhs)
+            .map(|state| state.collective_path_length())
+            .unwrap_or(0);
+        let rhs_ordinal = self.get_paths(rhs)
+            .map(|state| state.collective_path_length())
+            .unwrap_or(0);
+        lhs_ordinal.cmp(&rhs_ordinal).reverse()
     }
 
     /// Checks if a MIR value borrows from a borrowing source.

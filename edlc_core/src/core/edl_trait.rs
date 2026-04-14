@@ -38,8 +38,9 @@ pub const EDL_SHIFT_L_TRAIT: EdlTraitId = EdlTraitId(11);
 pub const EDL_SHIFT_R_TRAIT: EdlTraitId = EdlTraitId(12);
 pub const EDL_REM_TRAIT: EdlTraitId = EdlTraitId(13);
 
-#[allow(dead_code)]
 pub const EDL_COPY_TRAIT: EdlTraitId = EdlTraitId(14);
+pub const EDL_DROP_TRAIT: EdlTraitId = EdlTraitId(38);
+pub const EDL_EVENT_TRAIT: EdlTraitId = EdlTraitId(39);
 
 #[allow(dead_code)]
 pub const EDL_DISPLAY_TRAIT: EdlTraitId = EdlTraitId(15);

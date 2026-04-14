@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::mir::debug::DebugInformation;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -127,6 +128,24 @@ pub fn $name(&self, id: MirExprId) -> &$t {
 );
 
 impl MirExprContainer {
+    pub fn collect_debug_info<B: Backend>(
+        &self,
+        expr: &MirExprId,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+        backend: &B
+    ) -> bool {
+        match expr.ty {
+            MirExprVariant::Ref => {
+                self.refs[expr.id].collect_debug_info(info, loc)
+            },
+            MirExprVariant::Call => {
+                self.call[expr.id].collect_debug_info(info, loc, &*backend.func_reg())
+            },
+            _ => false,
+        }
+    }
+
     pub fn execute(
         &self,
         vm: &mut ExecutorVM,

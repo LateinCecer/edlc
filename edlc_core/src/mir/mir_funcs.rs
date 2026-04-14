@@ -27,11 +27,11 @@ use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{ExecutionError, MirExprId, MirFlowGraph, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirExprId, MirFlowGraph, MirLoc, MirValue, StackFrameLayout};
 pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
-use crate::mir::{MirError, MirPhase, MirUid};
+use crate::mir::{DebugInformation, MirError, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -760,7 +760,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         id: MirFuncId,
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
-        call: &MirCall,
+        mir_call: &MirCall,
         target: &MirValue,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<B>> {
@@ -772,7 +772,25 @@ impl<B: Backend> MirFuncRegistry<B> {
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
-                .code_gen(backend, type_reg, call, target, expr_id),
+                .code_gen(backend, type_reg, mir_call, target, expr_id),
+        }
+    }
+
+    pub fn collect_debug_info(
+        &self,
+        info: &mut DebugInformation,
+        id: MirFuncId,
+        loc: &MirLoc,
+    ) {
+        let code_gen = &self.generators.get(id.0)
+            .expect("Invalid MIR function id").code_gen;
+
+        match code_gen {
+            CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
+            CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
+            CodeGenState::Ready{ call_gen, .. }
+            | CodeGenState::Internal { call_gen } => call_gen
+                .debug_info(info, loc),
         }
     }
 

@@ -15,11 +15,12 @@
  */
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{MirGraphElement, MirLoc, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{mir_funcs, MirError, MirUid};
+use crate::mir::debug::DebugInformation;
 use crate::prelude::mir_expr::mir_graph::report_comptime_unknown;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
 
@@ -76,6 +77,16 @@ impl MirGraphElement for MirCall {
 }
 
 impl MirCall {
+    pub fn collect_debug_info<B: Backend>(
+        &self,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+        funcs: &MirFuncRegistry<B>,
+    ) -> bool {
+        funcs.collect_debug_info(info, self.func, loc);
+        true
+    }
+
     pub fn execute(
         &self,
         vm: &mut ExecutorVM,

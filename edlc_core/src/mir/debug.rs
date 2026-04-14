@@ -110,12 +110,14 @@ pub struct SourceInfo {
     pub src: ModuleSrc,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrapInfo {
     DivideByZero,
     ArrayIndex,
     SliceIndex,
     ArrayRange,
     SliceRange,
+    ExplicitPanic,
     Other(&'static str),
 }
 
@@ -143,6 +145,10 @@ impl DebugInformation {
         })
     }
 
+    pub fn try_id(&self, loc: &MirLoc) -> Option<&DebugDataId> {
+        self.locs.get(loc)
+    }
+
     pub fn insert_source_info(&mut self, loc: &MirLoc, info: SourceInfo) {
         let id = self.id(loc);
         self.src_info.view_mut(id as usize).set(info);
@@ -151,6 +157,14 @@ impl DebugInformation {
     pub fn insert_trap_info(&mut self, loc: &MirLoc, info: TrapInfo) {
         let id = self.id(loc);
         self.trap_info.insert(id, info);
+    }
+
+    pub fn get_src_info(&self, id: DebugDataId) -> Option<&SourceInfo> {
+        self.src_info.get(id as usize)
+    }
+
+    pub fn get_trap_info(&self, id: DebugDataId) -> Option<&TrapInfo> {
+        self.trap_info.get(&id)
     }
 }
 

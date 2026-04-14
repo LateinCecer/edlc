@@ -82,8 +82,15 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
             &borrow_graph,
             backend,
         ).expect("failed to compute stack mapping for function body");
+
+        // get debugging symbols
+        let debug_symbols = self.body.generate_debug_symbols(backend);
         let mut func_builder = FunctionTranslator::new(
-            backend, stack_frame_mapping, function_layout);
+            backend,
+            stack_frame_mapping,
+            function_layout,
+            Some(&debug_symbols),
+        );
 
         // insert parameters into variable register
         cfg_codegen(&self.body, &mut func_builder, phase)?;
@@ -113,6 +120,10 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
         // process other debugging information
         code.buffer.get_srclocs_sorted().iter().for_each(|loc| {
             let id = loc.loc.bits();
+            println!("found source location {id} at {:p}-{:p}", loc.start as *const (), loc.end as *const ());
+            if let Some(src_pos) = debug_symbols.get_src_info(id) {
+                println!("source location: {}", src_pos.src.format_pos(src_pos.pos));
+            }
         });
         code.buffer.traps().iter().for_each(|trap| {
             let code = trap.code;

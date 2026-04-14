@@ -48,6 +48,7 @@ use log::debug;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
+use crate::mir::debug::{DebugInformation, SourceInfo};
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::borrow::BorrowContext;
 use crate::mir::mir_expr::mir_graph::const_propagation::ConstState;
@@ -62,6 +63,7 @@ pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
+use crate::mir::TrapInfo;
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -810,6 +812,41 @@ impl Display for Context {
     }
 }
 
+pub struct IterBlockValues<'block> {
+    block: &'block Block,
+    until: Option<BlockLocalStatementUid>,
+    parameter_index: usize,
+    def_index: usize,
+}
+
+impl<'block> Iterator for IterBlockValues<'block> {
+    type Item = MirValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.parameter_index < self.block.parameters.len() {
+            let i = self.parameter_index;
+            self.parameter_index += 1;
+            return Some(self.block.parameters[i]);
+        }
+
+        loop {
+            let Some(statement) = self.block.statements.get(self.def_index) else {
+                break None;
+            };
+            self.def_index += 1;
+
+            if let Some(until) = self.until.as_ref() {
+                if until == statement.uid() {
+                    break None;
+                }
+            }
+            if let Some(def) = statement.defines() {
+                break Some(*def);
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Block {
     active_scopes: Vec<Scope>,
@@ -827,6 +864,15 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn iter_vars_until(&self, until: Option<BlockLocalStatementUid>) -> IterBlockValues {
+        IterBlockValues {
+            block: self,
+            parameter_index: 0,
+            until,
+            def_index: 0,
+        }
+    }
+
     /// Checks if this block contains the specified variable.
     /// If we are using propper SSA values, this should be true for *at most* one block in the CFG
     /// for any one value.
@@ -2563,6 +2609,58 @@ impl MirFlowGraph {
             }
             VarUse::Seal(_block_ref, _val) => unimplemented!()
         }
+    }
+
+    /// Generates debugging information that might be helpful for things like stack unwinding for
+    /// the backend.
+    pub fn generate_debug_symbols<B: Backend>(&self, backend: &B) -> DebugInformation {
+        let mut info = DebugInformation::new();
+        for (block_ref, block) in self.blocks.iter().enumerate() {
+            let block_ref = MirBlockRef(block_ref);
+            for statement in block.statements.iter() {
+                match statement {
+                    Statement::VarDef { value, uid, debug, .. } => {
+                        if self.expressions.collect_debug_info(
+                            value,
+                            &mut info,
+                            &MirLoc::GraphLoc(MirGraphLoc::new(block_ref, *uid)),
+                            backend,
+                        ) {
+                            info.insert_source_info(
+                                &MirLoc::GraphLoc(MirGraphLoc::new(block_ref, *uid)),
+                                SourceInfo {
+                                    pos: debug.pos,
+                                    src: block.src.clone(),
+                                },
+                            );
+                        }
+                    }
+                    Statement::VarMove { .. } => {}
+                    Statement::VarCopy { uid, debug, .. }
+                    | Statement::Drop { debug, uid, .. }
+                    | Statement::Sync { debug, uid, .. }
+                    | Statement::Record { debug, uid, .. } => {
+                        info.insert_source_info(
+                            &MirLoc::GraphLoc(MirGraphLoc(block_ref, *uid)),
+                            SourceInfo {
+                                pos: debug.pos,
+                                src: block.src.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            if let Seal::Panic(_, debug) = &block.seal {
+                let loc = MirLoc::Seal(block_ref);
+                info.insert_source_info(&loc, SourceInfo {
+                    pos: debug.pos,
+                    src: block.src.clone(),
+                });
+                info.insert_trap_info(&loc, TrapInfo::ExplicitPanic);
+            }
+        }
+        info
     }
 }
 

@@ -628,6 +628,9 @@ edl init --bin
             vars: &self.phase.vars,
         });
 
+        self.phase.res.revert_to_scope(&scope);
+        self.phase.res.push_self_type(base.clone())?;
+
         // parse and register function signatures
         let mut fns = HashMap::new();
         let mut func_ids = [EdlTypeId(0); N];
@@ -747,6 +750,9 @@ edl init --bin
         let env_id = self.phase.types.insert_parameter_env(env);
         self.phase.res.revert_to_scope(&scope);
         self.phase.res.push_env(env_id, &mut self.phase.types)?;
+
+        // create self parameter
+        // self.phase.res.push_self_trait()
 
         let mut fns = Vec::new();
         for func in funcs {
@@ -993,13 +999,7 @@ edl init --bin
             &[inline_code!("Output")],
             Some(edl_trait::EDL_REM_TRAIT),
         )?;
-        self.parse_trait(
-            inline_code!("Copy"),
-            inline_code!("<Lhs>;"),
-            &[inline_code!("fn copy(lhs: Lhs) -> Lhs;")],
-            &[],
-            Some(edl_trait::EDL_COPY_TRAIT),
-        )?;
+
         self.parse_trait(
             inline_code!("Display"),
             inline_code!("<Lhs>;"),
@@ -1069,6 +1069,33 @@ edl init --bin
             &[inline_code!("fn into(src: Src) -> Dst;")],
             &[],
             Some(edl_trait::EDL_INTO_TRAIT),
+        )?;
+
+        self.parse_trait(
+            inline_code!("Copy"),
+            inline_code!("<Lhs>;"),
+            &[inline_code!("fn copy(lhs: Lhs) -> Lhs;")],
+            &[],
+            Some(edl_trait::EDL_COPY_TRAIT),
+        )?;
+        self.parse_trait(
+            inline_code!("Drop"),
+            inline_code!("<This>"),
+            &[
+                inline_code!("fn drop(self: This)"),
+            ],
+            &[],
+            Some(edl_trait::EDL_DROP_TRAIT)
+        )?;
+        self.parse_trait(
+            inline_code!("Event"),
+            inline_code!("<This>"),
+            &[
+                inline_code!("fn record() -> This"),
+                inline_code!("fn synchronize(self: This)"),
+            ],
+            &[],
+            Some(edl_trait::EDL_EVENT_TRAIT),
         )?;
         Ok(())
     }

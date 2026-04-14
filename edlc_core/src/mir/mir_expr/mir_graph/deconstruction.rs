@@ -7,7 +7,7 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
-use crate::mir::mir_expr::{AsciPrinter, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirPrinter, MirRef, MirValue, Statement};
+use crate::mir::mir_expr::{AsciPrinter, BorrowGraph, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirPrinter, MirRef, MirValue, Statement};
 use crate::mir::mir_expr::lifetime_analysis::{BlockRanges, RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -476,26 +476,23 @@ impl UnwindDropFrame {
         cfg: &MirFlowGraph,
         lifeness: &RegionLifenessList,
         layout: &StackFrameLayout,
+        borrow: &BorrowGraph,
     ) {
         let block_ref = trap_loc.block_ref();
-        let defines = if let MirLoc::GraphLoc(MirGraphLoc(_, uid)) = trap_loc {
-            let block = &cfg.blocks[block_ref.0];
-            block.statements.iter().find(|statement| statement.uid() == uid)
-                .and_then(|statement| statement.defines().cloned())
-        } else {
-            None
+        let block = &cfg.blocks[block_ref.0];
+        let iter_until = match trap_loc {
+            MirLoc::Seal(_) => None,
+            MirLoc::GraphLoc(MirGraphLoc(_, uid)) => Some(*uid),
         };
+
+        let mut vars = block
+            .iter_vars_until(iter_until)
+            .filter(|var| lifeness.is_alive_after(var, trap_loc, cfg))
+            .collect::<Vec<_>>();
+        vars.sort_by(|lhs, rhs| borrow.drop_ordering(lhs, rhs));
+
         let range_start = self.offsets.len();
-        for var in cfg
-            .iter_vars()
-            .filter(|var| lifeness.is_alive_after(var, trap_loc, cfg)) {
-            // if this variable is defined by the faulting statement, we don't drop it as it is
-            // not initialized
-            if let Some(defines) = defines.as_ref() {
-                if &var == defines {
-                    continue;
-                }
-            }
+        for var in vars {
             let Some((offset, ty)) = layout.local_offset(&var) else {
                 continue;
             };

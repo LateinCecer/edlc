@@ -4,7 +4,7 @@ use crate::layout::SSARepr;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::{InstBuilder, JumpTableData};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContainer, MirExprVariant, MirFlowGraph, Seal, Statement};
+use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContainer, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, Seal, Statement};
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::ops::Index;
@@ -117,7 +117,7 @@ fn block_codegen<Runtime>(
 ) -> Result<(), MirError<JIT<Runtime>>> {
     let block = cfg.get_block(&block_ref).unwrap();
     for statement in block.statements.iter() {
-        statement_codegen(&cfg.expressions, statement, builder, phase)?;
+        statement_codegen(&cfg.expressions, statement, builder, phase, block_ref)?;
     }
     seal_codegen(cfg, block_ref, &block.seal, builder, phase, mapping)
 }
@@ -127,7 +127,12 @@ fn statement_codegen<Runtime>(
     statement: &Statement,
     builder: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
+    block_ref: &MirBlockRef,
 ) -> Result<(), MirError<JIT<Runtime>>> {
+    let uid = *statement.uid();
+    let loc = MirLoc::GraphLoc(MirGraphLoc(*block_ref, uid));
+    builder.insert_source_loc(&loc);
+
     match statement {
         Statement::VarDef { var, value, .. } => {
             match value.ty {
@@ -271,6 +276,9 @@ fn seal_codegen<Runtime>(
     phase: &mut MirPhase,
     mapping: &BlockMapper,
 ) -> Result<(), MirError<JIT<Runtime>>> {
+    let loc = MirLoc::Seal(*current_block);
+    builder.insert_source_loc(&loc);
+
     match seal {
         Seal::Jump(call, _) => {
             let args = block_call_codegen(cfg, current_block, call, builder, phase, mapping)?;

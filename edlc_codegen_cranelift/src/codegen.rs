@@ -27,15 +27,15 @@ use crate::compiler::panic_handle::PanicHandle;
 use crate::compiler::{GlobalVar, JIT};
 use crate::prelude::SSARepr;
 use cranelift::prelude::*;
-use cranelift_codegen::ir::StackSlot;
+use cranelift_codegen::ir::{SourceLoc, StackSlot};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
-use edlc_core::prelude::{HirPhase, HirUid, MirError, MirPhase};
+use edlc_core::prelude::{DebugInformation, HirPhase, HirUid, MirError, MirPhase};
 
 mod literal_codegen;
 mod call_codegen;
@@ -397,6 +397,7 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub layout: StackFrameMapping,
     pub ir_values: CraneliftValues,
     pub function_layout: FunctionLayout,
+    pub debug_symbols: Option<&'jit DebugInformation>,
 }
 
 pub struct CodeCtx<'a, 'jit> {
@@ -433,6 +434,7 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
         jit: &'jit mut JIT<Runtime>,
         mapping: StackFrameMapping,
         function_layout: FunctionLayout,
+        debug_info: Option<&'jit DebugInformation>,
     ) -> Self {
         let mut var_cache = VarCache::default();
         var_cache.push();
@@ -450,6 +452,7 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             panic_handle: &mut jit.panic_handle,
             layout: mapping,
             function_layout,
+            debug_symbols: debug_info,
             ir_values,
             _rt: PhantomData,
             abi: jit.abi.clone(),
@@ -462,6 +465,14 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             abi: self.abi.clone(),
             builder: &mut self.builder,
             module: &mut self.module,
+        }
+    }
+
+    pub fn insert_source_loc(&mut self, loc: &MirLoc) {
+        if let Some(debug_symbols) = self.debug_symbols.as_ref() {
+            if let Some(id) = debug_symbols.try_id(loc) {
+                self.builder.set_srcloc(SourceLoc::new(*id));
+            }
         }
     }
 }

@@ -19,13 +19,14 @@
 //! now, this may change in the near future in order to support communication with more ABIs and
 //! calling conventions, than SystemV.
 
+use cranelift_codegen::ir::SourceLoc;
 use crate::codegen::FunctionTranslator;
 use crate::compiler::{RuntimeId, JIT};
 use cranelift_module::Linkage;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
-use edlc_core::prelude::{MirError, MirPhase};
+use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::prelude::{DebugInformation, MirError, MirPhase};
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
 /// is passed to the callee from the global context.
@@ -74,5 +75,13 @@ impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
         let call_layout = backend.layout.call_layout(expr_id).clone();
         let sig = call_layout.compile(backend, phase).unwrap();
         sig.generate(backend, phase, self)
+    }
+
+    fn debug_info(
+        &self,
+        _info: &mut DebugInformation,
+        _loc: &MirLoc,
+    ) {
+        // don't attach anything for just a normal function call
     }
 }

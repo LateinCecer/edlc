@@ -20,6 +20,7 @@ mod x86;
 mod unix;
 mod signal_stack;
 mod cfi;
+mod range_vec;
 
 use std::cell::{LazyCell, RefCell};
 use std::hash::DefaultHasher;
@@ -33,6 +34,7 @@ use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
 pub use unix::TrapHandler;
+pub use range_vec::RangeVec;
 use crate::compiler::{UnwindInfo, JIT};
 
 #[derive(Default, Clone, Copy, Debug)]

@@ -24,5 +24,6 @@ pub use crate::executor::CraneliftJIT;
 pub use crate::executor::OptSettings;
 pub use crate::error::JITError;
 pub use crate::error::JITErrorType;
+pub use crate::unwind::RangeVec;
 pub use std::sync::RwLock;
 pub use std::mem::MaybeUninit;

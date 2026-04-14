@@ -244,13 +244,7 @@ impl DropAnalysis {
             })
             .collect();
         sorted_mentions.sort_by(|(lhs_val, _), (rhs_val, _)| {
-            let lhs_ordinal = borrow_graph.get_paths(lhs_val)
-                .map(|state| state.collective_path_length())
-                .unwrap_or(0);
-            let rhs_ordinal = borrow_graph.get_paths(rhs_val)
-                .map(|state| state.collective_path_length())
-                .unwrap_or(0);
-            lhs_ordinal.cmp(&rhs_ordinal).reverse()
+            borrow_graph.drop_ordering(lhs_val, rhs_val)
         });
 
         for (var, last_mention) in sorted_mentions.into_iter() {

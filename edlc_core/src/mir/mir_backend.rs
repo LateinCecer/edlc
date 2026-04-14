@@ -22,8 +22,9 @@ use std::ops::AddAssign;
 use std::ptr::NonNull;
 use log::debug;
 use crate::core::EdlVarId;
-use crate::mir::mir_expr::{MirExprId, MirValue};
+use crate::mir::mir_expr::{MirExprId, MirLoc, MirValue};
 use crate::mir::{MirError, MirPhase};
+use crate::mir::debug::DebugInformation;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeRegistry};
@@ -110,6 +111,13 @@ where B: Backend {
         target: &MirValue,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<B>>;
+
+    /// Attaches the debug information about this MIR function call to the output buffer.
+    fn debug_info(
+        &self,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+    );
 }
 
 

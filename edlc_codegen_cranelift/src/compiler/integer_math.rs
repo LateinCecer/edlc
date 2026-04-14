@@ -22,7 +22,7 @@ use cranelift_codegen::ir;
 use cranelift_codegen::ir::{InstBuilder};
 use cranelift_codegen::ir::condcodes::IntCC;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
 use crate::codegen::{FunctionTranslator, IntoValue, short_vec, ShortVec};
 use crate::compiler::JIT;
 
@@ -34,6 +34,7 @@ pub struct UnopGen {
     pub input_ty: MirTypeId,
     pub ret_ty: MirTypeId,
     pub op: fn(FuncInstBuilder<'_, '_>, ir::Value) -> ir::Value,
+    pub fault_code: Option<TrapInfo>,
 }
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ pub struct BinopGen {
     pub rhs_ty: MirTypeId,
     pub ret_ty: MirTypeId,
     pub op: fn(FuncInstBuilder<'_, '_>, ir::Value, ir::Value) -> ir::Value,
+    pub fault_code: Option<TrapInfo>,
 }
 
 #[derive(Clone)]
@@ -56,7 +58,18 @@ pub struct TriopGen {
     pub c: MirTypeId,
     pub ret_ty: MirTypeId,
     pub op: fn(FuncInstBuilder<'_, '_>, ir::Value, ir::Value, ir::Value) -> ir::Value,
+    pub fault_code: Option<TrapInfo>,
 }
+
+macro_rules! insert_debug(
+    () => (
+fn debug_info(&self, info: &mut DebugInformation, loc: &MirLoc) {
+    if let Some(code) = self.fault_code.as_ref() {
+        info.insert_trap_info(loc, *code);
+    }
+}
+    );
+);
 
 impl<Runtime> CodeGen<JIT<Runtime>> for UnopGen {
     fn code_gen(
@@ -85,6 +98,8 @@ impl<Runtime> CodeGen<JIT<Runtime>> for UnopGen {
         );
         Ok(())
     }
+
+    insert_debug!();
 }
 
 impl<Runtime> CodeGen<JIT<Runtime>> for BinopGen {
@@ -120,6 +135,8 @@ impl<Runtime> CodeGen<JIT<Runtime>> for BinopGen {
         );
         Ok(())
     }
+
+    insert_debug!();
 }
 
 
@@ -162,6 +179,8 @@ impl<Runtime> CodeGen<JIT<Runtime>> for TriopGen {
         );
         Ok(())
     }
+
+    insert_debug!();
 }
 
 
@@ -185,6 +204,7 @@ macro_rules! impl_binop(
             lhs_ty: $comp.mir_phase.types.$T(),
             ret_ty: $comp.mir_phase.types.$T(),
             op: |builder, lhs, rhs| builder.$inst(lhs, rhs),
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -227,6 +247,7 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a| { $($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -270,6 +291,7 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a, $b| { $($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -315,6 +337,7 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a, $b| { $($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -360,6 +383,7 @@ impl $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
              #[allow(unused_braces)]
             op: |$builder, $a| {$($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -403,6 +427,7 @@ impl $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a, $b| { $($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
@@ -447,6 +472,7 @@ impl $T:ident {
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a, $b, $c| { $($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
         };
         let [f] = $comp.parse_impl(
             edlc_core::inline_code!("<>"),
