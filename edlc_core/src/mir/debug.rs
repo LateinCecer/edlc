@@ -118,6 +118,7 @@ pub enum TrapInfo {
     ArrayRange,
     SliceRange,
     ExplicitPanic,
+    AssertionFailed,
     Other(&'static str),
 }
 
@@ -136,6 +137,10 @@ impl DebugInformation {
             src_info: IndexMap::default(),
             trap_info: BTreeMap::default(),
         }
+    }
+
+    pub fn deconstruct(self) -> (IndexMap<SourceInfo>, BTreeMap<DebugDataId, TrapInfo>) {
+        (self.src_info, self.trap_info)
     }
 
     pub fn id(&mut self, loc: &MirLoc) -> DebugDataId {

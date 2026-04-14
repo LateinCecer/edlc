@@ -21,7 +21,11 @@ use gimli::write::{Address, CommonInformationEntry, EhFrame, EndianVec, FrameTab
 use gimli::{Encoding, Format, NativeEndian};
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, RwLock};
+use cranelift_codegen::ir::TrapCode;
 use log::warn;
+use edlc_core::prelude::{DebugDataId, DebugInformation, SourceInfo, TrapInfo};
+use edlc_core::prelude::index_map::IndexMap;
+use crate::unwind::RangeVec;
 
 /// Contains the unwinding and debugging data that a normal ELF object file would hold in the
 /// .eh_frames section.
@@ -54,9 +58,50 @@ struct DebugFrames {
     id: MirFuncId,
 }
 
+pub struct SourceDebugFrame {
+    source_mapping: RangeVec<u32, DebugDataId>,
+    trap_mapping: BTreeMap<u32, TrapCode>,
+    src_info: IndexMap<SourceInfo>,
+    trap_info: BTreeMap<DebugDataId, TrapInfo>,
+}
+
+impl SourceDebugFrame {
+    pub fn new(
+        source_mapping: RangeVec<u32, DebugDataId>,
+        trap_mapping: BTreeMap<u32, TrapCode>,
+        debug_info: DebugInformation,
+    ) -> Self {
+        let (src_info, trap_info) = debug_info.deconstruct();
+        SourceDebugFrame {
+            source_mapping,
+            trap_mapping,
+            src_info,
+            trap_info,
+        }
+    }
+
+    pub fn source_location(&self, off: u32) -> Option<&SourceInfo> {
+        self.source_mapping
+            .get(&off)
+            .and_then(|id| self.src_info.get(*id as usize))
+    }
+
+    pub fn trap_info(&self, off: u32) -> Option<&TrapInfo> {
+        self.source_mapping
+            .get(&off)
+            .and_then(|id| self.trap_info.get(id))
+    }
+
+    pub fn trap_code(&self, off: u32) -> Option<&TrapCode> {
+        self.trap_mapping
+            .get(&off)
+    }
+}
+
 pub struct UnwindInfo {
     frame_description_entries: BTreeMap<FuncId, FunctionInfo>,
     debug_frames: BTreeMap<usize, DebugFrames>,
+    source_frames: BTreeMap<MirFuncId, SourceDebugFrame>,
 }
 
 impl UnwindInfo {
@@ -64,6 +109,7 @@ impl UnwindInfo {
         UnwindInfo {
             frame_description_entries: BTreeMap::new(),
             debug_frames: BTreeMap::new(),
+            source_frames: BTreeMap::new(),
         }
     }
 
@@ -74,6 +120,14 @@ impl UnwindInfo {
 
     pub fn insert_fde(&mut self, func: FuncId, fde: FunctionInfo) {
         self.frame_description_entries.insert(func, fde);
+    }
+
+    pub fn attach_source(&mut self, id: MirFuncId, source: SourceDebugFrame) {
+        self.source_frames.insert(id, source);
+    }
+
+    pub fn get_source(&self, id: &MirFuncId) -> Option<&SourceDebugFrame> {
+        self.source_frames.get(id)
     }
 
     /// Rebuilds the descriptor frame.
@@ -115,7 +169,6 @@ impl UnwindInfo {
             let debug_frame = DebugFrames {
                 id: *id,
             };
-            warn!("inserting debug info for function at {:p}", addr);
             self.debug_frames.insert(addr as usize, debug_frame);
         }
 

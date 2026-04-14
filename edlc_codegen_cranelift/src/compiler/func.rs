@@ -13,17 +13,18 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-
+use std::collections::BTreeMap;
 use crate::layout::stack_frame::{CallingConv, StackFrameMapping};
 use std::sync::Arc;
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId};
-use edlc_core::prelude::{HirPhase, MirError, MirPhase};
+use edlc_core::prelude::{DebugDataId, HirPhase, MirError, MirPhase};
 use edlc_core::prelude::mir_backend::{CodeGen};
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::translation::HirTranslationError;
-use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Signature, SourceLoc, UserFuncName};
+use cranelift_codegen::ir::{AbiParam, ArgumentPurpose, Signature, SourceLoc, TrapCode, UserFuncName};
 use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
 use cranelift_codegen::{Final, MachSrcLoc};
+use cranelift_codegen::binemit::CodeOffset;
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
 use log::{error, info};
@@ -32,9 +33,10 @@ use crate::codegen::cfg_codegen::cfg_codegen;
 use crate::layout::SSARepr;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::JIT;
-use crate::compiler::unwind_info::FunctionInfo;
+use crate::compiler::unwind_info::{FunctionInfo, SourceDebugFrame};
 use crate::error::{JITError, JITErrorType};
 use crate::layout::stack_frame::native_calling_conv;
+use crate::unwind::RangeVec;
 
 impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
     type CallGen = Box<dyn CodeGen<JIT<Runtime>> + 'static>;
@@ -103,6 +105,7 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
 
         let code = backend.ctx.compiled_code()
             .expect("failed to fetch code artifacts after compiling function");
+        // check for unwinding symbols
         if let Some(UnwindInfo::SystemV(info)) = code
             .create_unwind_info_of_kind(backend.module.isa(), UnwindInfoKind::SystemV)
             .map_err(|err| MirError::BackendError(JITError {
@@ -117,21 +120,30 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
             error!("code generation did not yield unwinding information in the correct format");
         }
 
+
         // process other debugging information
+        let mut ranges: RangeVec<CodeOffset, DebugDataId> = RangeVec::new();
         code.buffer.get_srclocs_sorted().iter().for_each(|loc| {
             let id = loc.loc.bits();
-            println!("found source location {id} at {:p}-{:p}", loc.start as *const (), loc.end as *const ());
-            if let Some(src_pos) = debug_symbols.get_src_info(id) {
-                println!("source location: {}", src_pos.src.format_pos(src_pos.pos));
+            if debug_symbols.get_src_info(id).is_some() {
+                ranges.insert(loc.start..loc.end, id);
             }
         });
+        let mut trap_ranges: BTreeMap<CodeOffset, TrapCode> = BTreeMap::new();
         code.buffer.traps().iter().for_each(|trap| {
             let code = trap.code;
             let offset= trap.offset;
+            trap_ranges.insert(offset, code);
         });
-        code.buffer.frame_layout().unwrap().stackslots.iter().for_each(|(slot, loc)| {
-            let offset = loc.offset;
-        });
+        // code.buffer.frame_layout().unwrap().stackslots.iter().for_each(|(slot, loc)| {
+        //     let offset = loc.offset;
+        // });
+
+        backend.unwind_info.attach_source(self.mir_id.unwrap(), SourceDebugFrame::new(
+            ranges,
+            trap_ranges,
+            debug_symbols,
+        ));
 
         // now that compilation is finished, we can clear out the context state
         backend.module.clear_context(&mut backend.ctx);

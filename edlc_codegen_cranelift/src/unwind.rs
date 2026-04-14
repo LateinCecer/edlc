@@ -27,14 +27,15 @@ use std::hash::DefaultHasher;
 use std::ops::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use cranelift_codegen::ir::TrapCode;
 use log::error;
-use edlc_core::prelude::{AmorphusDataCopy, HirPhase, MirPhase, TypeArgument, TypeArguments};
+use edlc_core::prelude::{AmorphusDataCopy, HirPhase, MirPhase, TrapInfo, TypeArgument, TypeArguments};
 use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
 pub use unix::TrapHandler;
-pub use range_vec::RangeVec;
+pub use range_vec::{RangeVec, RangeVecIter};
 use crate::compiler::{UnwindInfo, JIT};
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -90,13 +91,119 @@ impl Backtrace {
         self.len == 0
     }
 
+    fn get_panic_type(&self, debug_frames: &UnwindInfo) -> Option<PanicType> {
+        let Some(first) = self.slice().first() else {
+            return None;
+        };
+        if let Some(id) = debug_frames.find_id(&first.func) {
+            if let Some(source_frame) = debug_frames.get_source(&id) {
+                if let Some(trap_code) = source_frame.trap_code(first.loc as u32) {
+                    match *trap_code {
+                        TrapCode::BAD_CONVERSION_TO_INTEGER => Some(PanicType::BadConversionToInteger),
+                        TrapCode::HEAP_OUT_OF_BOUNDS => Some(PanicType::HeapOutOfBounds),
+                        TrapCode::INTEGER_DIVISION_BY_ZERO => Some(PanicType::DivideByZero),
+                        TrapCode::INTEGER_OVERFLOW => Some(PanicType::IntegerOverflow),
+                        TrapCode::STACK_OVERFLOW => Some(PanicType::StackOverflow),
+                        _ => {
+                            // assume that this is a user-defined trap code
+                            if let Some(trap_info) = source_frame.trap_info(first.loc as u32) {
+                                match trap_info {
+                                    TrapInfo::DivideByZero => Some(PanicType::DivideByZero),
+                                    TrapInfo::ArrayIndex => Some(PanicType::ArrayIndexOutOfBounds),
+                                    TrapInfo::SliceIndex => Some(PanicType::SliceIndexOutOfBounds),
+                                    TrapInfo::ArrayRange => Some(PanicType::ArrayRangeOutOfBounds),
+                                    TrapInfo::SliceRange => Some(PanicType::SliceRangeOutOfBounds),
+                                    TrapInfo::ExplicitPanic => Some(PanicType::Explicit),
+                                    TrapInfo::AssertionFailed => Some(PanicType::Assertion),
+                                    TrapInfo::Other(reason) => Some(PanicType::Other(reason)),
+                                }
+                            } else {
+                                Some(PanicType::Unknown)
+                            }
+                        },
+                    }
+                } else {
+                    Some(PanicType::Unknown)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     fn print<B: Backend>(
         &self,
         phase: &HirPhase,
         funcs: &MirFuncRegistry<B>,
         debug_frames: &UnwindInfo,
     ) {
-        for trace in self.slice() {
+        // format trap reason
+        let Some(first) = self.slice().first() else {
+            return;
+        };
+        if let Some(id) = debug_frames.find_id(&first.func) {
+            if let Some(source_frame) = debug_frames.get_source(&id) {
+                if let Some(trap_code) = source_frame.trap_code(first.loc as u32) {
+                    match *trap_code {
+                        TrapCode::BAD_CONVERSION_TO_INTEGER => {
+                            error!("bad conversion to integer");
+                        },
+                        TrapCode::HEAP_OUT_OF_BOUNDS => {
+                            error!("heap out of bounds");
+                        },
+                        TrapCode::INTEGER_DIVISION_BY_ZERO => {
+                            error!("integer division by zero")
+                        },
+                        TrapCode::INTEGER_OVERFLOW => {
+                            error!("integer overflow")
+                        },
+                        TrapCode::STACK_OVERFLOW => {
+                            error!("stack overflow")
+                        },
+                        _ => {
+                            // assume that this is a user-defined trap code
+                            if let Some(trap_info) = source_frame.trap_info(first.loc as u32) {
+                                match trap_info {
+                                    TrapInfo::DivideByZero => {
+                                        error!("division by zero");
+                                    }
+                                    TrapInfo::ArrayIndex => {
+                                        error!("array index out of bounds");
+                                    }
+                                    TrapInfo::SliceIndex => {
+                                        error!("slice index out of bounds");
+                                    }
+                                    TrapInfo::ArrayRange => {
+                                        error!("array range out of bounds");
+                                    }
+                                    TrapInfo::SliceRange => {
+                                        error!("slice range out of bounds");
+                                    }
+                                    TrapInfo::ExplicitPanic => {
+                                        error!("explicit panic");
+                                    }
+                                    TrapInfo::AssertionFailed => {
+                                        error!("assertion failed");
+                                    }
+                                    TrapInfo::Other(reason) => {
+                                        error!("{}", reason);
+                                    }
+                                }
+                            } else {
+                                error!("<unknown error>");
+                            }
+                        },
+                    }
+                } else {
+                    error!("<unknown error>");
+                }
+            }
+        }
+
+        // print stack trace
+        for trace in self.slice().iter() {
             if let Some(id) = debug_frames.find_id(&trace.func) {
                 let edl_func = funcs.get_edl_id(id)
                     .expect("failed to get EDL function id from MIR function id");
@@ -112,10 +219,19 @@ impl Backtrace {
                         TypeArgument::new_edl(sig),
                     ]).printable(&phase.types, &phase.vars));
                 }
-                error!("        at offset {:p}", trace.loc as *const ());
+
+                if let Some(source_frame) = debug_frames.get_source(&id) {
+                    if let Some(loc) = source_frame.source_location(trace.loc as u32) {
+                        error!("        at {}", loc.src.format_pos(loc.pos));
+                    } else {
+                        error!("        at <unknown> {:p}", trace.loc as *const ());
+                    }
+                } else {
+                    error!("        at <unknown> {:p}", trace.loc as *const ());
+                }
             } else {
                 error!("    <unknown> {:p}", trace.func as *const ());
-                error!("        at offset {:p}", trace.loc as *const ());
+                error!("        at <unknown> {:p}", trace.loc as *const ());
             }
         }
     }
@@ -188,6 +304,8 @@ impl PanicData {
             error!("encountered panic while executing JIT code in thread: {}",
                 std::thread::current().name().unwrap_or("unknown"));
             error!("stack trace:");
+            let t = payload.backtrace.get_panic_type(&jit.unwind_info)
+                .unwrap_or(PanicType::Unknown);
             payload.backtrace.print(hir_phase, &*jit.func_reg.borrow(), &jit.unwind_info);
             error!("end of stack trace.");
             if payload.reached_host {
@@ -201,7 +319,7 @@ impl PanicData {
             Err(PanicError {
                 msg,
                 graceful: payload.reached_host,
-                panic_type: PanicType::Explicit,
+                panic_type: t,
             })
         } else {
             Ok(())
@@ -211,6 +329,10 @@ impl PanicData {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanicType {
+    BadConversionToInteger,
+    HeapOutOfBounds,
+    IntegerOverflow,
+    StackOverflow,
     DivideByZero,
     ArrayIndexOutOfBounds,
     SliceIndexOutOfBounds,
@@ -219,6 +341,8 @@ pub enum PanicType {
     Assertion,
     Explicit,
     Segfault,
+    Other(&'static str),
+    Unknown,
 }
 
 #[derive(Debug)]

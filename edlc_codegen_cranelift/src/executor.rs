@@ -182,6 +182,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         self.backend.load_f32_math(&mut self.compiler)?;
         self.backend.load_f64_math(&mut self.compiler)?;
         self.backend.load_bool_math(&mut self.compiler)?;
+        self.backend.load_assert(&mut self.compiler)?;
 
         self.load_f64_trigonometry()?;
         self.load_f32_trigonometry()?;

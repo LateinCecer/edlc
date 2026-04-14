@@ -1,6 +1,29 @@
 use std::cmp::Ordering;
+use std::fmt::Debug;
 use std::ops;
 use std::ops::Sub;
+use log::{error, warn};
+
+pub struct RangeVecIter<'map, K, V> {
+    index: usize,
+    ranges: &'map Vec<K>,
+    pool: &'map Vec<V>,
+}
+
+impl<'map, K, V> Iterator for RangeVecIter<'map, K, V>
+where K: Clone {
+    type Item = (ops::Range<K>, &'map V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.pool.len() {
+            let i = self.index;
+            self.index += 1;
+            Some((self.ranges[i * 2].clone()..self.ranges[i * 2 + 1].clone(), &self.pool[i]))
+        } else {
+            None
+        }
+    }
+}
 
 /// A RangeVec is effectively a map that maps contiguous ranges to elements of arbitrary types.
 ///
@@ -12,6 +35,23 @@ use std::ops::Sub;
 /// let mut map: RangeVec<u32, String> = RangeVec::new();
 /// map.insert(3..16, "Hello".to_string());
 /// map.insert(16..32, "world!".to_string());
+///
+/// assert!(map.get(&0).is_none());
+/// assert!(map.get(&2).is_none());
+/// assert_eq!(map.get(&3).unwrap(), "Hello");
+/// assert_eq!(map.get(&16).unwrap(), "world!");
+/// assert_eq!(map.get(&30).unwrap(), "world!");
+/// assert!(map.get(&32).is_none());
+/// ```
+///
+/// # Example 2
+///
+/// ```
+/// use edlc_codegen_cranelift::prelude::RangeVec;
+///
+/// let mut map: RangeVec<u32, String> = RangeVec::new();
+/// map.insert(16..32, "world!".to_string());
+/// map.insert(3..16, "Hello".to_string());
 ///
 /// assert!(map.get(&0).is_none());
 /// assert!(map.get(&2).is_none());
@@ -33,22 +73,41 @@ impl<K, V> RangeVec<K, V> {
         }
     }
 
+    pub fn iter(&self) -> RangeVecIter<K, V> {
+        RangeVecIter {
+            index: 0,
+            pool: &self.pool,
+            ranges: &self.ranges,
+        }
+    }
+
     pub fn insert(&mut self, key: ops::Range<K>, value: V)
-    where K: Eq + Ord + Sub<K, Output=K> + num::One + Copy {
+    where K: Eq + Ord + Sub<K, Output=K> + num::One + Copy + Debug {
         if key.start == key.end {
             return;
         }
         let idx = self.insert_key_index(&key.start)
             .expect("key already exists");
         if idx < self.ranges.len() {
-            assert!(matches!(self.range_ordering(idx, &(key.end - K::one())), Ordering::Less));
+            if self.range_ordering(idx, &(key.end - K::one())) != Ordering::Less {
+                error!("source information overlap: {:?} >= {:?}", key.end - K::one(), &self.ranges[idx]);
+                error!(" -- ranges in range vec --");
+                for i in (0..self.ranges.len()).step_by(2) {
+                    let start = self.ranges[i];
+                    let end = self.ranges[i + 1];
+                    error!("  - {start:?}..{end:?}");
+                }
+                error!(" --");
+                panic!("insertion key: {:?}..{:?}    colliding range: {:?}..{:?}",
+                    key.start, key.end, self.ranges[idx], self.ranges[idx + 1]);
+            }
         }
         self.ranges.insert(idx, key.end);
         self.ranges.insert(idx, key.start);
         self.pool.insert(idx / 2, value);
     }
 
-    pub fn get(&mut self, key: &K) -> Option<&V>
+    pub fn get(&self, key: &K) -> Option<&V>
     where K: Ord + Eq {
         self.key_index(key).map(|i| &self.pool[i / 2])
     }
@@ -68,14 +127,14 @@ impl<K, V> RangeVec<K, V> {
                         break None;
                     }
                     start = pivot;
-                    pivot = ((end - start) / 2) & !1;
+                    pivot = start + ((end - start) / 2) & !1;
                 }
                 Ordering::Less => {
                     if (end - start) == 2 {
                         break None;
                     }
                     end = pivot;
-                    pivot = ((end - start) / 2) & !1;
+                    pivot = start + ((end - start) / 2) & !1;
                 }
                 Ordering::Equal => {
                     break Some(pivot);
@@ -99,14 +158,14 @@ impl<K, V> RangeVec<K, V> {
                         break Some(pivot + 2);
                     }
                     start = pivot;
-                    pivot = ((end - start) / 2) & !1;
+                    pivot = start + ((end - start) / 2) & !1;
                 }
                 Ordering::Less => {
                     if end - start == 2 {
                         break Some(pivot);
                     }
                     end = pivot;
-                    pivot = ((end - start) / 2) & !1;
+                    pivot = start + ((end - start) / 2) & !1;
                 }
                 Ordering::Equal => {
                     break None;
@@ -126,5 +185,9 @@ impl<K, V> RangeVec<K, V> {
         } else {
             Ordering::Equal
         }
+    }
+
+    pub fn size(&self) -> usize {
+        self.pool.len()
     }
 }
