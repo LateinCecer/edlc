@@ -15,7 +15,7 @@
  */
 
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase};
 use crate::prelude::{AmorphusData, ExecutorVM};
@@ -46,10 +46,11 @@ impl MirData {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         _reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         assert_eq!(target_ty, self.ty);
         vm.copy_bytes(target_range.start, self.value.as_slice());
+        Ok(())
     }
 
     /// A raw data set is by definition supposed to be constant.

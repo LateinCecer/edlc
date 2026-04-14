@@ -18,7 +18,6 @@
 pub use crate::codegen::variable::*;
 pub use crate::layout::*;
 pub use crate::compiler::*;
-pub use crate::compiler::panic_handle::*;
 pub use crate::executor::macros::*;
 pub use crate::executor::CraneliftJIT;
 pub use crate::executor::OptSettings;

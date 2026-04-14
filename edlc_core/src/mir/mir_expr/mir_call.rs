@@ -13,17 +13,17 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::mir::mir_backend::Backend;
+use crate::mir::mir_backend::{Backend, IntrinsicExecutionError};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirGraphElement, MirLoc, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_opt::{Optimizer, Verifier};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{mir_funcs, MirError, MirUid};
+use crate::mir::{mir_funcs, MirError, MirUid, TrapInfo};
 use crate::mir::debug::DebugInformation;
 use crate::prelude::mir_expr::mir_graph::report_comptime_unknown;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
-
+use crate::prelude::mir_expr::VmStackTrace;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComptimeParamPair {
@@ -94,11 +94,12 @@ impl MirCall {
         target: &MirValue,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
-    ) {
+        loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
         let ret_value = if backend.is_call_intrinsic(&self.func) {
             let mut ret_value = AmorphusDataCopy::uninit(self.ret, reg).unwrap();
             let mut params = vec![];
-            if let Some(runtime) = backend.intrinsic_runtime(&self.func) {
+            let res = if let Some(runtime) = backend.intrinsic_runtime(&self.func) {
                 let runtime_ptr = backend.runtime(runtime).unwrap();
                 let runtime_ptr = AmorphusDataCopy::new(reg.usize(), reg, runtime_ptr.as_ptr()).unwrap();
                 params.push(runtime_ptr.as_data());
@@ -107,7 +108,7 @@ impl MirCall {
                         let (par_range, par_ty) = stack_frame.get_offset(par, vm).unwrap();
                         vm.get_data(par_range.clone(), par_ty)
                     }));
-                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg)
             } else {
                 let params = self.args.iter()
                     .map(|par| {
@@ -115,9 +116,24 @@ impl MirCall {
                         vm.get_data(par_range.clone(), par_ty)
                     })
                     .collect::<Vec<_>>();
-                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg).unwrap();
+                backend.call_intrinsic(&self.func, params.as_slice(), ret_value.as_data_mut(), reg)
+            };
+
+            match res {
+                Err(IntrinsicExecutionError::TypeError(t)) => {
+                    panic!("encountered type safety error in intrinsic function execution! {t:#?}");
+                },
+                Err(IntrinsicExecutionError::Panic) => {
+                    let mut trace = VmStackTrace::default();
+                    trace.push(loc.clone());
+                    Err(ExecutionError {
+                        error_type: TrapInfo::Other("host code"),
+                        value: None,
+                        trace,
+                    })
+                },
+                Ok(_) => Ok(ret_value),
             }
-            ret_value
         } else {
             let func_reg = backend.func_reg();
             let Some(inline_body) = func_reg.get_inline_body(self.func).unwrap() else {
@@ -130,26 +146,19 @@ impl MirCall {
                 })
                 .collect::<Vec<_>>();
 
-            // print debug info if comptime function
-            // println!("function parameters:");
-            // for (i, par) in params.iter().enumerate() {
-            //     let data = vm.get_data(par.0.clone(), par.1);
-            //     println!("  {:x}: {:?}", i, data);
-            // }
-
             match inline_body.execute_in_vm(params.as_slice(), vm, reg, backend) {
-                Ok(s) => s,
-                Err(_err) => {
-                    panic!("execution error encountered while executing function body in executor VM!");
+                Ok(s) => Ok(s),
+                Err(mut err) => {
+                    err.trace.push(loc.clone());
+                    Err(err)
                 },
             }
-        };
-
-        // println!("function eval result: {:?}", ret_value);
+        }?;
 
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         let [mut target] = vm.get_data_mut([target_range.clone()], &[target_ty]);
         target.memcpy(&ret_value.as_data());
+        Ok(())
     }
 
     /// A [MirCall] is executable at compile-time of all parameters are available at compile time

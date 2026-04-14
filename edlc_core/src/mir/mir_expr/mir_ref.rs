@@ -1,8 +1,8 @@
 //! this module implements referencing and dereferencing logic for MirValues
 
-use crate::mir::debug::{DebugInformation, SourceInfo, TrapInfo};
+use crate::mir::debug::{DebugInformation, TrapInfo};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirFlowGraph, MirGraphElement, MirLoc, MirValue, StackFrameLayout, VmStackTrace};
 use crate::mir::mir_type::{MemberOffset, MirAggregateTypeLayout, MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
 
@@ -417,7 +417,8 @@ impl MirRef {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+        loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
         let (range, ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         let base_ty = reg
             .get_ref_type(&self.ty)
@@ -442,44 +443,74 @@ impl MirRef {
                 // the reference
                 let data = vm.get_data(range.clone(), base_ty);
                 unsafe { vm.write_ptr(*target, data.as_ptr(), stack_frame, reg) };
+                Ok(())
             }
             RefOffset::Const(const_offset) => {
                 let data = unsafe { ptr.add(const_offset.offset) };
                 unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
+                Ok(())
             }
             RefOffset::ArrayIndex { index, array_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
                 let index: usize = vm.read(*index, stack_frame, reg).unwrap();
                 let offset = element_size * index;
-                assert!(index < *array_size);
+                if index >= *array_size {
+                    return Err(ExecutionError {
+                        trace: VmStackTrace::new(loc.clone()),
+                        error_type: TrapInfo::ArrayIndex,
+                        value: None,
+                    });
+                }
                 let data = unsafe { ptr.add(offset) };
                 unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
+                Ok(())
             }
             RefOffset::SliceIndex { index, slice_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
                 let index: usize = vm.read(*index, stack_frame, reg).unwrap();
                 let offset = element_size * index;
                 let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
-                assert!(index < slice_size);
+                if index >= slice_size {
+                    return Err(ExecutionError {
+                        trace: VmStackTrace::new(loc.clone()),
+                        value: None,
+                        error_type: TrapInfo::SliceIndex,
+                    });
+                }
                 let data = unsafe { ptr.add(offset) };
                 unsafe { vm.write_ptr(*target, data, stack_frame, reg) };
+                Ok(())
             }
             RefOffset::ArrayRange { start, end, array_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
                 let start: usize = vm.read(*start, stack_frame, reg).unwrap();
                 let end: usize = vm.read(*end, stack_frame, reg).unwrap();
-                assert!(end <= *array_size);
+                if end > *array_size {
+                    return Err(ExecutionError {
+                        trace: VmStackTrace::new(loc.clone()),
+                        value: None,
+                        error_type: TrapInfo::ArrayRange,
+                    });
+                }
                 let data = unsafe { ptr.add(start * element_size) };
                 vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
+                Ok(())
             }
             RefOffset::SliceRange { start, end, slice_size, element_ty } => {
                 let element_size = reg.byte_size(*element_ty).unwrap();
                 let start: usize = vm.read(*start, stack_frame, reg).unwrap();
                 let end: usize = vm.read(*end, stack_frame, reg).unwrap();
                 let slice_size: usize = vm.read(*slice_size, stack_frame, reg).unwrap();
-                assert!(end <= slice_size);
+                if end > slice_size {
+                    return Err(ExecutionError {
+                        trace: VmStackTrace::new(loc.clone()),
+                        value: None,
+                        error_type: TrapInfo::SliceRange,
+                    });
+                }
                 let data = unsafe {  ptr.add(start * element_size) };
                 vm.write_fat_ptr(*target, data, end - start, stack_frame, reg);
+                Ok(())
             }
         }
     }
@@ -590,7 +621,7 @@ impl MirDeref {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let (_, value_ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         let ptr: *const u8 = vm.read(self.value, stack_frame, reg).unwrap();
 
@@ -601,6 +632,7 @@ impl MirDeref {
         unsafe {
             target_buf.read_ptr(ptr);
         }
+        Ok(())
     }
 
     pub(super) fn is_avail(
@@ -655,12 +687,13 @@ impl MirDowncastRef {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let (_, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         let (_, value_ty) = stack_frame.get_offset(&self.value, vm).unwrap();
         assert!(reg.is_ref_mutable(&value_ty));
         assert_eq!(reg.get_ref_type(&target_ty).unwrap(), reg.get_ref_type(&value_ty).unwrap());
         vm.memcpy_slice(&[*target], &[self.value], stack_frame);
+        Ok(())
     }
 
     pub(super) fn is_avail(

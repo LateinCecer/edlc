@@ -64,6 +64,17 @@ impl PartialEq for StaticData {
     }
 }
 
+pub enum IntrinsicExecutionError {
+    TypeError(TypeError),
+    Panic,
+}
+
+impl From<TypeError> for IntrinsicExecutionError {
+    fn from(value: TypeError) -> Self {
+        IntrinsicExecutionError::TypeError(value)
+    }
+}
+
 impl Eq for StaticData {}
 
 /// A backend is used in dynamic code generation.
@@ -81,7 +92,7 @@ pub trait Backend: Sized {
         params: &[AmorphusData<'_>],
         ret_buffer: AmorphusDataMut<'_>,
         reg: &MirTypeRegistry,
-    ) -> Result<(), TypeError>;
+    ) -> Result<(), IntrinsicExecutionError>;
     fn is_call_intrinsic(&self, func: &MirFuncId) -> bool;
 
     fn global_var_mut(&mut self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;

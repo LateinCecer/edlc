@@ -16,7 +16,7 @@
 
 use crate::core::edl_value::EdlConstValue;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstEval, ConstFrame, ValueConstState};
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -37,10 +37,10 @@ impl MirArrayInit {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let alignment = reg.byte_alignment(self.ty).unwrap();
         let MirTypeLayout::Array(layout) = reg.get_layout(self.ty).unwrap() else {
-            return;
+            return Ok(());
         };
 
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
@@ -65,6 +65,7 @@ impl MirArrayInit {
                 }
             }
         }
+        Ok(())
     }
 
     /// Array init operator is comptime when all elements in the init list are also known at

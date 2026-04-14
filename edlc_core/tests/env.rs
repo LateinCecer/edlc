@@ -18,10 +18,10 @@ use std::thread::current;
 use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
-use edlc_core::prelude::mir_backend::{Backend, CodeGen, StaticData};
-use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_backend::{Backend, CodeGen, IntrinsicExecutionError, StaticData};
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
+use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
@@ -323,6 +323,8 @@ impl CodeGen<TestBackend> for TestCodegen {
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
+
+    fn debug_info(&self, info: &mut DebugInformation, loc: &MirLoc) {}
 }
 
 struct TestCallGen;
@@ -338,6 +340,8 @@ impl CodeGen<TestBackend> for TestCallGen {
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
+
+    fn debug_info(&self, info: &mut DebugInformation, loc: &MirLoc) {}
 }
 
 impl FnCodeGen<TestBackend> for MirFn {
@@ -637,8 +641,9 @@ impl Backend for TestBackend {
         params: &[AmorphusData<'_>],
         ret_buffer: AmorphusDataMut<'_>,
         reg: &MirTypeRegistry,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), IntrinsicExecutionError> {
         self.intrinsics[func].run(params, ret_buffer, reg)
+            .map_err(|err| IntrinsicExecutionError::TypeError(err))
     }
 
     fn is_call_intrinsic(&self, func: &MirFuncId) -> bool {

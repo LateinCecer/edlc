@@ -23,7 +23,7 @@ use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowS
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
+use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
@@ -41,6 +41,7 @@ use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::mir::mir_expr::mir_graph::scope_check::ScopeError;
 use crate::mir::mir_expr::mir_graph::validate::ContextError;
+use crate::mir::MirPhase;
 use crate::report::{Report, ReportError};
 
 /// Lattice:
@@ -1339,7 +1340,15 @@ impl MirFlowGraph {
         // transfer comptime parameters to block at the root
         let root_call_params = CallParameterCopy::from_root(comptime_params, vm, self, reg);
         let mut work_list: VecDeque<MirBlockRef> = VecDeque::new();
-        self.process_block(vm, stack_frame, reg, backend, &mut work_list, root_call_params, &mut const_eval);
+        self.process_block(
+            vm,
+            stack_frame,
+            reg,
+            backend,
+            &mut work_list,
+            root_call_params,
+            &mut const_eval,
+        )?;
 
         // work through work-list
         while let Some(current_block) = work_list.pop_front() {
@@ -1353,7 +1362,7 @@ impl MirFlowGraph {
                 &mut work_list,
                 params,
                 &mut const_eval,
-            );
+            )?;
         }
         Ok(const_eval)
     }
@@ -1367,7 +1376,7 @@ impl MirFlowGraph {
         work_list: &mut VecDeque<MirBlockRef>,
         params: CallParameterCopy,
         const_eval: &mut ConstEval,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let current_block = params.block;
         let (max_compute_cache, first_run) = {
             let state = const_eval.state.map
@@ -1383,12 +1392,12 @@ impl MirFlowGraph {
         if !first_run
             && !ConstNodeState::call_changed(&current_block, &mut const_eval.state, &params) {
             // call has not changed since last execution; block contents can not change
-            return;
+            return Ok(());
         }
 
         let mut state_changed = params.set_vm_values(self, vm, stack_frame, const_eval, reg);
         state_changed |= self.blocks[current_block.0]
-            .eval_consts(self, vm, stack_frame, reg, backend, const_eval);
+            .eval_consts(self, vm, stack_frame, reg, backend, const_eval, &current_block)?;
         let mut output_builder = OutputVecBuilder::default();
         if let Some(max_computation_cache) = max_compute_cache {
             // If, after a configurable amount of iterations, not all values have converged
@@ -1489,7 +1498,7 @@ impl MirFlowGraph {
                             .is_avail(&target.match_value, &const_eval.borrow_graph) {
 
                             report_comptime_unknown(target.match_value);
-                            return;
+                            return Ok(());
                         }
 
                         // get match value and compare to constant input condition
@@ -1515,7 +1524,7 @@ impl MirFlowGraph {
                             // if !work_list.contains(&target.block_call.target) {
                                 work_list.push_back(target.block_call.target);
                             // }
-                            return; // continue execution in the new block
+                            return Ok(()); // continue execution in the new block
                         }
                     }
 
@@ -1564,6 +1573,7 @@ impl MirFlowGraph {
             }
             Seal::None => panic!("block is not sealed!"),
         }
+        Ok(())
     }
 }
 
@@ -1581,12 +1591,13 @@ impl Block {
         reg: &MirTypeRegistry,
         backend: &mut impl Backend,
         const_eval: &mut ConstEval,
-    ) -> bool {
+        block_ref: &MirBlockRef,
+    ) -> Result<bool, ExecutionError> {
         let mut changed = false;
         for statement in self.statements.iter() {
-            changed |= statement.eval_consts(cfg, vm, stack_frame, reg, backend, const_eval);
+            changed |= statement.eval_consts(cfg, vm, stack_frame, reg, backend, const_eval, block_ref)?;
         }
-        changed
+        Ok(changed)
     }
 }
 
@@ -1602,21 +1613,22 @@ impl Statement {
         reg: &MirTypeRegistry,
         backend: &mut impl Backend,
         const_eval: &mut ConstEval,
-    ) -> bool {
+        block_ref: &MirBlockRef,
+    ) -> Result<bool, ExecutionError> {
         match self {
             Self::VarMove { var, value, uid: _, debug: _ }
                 | Self::VarCopy { var, value, uid: _, debug: _ } => {
                 // check if value exists
-                if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
+                Ok(if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
                     vm.memcpy(&dst, &src);
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg)
                 } else {
                     const_eval.mark_runtime(var)
-                }
+                })
             }
-            Self::VarDef { var, value, uid: _, debug: _ } => {
+            Self::VarDef { var, value, uid, debug: _ } => {
                 // check if the expression can be executed in comptime
                 let mut changed = false;
                 if cfg.expressions.is_avail(
@@ -1625,7 +1637,15 @@ impl Statement {
                     &const_eval.block_frame,
                     &const_eval.borrow_graph,
                 ) {
-                    cfg.expressions.execute(vm, stack_frame, *value, var, reg, backend);
+                    cfg.expressions.execute(
+                        vm,
+                        stack_frame,
+                        *value,
+                        var,
+                        reg,
+                        backend,
+                        &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                    )?;
                     changed |= const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
 
                     // assigns and calls have the power to change values behind references
@@ -1657,7 +1677,7 @@ impl Statement {
                         }
                         _ => {}
                     }
-                    changed
+                    Ok(changed)
                 } else {
                     // assigns and calls have the power to change values behind references
                     let mut changed = false;
@@ -1687,7 +1707,7 @@ impl Statement {
                         _ => {}
                     }
                     changed |= const_eval.mark_runtime(var);
-                    changed
+                    Ok(changed)
                 }
 
                 // deal with assigns separately
@@ -1698,10 +1718,10 @@ impl Statement {
                 // }
             }
             // for now, just don't look at these during const eval
-            Self::Drop { value: _, uid: _, debug: _ } => false,
-            Self::Sync { event: _, uid: _, debug: _ } => false,
+            Self::Drop { value: _, uid: _, debug: _ } => Ok(false),
+            Self::Sync { event: _, uid: _, debug: _ } => Ok(false),
             Self::Record { event, uid: _, debug: _ } => {
-                const_eval.mark_runtime(&event.internal_value)
+                Ok(const_eval.mark_runtime(&event.internal_value))
             },
         }
     }
@@ -1865,7 +1885,7 @@ fn process_function(
             .collect::<Result<Vec<_>, OptimizationError>>()
     }?;
 
-    let const_eval = body.body.propagate_constants(
+    let const_eval = match body.body.propagate_constants(
         &comptime_param_values,
         vm,
         &stack_frame,
@@ -1873,7 +1893,13 @@ fn process_function(
         &compiler.phase.types,
         &compiler.phase.vars,
         backend,
-    )?;
+    ) {
+        Ok(val) => val,
+        Err(err) => {
+            err.report(&mut compiler.phase, &backend.func_reg(), Some(&body.body));
+            return Err(err.into());
+        },
+    };
     vm.pop_frame(&stack_frame);
 
     // insert constant parameters for hybrid function calls
@@ -2072,7 +2098,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     let mut stack_frame = StackFrameLayout::new(
         &deconstruction, options, body, &compiler.mir_phase.types);
     vm.alloc_stack_frame(&stack_frame);
-    let res = body.propagate_constants(
+    let res = match body.propagate_constants(
         &[],
         vm,
         &stack_frame,
@@ -2080,7 +2106,13 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &compiler.phase.types,
         &compiler.phase.vars,
         backend,
-    )?;
+    ) {
+        Err(err) => {
+            err.report(&mut compiler.phase, &backend.func_reg(), Some(body));
+            return Err(err.into());
+        },
+        Ok(val) => val,
+    };
     vm.pop_frame(&stack_frame);
 
     {

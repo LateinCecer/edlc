@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 use crate::mir::mir_backend::{Backend, StaticData};
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -35,7 +35,7 @@ impl MirLiteral {
         target: &MirValue,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
-    ) {
+    ) -> Result<(), ExecutionError> {
         match &self.value {
             MirLiteralValue::Char(val) => {
                 vm.write(*target, *val, stack_frame, reg)
@@ -98,7 +98,8 @@ impl MirLiteral {
             MirLiteralValue::F64(val) => {
                 vm.write(*target, *val, stack_frame, reg)
             }
-        }
+        };
+        Ok(())
     }
 
     /// A literal is always known at compile times.

@@ -2,7 +2,7 @@ use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use crate::layout::SSARepr;
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::{InstBuilder, JumpTableData};
+use cranelift_codegen::ir::{InstBuilder, JumpTableData, TrapCode};
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContainer, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, Seal, Statement};
 use edlc_core::prelude::mir_type::MirTypeId;
@@ -316,7 +316,9 @@ fn seal_codegen<Runtime>(
             }
         }
         Seal::Panic(_value, _) => {
-            builder.panic("")?;
+            builder.builder
+                .ins()
+                .trap(TrapCode::unwrap_user(66));
         }
         Seal::Cond { cond, then_target, else_target, .. } => {
             let args_then = block_call_codegen(

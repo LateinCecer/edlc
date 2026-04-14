@@ -35,7 +35,7 @@ use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::{MirError, MirPhase, MirUid};
@@ -76,10 +76,11 @@ impl MirGlobalVar {
         target: &MirValue,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let global_var_offset = backend.global_var(self.var)
             .expect("global variable missing");
         unsafe { vm.write_ptr(*target, global_var_offset.as_ptr() as *const _, stack_frame, reg) };
+        Ok(())
     }
 
     /// For now, we will say that globals are always available at compile time.

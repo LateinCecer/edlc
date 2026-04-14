@@ -15,7 +15,7 @@
  */
 
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirFlowGraph, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -41,13 +41,14 @@ impl MirAssign {
         stack_frame: &StackFrameLayout,
         _target: &MirValue, // no need to write into target, since its always a empty value
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let dst_ptr: *mut u8 = vm.read(self.lhs, stack_frame, reg).unwrap();
         let (value_range, value_ty) = stack_frame.get_offset(&self.rhs, vm).unwrap();
         let value = vm.get_data(value_range.clone(), value_ty);
         unsafe {
             std::ptr::copy(value.as_ptr(), dst_ptr, value_range.len());
         }
+        Ok(())
     }
 
     pub(super) fn is_avail(

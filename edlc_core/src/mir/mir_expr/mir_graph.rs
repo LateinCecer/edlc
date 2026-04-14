@@ -43,11 +43,14 @@ use edlc_analysis::graph::{CfgGraphState, CfgGraphStateMut, CfgLattice, CfgNodeS
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hasher;
 use std::ops::{Deref, Range};
 use log::debug;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::mir::debug::{DebugInformation, SourceInfo};
 pub use crate::mir::mir_expr::mir_graph::acsii_printer::AsciPrinter;
 use crate::mir::mir_expr::mir_graph::borrow::BorrowContext;
@@ -63,7 +66,9 @@ pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
-use crate::mir::TrapInfo;
+use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::{MirPhase, TrapInfo};
+use crate::prelude::mir_funcs::MirFuncId;
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -505,27 +510,32 @@ impl Statement {
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
-    ) {
+        block_ref: &MirBlockRef,
+    ) -> Result<(), ExecutionError> {
         match self {
             Self::VarMove { var, value, uid: _, debug: _ }
                 | Self::VarCopy { var, value, uid: _, debug: _ } => {
                 let dst = stack_frame.get_offset(var, vm).unwrap();
                 let src = stack_frame.get_offset(value, vm).unwrap();
                 vm.memcpy(&dst, &src);
+                Ok(())
             }
-            Self::VarDef { var, value, uid: _, debug: _ } => {
-                expr.execute(vm,  stack_frame, *value, var, reg, backend);
+            Self::VarDef { var, value, uid, debug: _ } => {
+                expr.execute(vm,  stack_frame, *value, var, reg, backend, &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)))
             }
             Self::Drop { value, uid: _, debug: _ } => {
-                debug!("dropping value {value:?}")
+                debug!("dropping value {value:?}");
+                Ok(())
                 // TODO
             }
             Self::Record { event, uid: _, debug: _ } => {
                 debug!("recording event {event:?}");
+                Ok(())
                 // TODO
             }
             Self::Sync { event, uid: _, debug: _ } => {
                 debug!("synchronizing event {event:?}");
+                Ok(())
                 // TODO
             }
         }
@@ -1424,10 +1434,12 @@ impl Block {
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
-    ) {
+        block_ref: &MirBlockRef,
+    ) -> Result<(), ExecutionError> {
         for statement in self.statements.iter() {
-            statement.execute(vm, expr, stack_frame, reg, backend);
+            statement.execute(vm, expr, stack_frame, reg, backend, block_ref)?;
         }
+        Ok(())
     }
 }
 
@@ -1510,14 +1522,134 @@ impl Block {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct VmStackTrace {
+    local: Option<MirLoc>,
+    funcs: Vec<MirFuncId>,
+    positions: Vec<MirLoc>,
+}
+
+impl VmStackTrace {
+    pub fn new(loc: MirLoc) -> Self {
+        VmStackTrace {
+            local: Some(loc),
+            positions: Vec::new(),
+            funcs: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, loc: MirLoc) {
+        assert!(self.local.is_none());
+        self.local = Some(loc);
+    }
+
+    pub fn contextualize(&mut self, func: MirFuncId) {
+        let local = self.local.take()
+            .expect("no location to contextualize");
+        self.funcs.push(func);
+        self.positions.push(local);
+    }
+}
+
 #[derive(Debug)]
 pub struct ExecutionError {
-    value: AmorphusDataCopy,
+    pub trace: VmStackTrace,
+    pub error_type: TrapInfo,
+    pub value: Option<AmorphusDataCopy>,
 }
 
 impl Display for ExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Execution error; error data is {} bytes in size", self.value.len())
+        write!(f, "Execution error;")
+    }
+}
+
+const TRACE_FN_SIGNATURE: &str = "in function";
+const TRACE_BODY: &str = "at location";
+
+impl ExecutionError {
+    pub fn report<B: Backend>(
+        &self,
+        hir_phase: &mut HirPhase,
+        func_reg: &MirFuncRegistry<B>,
+        body: Option<&MirFlowGraph>,
+    ) {
+        let mut sources = Vec::new();
+        if let Some(loc) = self.trace.local.as_ref() {
+            if let Some(body) = body {
+                if let Some((pos, src)) = body.find_source_pos(loc) {
+                    sources.push((
+                        *pos,
+                        src.clone(),
+                        vec![TypeArgument::new_display(&TRACE_BODY)],
+                    ));
+                }
+            }
+        }
+        for (func, loc) in self.trace.funcs
+            .iter()
+            .zip(self.trace.positions.iter()) {
+
+            let mut locs = Self::code_location(func, loc, func_reg);
+            sources.append(&mut locs);
+        }
+
+        // format src errors
+        let src_errors = sources.iter()
+            .map(|(pos, src, args)| {
+                SrcError::Single {
+                    pos: pos.clone().into(),
+                    src: src.clone(),
+                    error: TypeArguments::new(args.as_slice()),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // format err type
+        let err = match self.error_type {
+            TrapInfo::DivideByZero => "divide by zero",
+            TrapInfo::ArrayIndex => "array index out of bounds",
+            TrapInfo::SliceIndex => "slice index out of bounds",
+            TrapInfo::ArrayRange => "array range out of bounds",
+            TrapInfo::SliceRange => "slice range out of bounds",
+            TrapInfo::ExplicitPanic => "explicit panic",
+            TrapInfo::AssertionFailed => "assertion failed",
+            TrapInfo::Other(s) => s,
+        };
+
+        hir_phase.report_error(
+            TypeArguments::new(&[
+                TypeArgument::new_display(&err),
+            ]),
+            &src_errors,
+            None,
+        );
+    }
+
+    fn code_location<B: Backend, H: Hasher>(
+        func: &MirFuncId,
+        loc: &MirLoc,
+        func_reg: &MirFuncRegistry<B>,
+    ) -> Vec<(SrcPos, ModuleSrc, Vec<TypeArgument<'static, H>>)> {
+        let mut out = Vec::new();
+        if let Some((pos, src)) = func_reg.get_source_information(*func) {
+            out.push((
+                pos,
+                src,
+                vec![TypeArgument::new_display(&TRACE_FN_SIGNATURE)],
+            ));
+        }
+
+        if let Some(s) = func_reg.get_inline_body(*func).unwrap() {
+            if let Some((pos, src)) = s.body.find_source_pos(loc) {
+                out.push((
+                    *pos,
+                    src.clone(),
+                    vec![TypeArgument::new_display(&TRACE_BODY)],
+                ));
+            }
+        }
+        out
     }
 }
 
@@ -1649,7 +1781,7 @@ impl MirFlowGraph {
     ) -> Result<AmorphusDataCopy, ExecutionError> {
         let mut current_block = self.root();
         'outer: loop {
-            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg, backend);
+            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg, backend, &current_block)?;
             // jump to other block using sealing statement
             match &self.blocks[current_block.0].seal {
                 Seal::Return(value, _) => {
@@ -1662,7 +1794,13 @@ impl MirFlowGraph {
                     // println!("panic in execution");
                     let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
                     let data = vm.get_data(range.clone(), ty);
-                    break Err(ExecutionError { value: data.get_copy(reg) });
+                    let mut stack_trace = VmStackTrace::default();
+                    stack_trace.push(MirLoc::Seal(current_block));
+                    break Err(ExecutionError {
+                        value: Some(data.get_copy(reg)),
+                        trace: stack_trace,
+                        error_type: TrapInfo::ExplicitPanic,
+                    });
                 }
                 Seal::Jump(target, _) => {
                     vm.memcpy_slice(
@@ -2308,6 +2446,24 @@ impl MirFlowGraph {
                     let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value, debug: debug.clone() };
                     block.statements[idx] = new_statement;
                 }
+            }
+        }
+    }
+
+    pub fn find_source_pos(&self, loc: &MirLoc) -> Option<(&SrcPos, &ModuleSrc)> {
+        match loc {
+            MirLoc::GraphLoc(MirGraphLoc(block, uid)) => {
+                self.blocks.get(block.0)
+                    .and_then(|block| block.statements.iter()
+                        .find(|s| s.uid() == uid)
+                        .map(|s| (&s.debug().pos, &block.src)))
+            }
+            MirLoc::Seal(block) => {
+                self.blocks.get(block.0)
+                    .map(|block| {
+                        let seal = &block.seal;
+                        (&seal.debug().pos, &block.src)
+                    })
             }
         }
     }

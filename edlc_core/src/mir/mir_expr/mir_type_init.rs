@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -40,7 +40,7 @@ impl MirTypeInit {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         _reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         assert_eq!(target_ty, self.ty);
         for MirInitAssign { off, val } in self.inits.iter() {
@@ -51,6 +51,7 @@ impl MirTypeInit {
                 &source,
             );
         }
+        Ok(())
     }
 
     pub(super) fn is_avail(

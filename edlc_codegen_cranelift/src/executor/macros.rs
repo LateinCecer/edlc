@@ -402,7 +402,6 @@ mod test {
     use edlc_core::prelude::mir_expr::Context;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
-    use crate::{jit_intrinsic_panic};
 
     #[test]
     fn test() -> Result<(), anyhow::Error> {
@@ -994,7 +993,7 @@ fn test() -> i32 {
                 let runtime = unsafe { &*runtime }.as_ref().unwrap();
                 let runtime = runtime.read().unwrap();
                 if this > runtime.res.len() {
-                    jit_intrinsic_panic!(&format!("invalid resource with id `{this}`"));
+                    panic!("invalid resource with id `{this}`");
                 }
                 println!("{}", runtime.res[this]);
             }

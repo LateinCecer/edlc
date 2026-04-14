@@ -15,7 +15,7 @@
  */
 
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstEval, ConstFrame, ValueConstState};
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -28,61 +28,79 @@ pub struct MirAs {
     pub val: MirValue,
 }
 
+// TODO type casts may case panics; catch those and emit an error when they occur
 macro_rules! cast_and_write(
-    ($vm:expr, $stack_frame:expr, $target:expr, $reg:expr, $val:expr) => {
+    ($vm:expr, $stack_frame:expr, $target:expr, $reg:expr, $val:expr, $loc:expr) => {{
         let target_ty = $stack_frame.get_offset($target, $vm).unwrap().1;
         match target_ty {
             t if t == $reg.u8() => {
-                $vm.write(*$target, $val as u8, $stack_frame, $reg)
+                $vm.write(*$target, $val as u8, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.u16() => {
-                $vm.write(*$target, $val as u16, $stack_frame, $reg)
+                $vm.write(*$target, $val as u16, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.u32() => {
-                $vm.write(*$target, $val as u32, $stack_frame, $reg)
+                $vm.write(*$target, $val as u32, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.u64() => {
-                $vm.write(*$target, $val as u64, $stack_frame, $reg)
+                $vm.write(*$target, $val as u64, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.u128() => {
-                $vm.write(*$target, $val as u128, $stack_frame, $reg)
+                $vm.write(*$target, $val as u128, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.usize() => {
-                $vm.write(*$target, $val as usize, $stack_frame, $reg)
+                $vm.write(*$target, $val as usize, $stack_frame, $reg);
+                Ok(())
             }
 
             t if t == $reg.i8() => {
-                $vm.write(*$target, $val as i8, $stack_frame, $reg)
+                $vm.write(*$target, $val as i8, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.i16() => {
-                $vm.write(*$target, $val as i16, $stack_frame, $reg)
+                $vm.write(*$target, $val as i16, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.i32() => {
-                $vm.write(*$target, $val as i32, $stack_frame, $reg)
+                $vm.write(*$target, $val as i32, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.i64() => {
-                $vm.write(*$target, $val as i64, $stack_frame, $reg)
+                $vm.write(*$target, $val as i64, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.i128() => {
-                $vm.write(*$target, $val as i128, $stack_frame, $reg)
+                $vm.write(*$target, $val as i128, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.isize() => {
-                $vm.write(*$target, $val as isize, $stack_frame, $reg)
+                $vm.write(*$target, $val as isize, $stack_frame, $reg);
+                Ok(())
             }
 
             t if t == $reg.f32() => {
-                $vm.write(*$target, $val as f32, $stack_frame, $reg)
+                $vm.write(*$target, $val as f32, $stack_frame, $reg);
+                Ok(())
             }
             t if t == $reg.f64() => {
-                $vm.write(*$target, $val as f64, $stack_frame, $reg)
+                $vm.write(*$target, $val as f64, $stack_frame, $reg);
+                Ok(())
             }
 
             t if t == $reg.char() => {
-                $vm.write(*$target, $val as u8 as char, $stack_frame, $reg)
+                $vm.write(*$target, $val as u8 as char, $stack_frame, $reg);
+                Ok(())
             }
-            _ => panic!("invalid cast target type")
+            _ => {
+                panic!("invalid cast target type");
+            }
         }
-    }
+    }};
 );
 
 impl MirAs {
@@ -92,71 +110,72 @@ impl MirAs {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+        loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
         let (_src_range, src_ty) = stack_frame.get_offset(&self.val, vm).unwrap();
         match src_ty {
             t if t == reg.u8() => {
                 let val: u8 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.u16() => {
                 let val: u16 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.u32() => {
                 let val: u32 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.u64() => {
                 let val: u64 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.u128() => {
                 let val: u128 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.usize() => {
                 let val: usize = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
 
             t if t == reg.i8() => {
                 let val: i8 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.i16() => {
                 let val: i16 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.i32() => {
                 let val: i32 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.i64() => {
                 let val: i64 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.i128() => {
                 let val: i128 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.isize() => {
                 let val: isize = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
 
             t if t == reg.f32() => {
                 let val: f32 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
             t if t == reg.f64() => {
                 let val: f64 = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val);
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
             }
 
             t if t == reg.char() => {
                 let val: char = vm.read(self.val, stack_frame, reg).unwrap();
-                cast_and_write!(vm, stack_frame, target, reg, val as u8);
+                cast_and_write!(vm, stack_frame, target, reg, val as u8, loc)
             }
             _ => panic!("invalid cast target type")
         }

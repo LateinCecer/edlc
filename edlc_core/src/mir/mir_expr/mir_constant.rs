@@ -15,7 +15,7 @@
  */
 
 use crate::core::edl_value::EdlLiteralValue;
-use crate::mir::mir_expr::{MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;
@@ -34,7 +34,7 @@ impl MirConstant {
         stack_frame: &StackFrameLayout,
         target: &MirValue,
         reg: &MirTypeRegistry,
-    ) {
+    ) -> Result<(), ExecutionError> {
         match &self.value {
             EdlLiteralValue::Usize(val) => {
                 vm.write(*target, *val, stack_frame, reg)
@@ -92,7 +92,8 @@ impl MirConstant {
                 vm.write(*target, *val, stack_frame, reg)
             }
             EdlLiteralValue::Empty() => (),
-        }
+        };
+        Ok(())
     }
 
     #[inline(always)]

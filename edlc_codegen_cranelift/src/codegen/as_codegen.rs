@@ -327,7 +327,7 @@ mod test {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
         Ok(compiler)

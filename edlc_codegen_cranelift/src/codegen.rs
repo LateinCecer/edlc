@@ -23,7 +23,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::codegen::variable::{AggregateValue, VarCache};
-use crate::compiler::panic_handle::PanicHandle;
 use crate::compiler::{GlobalVar, JIT};
 use crate::prelude::SSARepr;
 use cranelift::prelude::*;
@@ -390,7 +389,6 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub runtime_data: &'jit mut IndexMap<DataId>,
 
     /// variable cache
-    pub panic_handle: &'jit mut PanicHandle,
     _rt: PhantomData<Runtime>,
     pub abi: Arc<AbiConfig>,
 
@@ -449,7 +447,6 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             runtime_data: &mut jit.runtime_data,
             func_reg: jit.func_reg.clone(),
             global_vars: &mut jit.global_vars,
-            panic_handle: &mut jit.panic_handle,
             layout: mapping,
             function_layout,
             debug_symbols: debug_info,

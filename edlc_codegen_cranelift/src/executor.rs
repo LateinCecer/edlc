@@ -1292,7 +1292,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
 
@@ -1395,7 +1395,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
 
@@ -1499,7 +1499,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
 

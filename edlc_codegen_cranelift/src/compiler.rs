@@ -19,7 +19,6 @@ mod code;
 pub mod func;
 pub mod external_func;
 pub(crate) mod integer_math;
-pub mod panic_handle;
 mod float_math;
 mod bool_math;
 mod calling_convention;
@@ -35,7 +34,7 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
-use edlc_core::prelude::mir_backend::{Backend, StaticData};
+use edlc_core::prelude::mir_backend::{Backend, IntrinsicExecutionError, StaticData};
 use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase, TypeError};
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_expr::mir_data::MirData;
@@ -52,9 +51,7 @@ use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue, ShortV
 use crate::layout::SSARepr;
 use crate::codegen::variable::{AggregateValue, PtrValue};
 use crate::compiler::code::{JITCode};
-use crate::compiler::panic_handle::PanicHandle;
 use crate::error::{JITError, JITErrorType};
-use crate::prelude::RawPanicHandle;
 
 pub use unwind_info::eh_frames;
 pub(crate) use crate::compiler::unwind_info::UnwindInfo;
@@ -176,7 +173,6 @@ pub struct JIT<Runtime: 'static> {
     static_data: Mutex<Vec<StaticData>>,
     code: Rc<RefCell<JITCode>>,
     _rt: PhantomData<Runtime>,
-    pub panic_handle: PanicHandle,
     pub abi: Arc<AbiConfig>,
     pub(crate) unwind_info: UnwindInfo,
 }
@@ -212,13 +208,6 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
 
         let mut module = JITModule::new(builder);
         let mut data_description = DataDescription::new();
-        let panic_handle = PanicHandle::new(
-            &mut data_description,
-            &mut module,
-            128,
-            32,
-        ).expect("Failed to create panic handle");
-        let _ = panic_handle.set_global(&module); // may fail if it already exists
 
         Self {
             builder_context: FunctionBuilderContext::new(),
@@ -232,7 +221,6 @@ impl<Runtime: 'static> Default for JIT<Runtime> {
             runtime_data: IndexMap::default(),
             static_data: Mutex::new(Vec::default()),
             _rt: PhantomData,
-            panic_handle,
             abi: Arc::new(AbiConfig::local_system_v()),
             unwind_info: UnwindInfo::new(),
         }
@@ -270,7 +258,6 @@ impl<R, Runtime: 'static> TypedProgram<R, Runtime> {
         let code = jit.module.get_finalized_function(self.func_id);
         let program = unsafe { mem::transmute::<*const u8, fn(*mut R)>(code) };
         program(return_buffer.as_mut_ptr());
-        unsafe { jit.unwind_panic() }?;
         Ok(unsafe { return_buffer.assume_init() })
     }
 
@@ -278,7 +265,6 @@ impl<R, Runtime: 'static> TypedProgram<R, Runtime> {
         let code = jit.module.get_finalized_function(self.func_id);
         let program = unsafe { mem::transmute::<*const u8, fn(*mut R)>(code) };
         program(ret_buf as *mut R);
-        unsafe { jit.unwind_panic() }?;
         Ok(())
     }
 
@@ -392,7 +378,6 @@ impl<R, Runtime: 'static> UncheckedProgram<R, Runtime> {
         let mut return_buffer = MaybeUninit::<R>::uninit();
         let program = mem::transmute::<*const u8, fn(*mut R)>(self.function);
         program(return_buffer.as_mut_ptr());
-        RawPanicHandle::unwind_global()?;
         Ok(return_buffer.assume_init())
     }
 
@@ -405,7 +390,6 @@ impl<R, Runtime: 'static> UncheckedProgram<R, Runtime> {
         let mut return_buffer = MaybeUninit::<R>::uninit();
         let program = mem::transmute::<*const u8, fn(*mut R)>(self.function);
         program(return_buffer.as_mut_ptr());
-        RawPanicHandle::unwind_global_no_reset()?;
         Ok(return_buffer.assume_init())
     }
 }
@@ -675,80 +659,6 @@ impl<Runtime: 'static> JIT<Runtime> {
     pub(crate) fn get_func_id(&self, mir_id: MirFuncId) -> Option<FuncId> {
         self.code.borrow().get_func_id(mir_id)
     }
-
-    // /// Creates an evaluation function for the evaluation of a MIR expression.
-    // fn create_eval_func(
-    //     &mut self,
-    //     expr: MirExpr,
-    //     phase: &mut MirPhase,
-    //     hir_phase: &mut HirPhase,
-    // ) -> Result<FuncId, MirError<Self>> {
-    //     // compile all associated functions that have not yet been compiled
-    //     self.compile_associated_functions(phase, hir_phase)?;
-    //
-    //     // prepare a function with empty function parameters and the appropriate return type
-    //     // since returning aggregate types via multiple return types is not really possible right
-    //     // now, we return the expression data via a return buffer, which is just a pointer to the
-    //     // target location.
-    //     self.ctx.func.signature.params.clear();
-    //     self.ctx.func.signature.returns.clear();
-    //     self.ctx.func.signature.params.push(
-    //         AbiParam::new(self.module.target_config().pointer_type()));
-    //     // next, declare the function to JIT. Fucntions must be declared before they can be
-    //     // called, or defined.
-    //     let id = self.module
-    //         .declare_anonymous_function(&self.ctx.func.signature)
-    //         .map_err(|err| MirError::BackendError(JITError {
-    //             ty: JITErrorType::ModuleErr(err),
-    //         }))?;
-    //     self.ctx.func.name = UserFuncName::user(0, id.as_u32());
-    //
-    //     // create function builder
-    //     let mut translator = FunctionTranslator::new(
-    //         self, phase.types.empty(), phase.types.empty(), FunctionRetKind::Value);
-    //     let entry_block = translator.function_entry_block;
-    //
-    //     // create variable that holds the return buffer
-    //     let ret_buffer_val = translator.builder.block_params(entry_block)[0];
-    //
-    //     // todo declare dependent temporary values here
-    //     // translate the expression as the function body
-    //     let values = expr.compile(&mut translator, phase)?;
-    //     values.store_to_ptr(ret_buffer_val, 0, &mut CodeCtx {
-    //         abi: translator.abi.clone(),
-    //         phase,
-    //         module: &mut translator.module,
-    //         builder: &mut translator.builder,
-    //     })?;
-    //
-    //     // emit the return instruction
-    //     translator.builder.ins().return_(&[]);
-    //     // tell the builder we're done with this function
-    //     translator.builder.seal_all_blocks();
-    //     translator.builder.finalize();
-    //
-    //     // Define the function to the JIT.
-    //     // This finishes compilation, although there may be outstanding relocations to perform.
-    //     // Currently, JIT cannot finish relocations until all functions to be called are defined.
-    //     self.module.define_function(id, &mut self.ctx)
-    //         .map_err(|err| MirError::BackendError(JITError {
-    //             ty: JITErrorType::ModuleErr(err)
-    //         }))?;
-    //
-    //     // Now that compilation is finished, we can clear out the context state
-    //     self.module.clear_context(&mut self.ctx);
-    //
-    //     // compile all associated functions that have not yet been compiled
-    //     // TODO self.compile_associated_functions(phase, hir_phase)?;
-    //
-    //     // finalize the functions which we just defined, which resolves any outstanding relocations
-    //     // (patching in addresses, now that they're available).
-    //     self.module.finalize_definitions()
-    //         .map_err(|err| MirError::BackendError(JITError {
-    //             ty: JITErrorType::ModuleErr(err)
-    //         }))?;
-    //     Ok(id)
-    // }
 }
 
 impl<Runtime: 'static> Backend for JIT<Runtime> {
@@ -780,13 +690,13 @@ impl<Runtime: 'static> Backend for JIT<Runtime> {
         params: &[AmorphusData<'_>],
         ret_buffer: AmorphusDataMut<'_>,
         reg: &MirTypeRegistry,
-    ) -> Result<(), TypeError> {
+    ) -> Result<(), IntrinsicExecutionError> {
         let lock = self.native_functions.lock().unwrap();
         let func = lock
             .for_id(func)
             .expect("intrinsic function does not exist");
         let res = func.run(params, ret_buffer, reg);
-        res
+        res.map_err(|err| IntrinsicExecutionError::TypeError(err))
     }
 
     fn is_call_intrinsic(&self, func: &MirFuncId) -> bool {
