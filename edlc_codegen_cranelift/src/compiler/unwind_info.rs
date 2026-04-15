@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use std::cell::LazyCell;
 use cranelift_codegen::isa::unwind::CfaUnwindInfo;
 use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
@@ -64,6 +65,22 @@ static HOST_UNWIND_REG: LazyLock<RwLock<RangeVec<usize, HostUnwindInfo>>> = Lazy
 
 pub fn host_eh_frames() -> &'static RwLock<RangeVec<usize, HostUnwindInfo>> {
     &*HOST_UNWIND_REG
+}
+
+/// Returns a thread-local unwind context.
+pub fn unwind_ctx<F: FnOnce(&mut gimli::UnwindContext<usize>) -> R, R>(op: F) -> Option<R> {
+    thread_local! {
+        static UNWIND_CONTEXT: LazyCell<RwLock<gimli::UnwindContext<usize>>> = LazyCell::new(|| {
+            RwLock::new(gimli::UnwindContext::new())
+        });
+    }
+    UNWIND_CONTEXT.with(|ctx| {
+        if let Ok(mut lock) = ctx.write() {
+            Some(op(&mut *lock))
+        } else {
+            None
+        }
+    })
 }
 
 unsafe extern "C" fn phdr_callback(
@@ -138,7 +155,6 @@ impl SourceDebugFrame {
         debug_info: DebugInformation,
     ) -> Self {
         let (src_info, trap_info) = debug_info.deconstruct();
-        init_host_unwind_info();
         SourceDebugFrame {
             source_mapping,
             trap_mapping,
@@ -173,6 +189,7 @@ pub struct UnwindInfo {
 
 impl UnwindInfo {
     pub fn new() -> Self {
+        init_host_unwind_info();
         UnwindInfo {
             frame_description_entries: BTreeMap::new(),
             debug_frames: BTreeMap::new(),

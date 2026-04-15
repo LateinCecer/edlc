@@ -17,7 +17,7 @@ use std::cell::RefCell;
 use std::mem;
 use gimli::UnwindContext;
 use log::error;
-use crate::compiler::{eh_frames, host_eh_frames};
+use crate::compiler::{eh_frames, host_eh_frames, unwind_ctx};
 use crate::unwind::cfi::{unwind_gimli, unwind_host, Registers};
 use crate::unwind::{PanicData, PanicMessage, PanicPayload, RangeVec};
 use crate::unwind::signal_stack::sigalt_stack_init;
@@ -28,10 +28,10 @@ macro_rules! jit_panic(
         PanicMessage::set(PanicMessage {
             data: $msg.to_string(),
         });
-        $crate::unwind::cause_jit_panic()
+        $crate::unwind::jit_sync_panic()
     });
     () => ({
-        $crate::unwind::cause_jit_panic()
+        $crate::unwind::jit_sync_panic()
     });
 );
 
@@ -46,7 +46,7 @@ use crate::prelude::HostUnwindInfo;
 /// of a function that is yields directly to a JIT compiled function!
 #[inline]
 #[cfg(all(target_arch="x86_64", any(target_os="linux", target_os="macos")))]
-pub unsafe fn cause_jit_panic() -> ! {
+pub unsafe fn cause_jit_async_panic() -> ! {
     core::arch::asm!("ud2"); // <-- execution will stop here
     panic!() // <-- is never reached, just there to make the type checker happy
 }
@@ -140,8 +140,11 @@ unsafe extern "C" fn trap_handler(
     let handled = PanicData::set(|data| {
         let eh_frames = eh_frames();
         let host_eh_frames = host_eh_frames();
-        if let (Ok(eh_frames), Ok(host_eh_frames)) = (eh_frames.read(), host_eh_frames.read()) {
-            if backtrace(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
+        if let (
+            Ok(eh_frames),
+            Ok(host_eh_frames),
+        ) = (eh_frames.read(), host_eh_frames.read()) {
+            if backtrace_thread_local(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
                 // recover from the panic, continue after the JIT call in the host
                 regs.store(context);
                 true
@@ -166,11 +169,63 @@ unsafe extern "C" fn trap_handler(
     }
 }
 
-unsafe fn backtrace(unwind_data: &[u8], host_frames: &RangeVec<usize, HostUnwindInfo>, regs: &mut Registers, data: &mut PanicPayload) -> bool {
-    // TODO move this data to a global tls variable
-    let mut context = UnwindContext::<usize>::new();
-    let mut jit_frame_c: u32 = 0;
+/// Causes a synchronous panic in the JIT runtime.
+/// The stack is gracefully unwound to the last point where a JIT frame was entered.
+/// In comparison to an asynchronous jit panic, this does not require invoking a kernel signal.
+/// For expected panics, this method should be prefered over asynchronous panics.
+pub fn jit_sync_panic() -> ! {
+    let mut regs = Registers::steal();
+    let handled = PanicData::set(|data| {
+        let eh_frames = eh_frames();
+        let host_eh_frames = host_eh_frames();
+        if let (
+            Ok(eh_frames),
+            Ok(host_eh_frames),
+        ) = (eh_frames.read(), host_eh_frames.read()) {
+            if backtrace_thread_local(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
+                // recover from the panic, continue after the JIT call in the host
+                true
+            } else{
+                false
+            }
+        } else {
+            false
+        }
+    }, false);
 
+    if handled {
+        // SAFETY: the registers that we're restoring here are taking from a stack unwind.
+        //         they should be fine to restore, provided that the initial context was valid.
+        unsafe { regs.restore() }
+    } else {
+        eprintln!("failed to initialize JIT panic");
+        std::process::exit(-1);
+    }
+}
+
+/// The same as [backtrace] but using a thread-local heap-allocated unwinding context.
+/// Since the unwinding context is pre-allocated, no allocations need to be performed during
+/// the backtrace.
+/// As a result, this should be async-signal safe.
+fn backtrace_thread_local(
+    unwind_data: &[u8],
+    host_frames: &RangeVec<usize, HostUnwindInfo>,
+    regs: &mut Registers,
+    data: &mut PanicPayload,
+) -> bool {
+    unwind_ctx(|ctx| {
+        unsafe { backtrace(unwind_data, host_frames, regs, data, ctx) }
+    }).unwrap_or(false)
+}
+
+unsafe fn backtrace(
+    unwind_data: &[u8],
+    host_frames: &RangeVec<usize, HostUnwindInfo>,
+    regs: &mut Registers,
+    data: &mut PanicPayload,
+    context: &mut UnwindContext<usize>,
+) -> bool {
+    let mut jit_frame_c: u32 = 0;
     for frame_num in 0..16 {
         let current_ip = if frame_num == 0 {
             // the location of the trapping instruction.
@@ -182,7 +237,7 @@ unsafe fn backtrace(unwind_data: &[u8], host_frames: &RangeVec<usize, HostUnwind
             // for the instruction after the call
             regs.rip - 1
         };
-        match unwind_gimli(unwind_data, current_ip, regs, &mut context) {
+        match unwind_gimli(unwind_data, current_ip, regs, context) {
             Ok(entry) => {
                 jit_frame_c += 1;
                 data.backtrace.push(entry);
@@ -197,17 +252,14 @@ unsafe fn backtrace(unwind_data: &[u8], host_frames: &RangeVec<usize, HostUnwind
             }
             Err(gimli::Error::NoUnwindInfoForAddress) => {
                 // lookup addr in host info
-                error!("unpacking host frames");
-                match unwind_host(host_frames, current_ip, regs, &mut context) {
+                match unwind_host(host_frames, current_ip, regs, context) {
                     Ok(entry) => {
-                        error!("found host frame!");
                         data.backtrace.push(entry);
                         if regs.rip == 0 {
                             return false; // reached end of stack
                         }
                     }
                     Err(err) => {
-                        error!("error finding host frame: {err}");
                         return false;
                     }
                 }

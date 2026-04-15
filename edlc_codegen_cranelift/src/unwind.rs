@@ -34,7 +34,7 @@ use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
-pub use unix::{TrapHandler, jit_panic, cause_jit_panic};
+pub use unix::{TrapHandler, jit_panic, cause_jit_async_panic, jit_sync_panic};
 pub use range_vec::{RangeVec, RangeVecIter};
 use crate::compiler::{UnwindInfo, JIT};
 
@@ -260,6 +260,7 @@ impl PanicPayload {
 /// Encodes information about a panic.
 pub struct PanicData {
     panic: AtomicBool,
+    cleaning_up: AtomicBool,
     payload: Mutex<PanicPayload>,
 }
 
@@ -271,6 +272,7 @@ impl PanicData {
     fn new() -> PanicData {
         PanicData {
             panic: AtomicBool::new(false),
+            cleaning_up: AtomicBool::new(false),
             payload: Mutex::new(PanicPayload {
                 backtrace: Backtrace::new(),
                 reached_host: false,

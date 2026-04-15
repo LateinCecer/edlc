@@ -55,6 +55,7 @@ use crate::error::{JITError, JITErrorType};
 
 pub use unwind_info::eh_frames;
 pub use unwind_info::host_eh_frames;
+pub use unwind_info::unwind_ctx;
 pub(crate) use crate::compiler::unwind_info::{UnwindInfo, HostUnwindInfo};
 
 #[derive(Default)]
