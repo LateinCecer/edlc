@@ -927,7 +927,7 @@ mod test {
     use edlc_core::resolver::QualifierName;
     use crate::compiler::{TypedProgram};
     use crate::executor::{CraneliftJIT, FunctionContainer, JITBencher};
-    use crate::{jit_func, setup_logger};
+    use crate::{jit_func, jit_panic, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
     use crate::unwind::{PanicData, PanicMessage, TrapHandler};
@@ -1666,9 +1666,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                PanicMessage::set(PanicMessage {
-                    data: msg.to_string(),
-                });
+                unsafe { jit_panic!(msg) }
             }
         );
 

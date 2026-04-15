@@ -13,9 +13,11 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use gimli::{NativeEndian, Register, UnwindContext, UnwindSection};
+use std::ops::Add;
+use gimli::{EhFrameOffset, EndianSlice, Endianity, NativeEndian, Register, Section, UnwindContext, UnwindSection};
 use log::error;
-use crate::unwind::BacktraceEntry;
+use crate::prelude::HostUnwindInfo;
+use crate::unwind::{BacktraceEntry, RangeVec};
 
 #[cfg(target_arch="x86_64")]
 pub struct Registers {
@@ -65,6 +67,8 @@ impl Registers {
 
     pub fn get(&self, reg: gimli::Register) -> Option<&u64> {
         match reg {
+            gimli::X86_64::RA => Some(&self.rip),
+            gimli::X86_64::RSP => Some(&self.rsp),
             gimli::X86_64::RBP => Some(&self.rbp),
             gimli::X86_64::RBX => Some(&self.rbx),
             gimli::X86_64::R12 => Some(&self.r12),
@@ -76,23 +80,105 @@ impl Registers {
     }
 }
 
-pub fn unwind_gimli(
-    unwind_data: &[u8],
+pub fn unwind_host(
+    eh_frames: &RangeVec<usize, HostUnwindInfo>,
     lookup_addr: u64,
     registers: &mut Registers,
-    ctx: &mut UnwindContext<usize>
+    ctx: &mut UnwindContext<usize>,
 ) -> Result<BacktraceEntry, gimli::Error> {
-    let bases = gimli::BaseAddresses::default();
-    let eh_frame = gimli::EhFrame::new(unwind_data, NativeEndian);
+    let entry = eh_frames.get(&(lookup_addr as usize)).unwrap();
+    let bases = gimli::BaseAddresses::default()
+        .set_eh_frame_hdr(entry.eh_frame_ptr as u64)
+        .set_text(entry.base_addr as u64);
+    let eh_frame_hdr = unsafe {
+        gimli::EhFrameHdr::new(
+            std::slice::from_raw_parts(entry.eh_frame_ptr as *const u8, entry.eh_frame_len),
+            gimli::NativeEndian,
+        )
+    };
+    error!("made it to eh_frame_hdr");
 
-    let base_addr = eh_frame.fde_for_address(
-        &bases,
-        lookup_addr,
-        gimli::EhFrame::cie_from_offset,
-    )?;
+    let parsed_hdr = eh_frame_hdr.parse(&bases, 8)?;
+    let eh_frame_ptr = resolve_pointer(parsed_hdr.eh_frame_ptr(), None)
+        .ok_or(gimli::Error::InvalidPiece)?;
+    error!("created eh_frame ptr");
+    let length = unsafe { std::ptr::read_unaligned(eh_frame_ptr as *const u32) };
+    let id = unsafe { std::ptr::read_unaligned(eh_frame_ptr.add(4) as *const u32) };
+    if id != 0 || length == 0 || length > 0xffff {
+        error!("invalid eh_frame ptr");
+        return Err(gimli::Error::InvalidPiece);
+    }
+
+    let table = parsed_hdr.table().ok_or(gimli::Error::InvalidPiece)?;
+    let fde_ptr = table.lookup(lookup_addr, &bases)?;
+    error!("found fde ptr");
+
+    // FDE pointer relative to the EhFrameHdr
+    let fde_ptr_abs = resolve_pointer(fde_ptr, None)
+        .ok_or(gimli::Error::InvalidPiece)?;
+    let id = unsafe { std::ptr::read_unaligned(fde_ptr_abs.add(4) as *const u32) };
+    if id == 0 {
+        error!("invalid fde pointer");
+        return Err(gimli::Error::InvalidPiece);
+    }
+
+    error!("fde_ptr_abs: {:p}", fde_ptr_abs as *const u8);
+    let fde_ptr = (fde_ptr_abs - eh_frame_ptr) as usize;
+    error!("fde_rel: {:p}", fde_ptr as *const u8);
+
+    let eh_frame = unsafe {
+        gimli::EhFrame::new(
+            // NOTE: we could input a real size, but since GIMLI is a lazy parser and DWARF expects
+            //       a zero-terminator on .eh_frame sections, we're fine just giving it a huge
+            //       memory section.
+            std::slice::from_raw_parts(eh_frame_ptr as *const u8, isize::MAX as usize),
+            gimli::NativeEndian,
+        )
+    };
+    error!("creating fde");
+
+    let bases = bases.set_eh_frame(eh_frame_ptr);
+    let fde = eh_frame.fde_from_offset(
+        &bases, fde_ptr.into(), gimli::EhFrame::cie_from_offset)?;
+    // let fde = eh_frame.fde_for_address(
+    //     &bases, lookup_addr, gimli::EhFrame::cie_from_offset)?;
+    error!("found descriptor entry");
+
+    if !fde.contains(lookup_addr) {
+        return Err(gimli::Error::InvalidPiece);
+    }
+    unwind_frame(&bases, &eh_frame, &fde, lookup_addr, registers, ctx)
+}
+
+fn resolve_pointer(ptr: gimli::Pointer, base: Option<u64>) -> Option<u64> {
+    match ptr {
+        gimli::Pointer::Direct(addr) => if let Some(base) = base {
+            Some(addr + base)
+        } else {
+            Some(addr)
+        },
+        gimli::Pointer::Indirect(offset) => {
+            let ptr = offset as *const u64;
+            if ptr != std::ptr::null() {
+                Some(unsafe { *ptr })
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn unwind_frame(
+    bases: &gimli::BaseAddresses,
+    eh_frame: &gimli::EhFrame<EndianSlice<NativeEndian>>,
+    base_addr: &gimli::FrameDescriptionEntry<EndianSlice<NativeEndian>, usize>,
+    lookup_addr: u64,
+    registers: &mut Registers,
+    ctx: &mut UnwindContext<usize>,
+) -> Result<BacktraceEntry, gimli::Error> {
     let table = base_addr.unwind_info_for_address(
-        &eh_frame,
-        &bases,
+        eh_frame,
+        bases,
         ctx,
         lookup_addr,
     )?;
@@ -101,16 +187,28 @@ pub fn unwind_gimli(
     let resolve_cfa = eval_cfa(cfa, registers)
         .ok_or(gimli::Error::TooManyRegisterRules)?;
 
+    macro_rules! reg_map(
+        ($reg_num:expr, $registers:expr, $rule:expr, $resolve_cfa:expr, [$($name:ident => $field:ident),*,]) => {
+            match *$reg_num {
+                $(gimli::X86_64::$name => if let Some(val) = eval_rule($rule, $resolve_cfa, $registers, gimli::X86_64::$name) {
+                    $registers.$field = val;
+                })*
+                _ => ()
+            }
+        };
+    );
+
     for (reg_num, rule) in table.registers() {
-        match *reg_num {
-            gimli::X86_64::RBP => if let Some(val) = eval_rule(rule, resolve_cfa, registers, gimli::X86_64::RBP) {
-                registers.rbp = val;
-            }
-            gimli::X86_64::RA => if let Some(val) = eval_rule(rule, resolve_cfa, registers, gimli::X86_64::RA) {
-                registers.rip = val;
-            }
-            _ => ()
-        }
+        reg_map!(reg_num, registers, rule, resolve_cfa, [
+            RBP => rbp,
+            RA => rip,
+            RSP => rsp,
+            RBX => rbx,
+            R12 => r12,
+            R13 => r13,
+            R14 => r14,
+            R15 => r15,
+        ]);
     }
     // the callers RSP is the CFA itself
     registers.rsp = resolve_cfa;
@@ -121,6 +219,22 @@ pub fn unwind_gimli(
         loc: (lookup_addr - start_addr) as usize,
     };
     Ok(entry)
+}
+
+pub fn unwind_gimli(
+    unwind_data: &[u8],
+    lookup_addr: u64,
+    registers: &mut Registers,
+    ctx: &mut UnwindContext<usize>
+) -> Result<BacktraceEntry, gimli::Error> {
+    let bases = gimli::BaseAddresses::default();
+    let eh_frame = gimli::EhFrame::new(unwind_data, NativeEndian);
+    let base_addr = eh_frame.fde_for_address(
+        &bases,
+        lookup_addr,
+        gimli::EhFrame::cie_from_offset,
+    )?;
+    unwind_frame(&bases, &eh_frame, &base_addr, lookup_addr, registers, ctx)
 }
 
 fn eval_cfa(cfa: &gimli::CfaRule<usize>, regs: &Registers) -> Option<u64> {

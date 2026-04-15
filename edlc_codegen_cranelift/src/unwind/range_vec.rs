@@ -81,30 +81,42 @@ impl<K, V> RangeVec<K, V> {
         }
     }
 
-    pub fn insert(&mut self, key: ops::Range<K>, value: V)
+    pub fn insert(&mut self, key: ops::Range<K>, value: V) -> bool
     where K: Eq + Ord + Sub<K, Output=K> + num::One + Copy + Debug {
         if key.start == key.end {
-            return;
+            return false;
         }
-        let idx = self.insert_key_index(&key.start)
-            .expect("key already exists");
+        let Some(idx) = self.insert_key_index(&key.start) else {
+            warn!("tried to insert key that already exists!");
+            warn!(" -- ranges in range vec --");
+            for i in (0..self.ranges.len()).step_by(2) {
+                let start = self.ranges[i];
+                let end = self.ranges[i + 1];
+                warn!("  - {start:?}..{end:?}");
+            }
+            warn!(" --");
+            warn!("insertion key: {:?}..{:?}", key.start, key.end);
+            return false;
+        };
         if idx < self.ranges.len() {
             if self.range_ordering(idx, &(key.end - K::one())) != Ordering::Less {
-                error!("source information overlap: {:?} >= {:?}", key.end - K::one(), &self.ranges[idx]);
-                error!(" -- ranges in range vec --");
+                warn!("source information overlap: {:?} >= {:?}", key.end - K::one(), &self.ranges[idx]);
+                warn!(" -- ranges in range vec --");
                 for i in (0..self.ranges.len()).step_by(2) {
                     let start = self.ranges[i];
                     let end = self.ranges[i + 1];
-                    error!("  - {start:?}..{end:?}");
+                    warn!("  - {start:?}..{end:?}");
                 }
-                error!(" --");
-                panic!("insertion key: {:?}..{:?}    colliding range: {:?}..{:?}",
+                warn!(" --");
+                warn!("insertion key: {:?}..{:?}    colliding range: {:?}..{:?}",
                     key.start, key.end, self.ranges[idx], self.ranges[idx + 1]);
+                return false;
             }
         }
         self.ranges.insert(idx, key.end);
         self.ranges.insert(idx, key.start);
         self.pool.insert(idx / 2, value);
+        true
     }
 
     pub fn get(&self, key: &K) -> Option<&V>

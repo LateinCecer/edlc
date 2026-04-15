@@ -17,10 +17,40 @@ use std::cell::RefCell;
 use std::mem;
 use gimli::UnwindContext;
 use log::error;
-use crate::compiler::eh_frames;
-use crate::unwind::cfi::{unwind_gimli, Registers};
-use crate::unwind::{PanicData, PanicPayload};
+use crate::compiler::{eh_frames, host_eh_frames};
+use crate::unwind::cfi::{unwind_gimli, unwind_host, Registers};
+use crate::unwind::{PanicData, PanicMessage, PanicPayload, RangeVec};
 use crate::unwind::signal_stack::sigalt_stack_init;
+
+#[macro_export]
+macro_rules! jit_panic(
+    ($msg:expr) => ({
+        PanicMessage::set(PanicMessage {
+            data: $msg.to_string(),
+        });
+        $crate::unwind::cause_jit_panic()
+    });
+    () => ({
+        $crate::unwind::cause_jit_panic()
+    });
+);
+
+pub use jit_panic;
+use crate::prelude::HostUnwindInfo;
+
+/// Causes a JIT panic.
+///
+/// # Safety
+///
+/// For this to be safe, this function must *only* be called at the very end of the execution path
+/// of a function that is yields directly to a JIT compiled function!
+#[inline]
+#[cfg(all(target_arch="x86_64", any(target_os="linux", target_os="macos")))]
+pub unsafe fn cause_jit_panic() -> ! {
+    core::arch::asm!("ud2"); // <-- execution will stop here
+    panic!() // <-- is never reached, just there to make the type checker happy
+}
+
 
 static mut PREV_SIGSEGV: libc::sigaction = unsafe { mem::zeroed() };
 static mut PREV_SIGBUS: libc::sigaction = unsafe { mem::zeroed() };
@@ -109,8 +139,9 @@ unsafe extern "C" fn trap_handler(
     let mut regs = Registers::load(context);
     let handled = PanicData::set(|data| {
         let eh_frames = eh_frames();
-        if let Ok(eh_frames) = eh_frames.read() {
-            if backtrace(eh_frames.slice(), &mut regs, data) {
+        let host_eh_frames = host_eh_frames();
+        if let (Ok(eh_frames), Ok(host_eh_frames)) = (eh_frames.read(), host_eh_frames.read()) {
+            if backtrace(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
                 // recover from the panic, continue after the JIT call in the host
                 regs.store(context);
                 true
@@ -135,9 +166,11 @@ unsafe extern "C" fn trap_handler(
     }
 }
 
-unsafe fn backtrace(unwind_data: &[u8], regs: &mut Registers, data: &mut PanicPayload) -> bool {
+unsafe fn backtrace(unwind_data: &[u8], host_frames: &RangeVec<usize, HostUnwindInfo>, regs: &mut Registers, data: &mut PanicPayload) -> bool {
     // TODO move this data to a global tls variable
-    let mut context = UnwindContext::<usize, >::new();
+    let mut context = UnwindContext::<usize>::new();
+    let mut jit_frame_c: u32 = 0;
+
     for frame_num in 0..16 {
         let current_ip = if frame_num == 0 {
             // the location of the trapping instruction.
@@ -151,16 +184,34 @@ unsafe fn backtrace(unwind_data: &[u8], regs: &mut Registers, data: &mut PanicPa
         };
         match unwind_gimli(unwind_data, current_ip, regs, &mut context) {
             Ok(entry) => {
+                jit_frame_c += 1;
                 data.backtrace.push(entry);
                 if regs.rip == 0 {
                     return false; // reached end of stack
                 }
             }
-            Err(gimli::Error::NoUnwindInfoForAddress) => {
+            Err(gimli::Error::NoUnwindInfoForAddress) if jit_frame_c != 0 => {
                 // transition to host code
                 data.reached_host = true;
                 return true;
             }
+            Err(gimli::Error::NoUnwindInfoForAddress) => {
+                // lookup addr in host info
+                error!("unpacking host frames");
+                match unwind_host(host_frames, current_ip, regs, &mut context) {
+                    Ok(entry) => {
+                        error!("found host frame!");
+                        data.backtrace.push(entry);
+                        if regs.rip == 0 {
+                            return false; // reached end of stack
+                        }
+                    }
+                    Err(err) => {
+                        error!("error finding host frame: {err}");
+                        return false;
+                    }
+                }
+            },
             Err(_err) => {
                 // some other error.
                 // we can do nothing about this from this position.

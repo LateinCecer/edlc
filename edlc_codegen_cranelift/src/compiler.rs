@@ -54,7 +54,8 @@ use crate::compiler::code::{JITCode};
 use crate::error::{JITError, JITErrorType};
 
 pub use unwind_info::eh_frames;
-pub(crate) use crate::compiler::unwind_info::UnwindInfo;
+pub use unwind_info::host_eh_frames;
+pub(crate) use crate::compiler::unwind_info::{UnwindInfo, HostUnwindInfo};
 
 #[derive(Default)]
 struct NativeFunctionLookup {

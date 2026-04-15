@@ -34,7 +34,7 @@ use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
-pub use unix::TrapHandler;
+pub use unix::{TrapHandler, jit_panic, cause_jit_panic};
 pub use range_vec::{RangeVec, RangeVecIter};
 use crate::compiler::{UnwindInfo, JIT};
 

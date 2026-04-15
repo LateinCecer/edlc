@@ -18,8 +18,9 @@ use cranelift_jit::JITModule;
 use cranelift_module::FuncId;
 use edlc_core::prelude::mir_funcs::MirFuncId;
 use gimli::write::{Address, CommonInformationEntry, EhFrame, EndianVec, FrameTable};
-use gimli::{Encoding, Format, NativeEndian};
+use gimli::{Encoding, Format, NativeEndian, Section};
 use std::collections::BTreeMap;
+use std::ops;
 use std::sync::{LazyLock, RwLock};
 use cranelift_codegen::ir::TrapCode;
 use log::warn;
@@ -49,6 +50,71 @@ pub fn eh_frames() -> &'static RwLock<EndianVec<NativeEndian>> {
     &*EH_FRAMES
 }
 
+#[derive(Debug)]
+pub(crate) struct HostUnwindInfo {
+    pub(crate) base_addr: usize,
+    pub(crate) eh_frame_ptr: usize,
+    pub(crate) eh_frame_len: usize,
+    pub(crate) range: ops::Range<usize>,
+}
+
+static HOST_UNWIND_REG: LazyLock<RwLock<RangeVec<usize, HostUnwindInfo>>> = LazyLock::new(|| {
+    RwLock::new(RangeVec::new())
+});
+
+pub fn host_eh_frames() -> &'static RwLock<RangeVec<usize, HostUnwindInfo>> {
+    &*HOST_UNWIND_REG
+}
+
+unsafe extern "C" fn phdr_callback(
+    info: *mut libc::dl_phdr_info,
+    _size: libc::size_t,
+    _data: *mut std::ffi::c_void,
+) -> i32 {
+    let info = &*info;
+    let mut min_vaddr = usize::MAX;
+    let mut max_vaddr = 0;
+    let mut eh_frame_data = None;
+
+    for i in 0..info.dlpi_phnum {
+        let phdr = *info.dlpi_phdr.add(i as usize);
+
+        if phdr.p_type == libc::PT_LOAD && (phdr.p_flags & libc::PF_X) != 0 {
+            let start = info.dlpi_addr as usize + phdr.p_vaddr as usize;
+            let end = start + phdr.p_memsz as usize;
+            min_vaddr = usize::min(min_vaddr, start);
+            max_vaddr = usize::max(max_vaddr, end);
+        }
+
+        if phdr.p_type == libc::PT_GNU_EH_FRAME {
+            let eh_frame_addr = info.dlpi_addr + phdr.p_vaddr;
+            eh_frame_data = Some((
+                eh_frame_addr as *const u8,
+                phdr.p_memsz as usize,
+            ));
+        }
+    }
+
+    if let Some((ptr, len)) = eh_frame_data {
+        if min_vaddr < max_vaddr {
+            let mut frames = host_eh_frames().write().unwrap();
+            frames.insert(min_vaddr..max_vaddr, HostUnwindInfo {
+                base_addr: info.dlpi_addr as usize,
+                eh_frame_ptr: ptr as usize,
+                eh_frame_len: len,
+                range: min_vaddr..max_vaddr,
+            });
+        }
+    }
+    0
+}
+
+fn init_host_unwind_info() {
+    unsafe {
+        libc::dl_iterate_phdr(Some(phdr_callback), std::ptr::null_mut());
+    }
+}
+
 pub(crate) struct FunctionInfo {
     pub unwind_info: CfaUnwindInfo,
     pub id: MirFuncId,
@@ -72,6 +138,7 @@ impl SourceDebugFrame {
         debug_info: DebugInformation,
     ) -> Self {
         let (src_info, trap_info) = debug_info.deconstruct();
+        init_host_unwind_info();
         SourceDebugFrame {
             source_mapping,
             trap_mapping,
