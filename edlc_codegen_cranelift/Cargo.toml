@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
+[features]
+serde = ["dep:serde"]
+
 [dependencies]
 edlc_core = { path="../edlc_core", version="0.1.1", features=[] }
 edlc_layout = { path="../edlc_layout", version="0.1.1" }
@@ -23,6 +26,7 @@ cranelift-native = { version="0.130.0", features=[] }
 anyhow = "1.0.99"
 regex = "1.12.3"
 num = "0.4.3"
+serde = { version="1.0.228", features=["derive"], optional = true }
 
 libc = "1.0.0-alpha.3"
 rustix = { version="1.1.4", features=["mm"] }

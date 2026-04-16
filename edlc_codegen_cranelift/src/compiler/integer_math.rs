@@ -23,8 +23,11 @@ use cranelift_codegen::ir::{InstBuilder};
 use cranelift_codegen::ir::condcodes::IntCC;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::inline_code;
 use crate::codegen::{FunctionTranslator, IntoValue, short_vec, ShortVec};
 use crate::compiler::JIT;
+use crate::jit_func;
+use crate::executor::CraneliftJIT;
 
 
 
@@ -507,6 +510,28 @@ impl $T:ident {
 );
 pub (crate) use impl_binop;
 
+macro_rules! impl_special_funcs(
+    ($($func:ident<$T:ident>)+) => ($(
+impl<Runtime: 'static> CraneliftJIT<Runtime> {
+    pub fn $func(&mut self) -> Result<(), CompilerError> {
+        let fs = self.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!(stringify!($T)),
+            [
+                inline_code!(&format!("?comptime fn pow(val: {t}, pow: u32) -> {t}", t=stringify!($T))),
+            ],
+            None,
+        )?;
+        jit_func!(for (stringify!($T)) impl self, fn(fs[0]),
+            const fn pow<>(val: $T, pow: u32) -> $T where; {
+                $T::pow(val, pow)
+            }
+        );
+        Ok(())
+    }
+}
+    )*);
+);
 
 macro_rules! impl_uint_math(
     ($($func:ident<$T:ident>)+) => ($(
@@ -800,4 +825,18 @@ impl_sint_math!(
     load_i32_math<i32>
     load_i64_math<i64>
     load_i128_math<i128>
+);
+impl_special_funcs!(
+    load_u8_special<u8>
+    load_u16_special<u16>
+    load_u32_special<u32>
+    load_u64_special<u64>
+    load_u128_special<u128>
+    load_usize_special<usize>
+    load_i8_special<i8>
+    load_i16_special<i16>
+    load_i32_special<i32>
+    load_i64_special<i64>
+    load_i128_special<i128>
+    load_isize_special<isize>
 );

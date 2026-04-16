@@ -17,7 +17,7 @@ use std::ops::Add;
 use gimli::{EhFrameOffset, EndianSlice, Endianity, NativeEndian, Register, Section, UnwindContext, UnwindSection};
 use log::error;
 use crate::prelude::HostUnwindInfo;
-use crate::unwind::{BacktraceEntry, RangeVec};
+use crate::unwind::{BacktraceEntry, BacktraceFlags, RangeVec};
 
 #[derive(Default)]
 #[cfg(target_arch="x86_64")]
@@ -291,7 +291,8 @@ fn unwind_frame(
     let start_addr = base_addr.initial_address();
     let entry = BacktraceEntry {
         func: start_addr as usize,
-        loc: (lookup_addr - start_addr) as usize,
+        loc: (lookup_addr - start_addr) as u32,
+        flags: BacktraceFlags::default(),
     };
     Ok(entry)
 }

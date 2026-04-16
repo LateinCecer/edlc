@@ -47,6 +47,7 @@ use cranelift_codegen::ir::UserFuncName;
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use log::{debug, info};
+use edlc_core::inline_code;
 use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue, ShortVec, CodeCtx, FunctionRetKind};
 use crate::layout::SSARepr;
 use crate::codegen::variable::{AggregateValue, PtrValue};
@@ -57,6 +58,7 @@ pub use unwind_info::eh_frames;
 pub use unwind_info::host_eh_frames;
 pub use unwind_info::unwind_ctx;
 pub(crate) use crate::compiler::unwind_info::{UnwindInfo, HostUnwindInfo};
+use crate::unwind::{PanicData, PanicError, TrapHandler};
 
 #[derive(Default)]
 struct NativeFunctionLookup {

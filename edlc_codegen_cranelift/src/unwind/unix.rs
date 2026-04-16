@@ -24,6 +24,12 @@ use crate::unwind::signal_stack::sigalt_stack_init;
 
 #[macro_export]
 macro_rules! jit_panic(
+    ($pattern:literal $(,$arg:expr)*) => (
+        PanicMessage::set(PanicMessage {
+            data: format!($pattern $(,$arg)*),
+        });
+        $crate::unwind::jit_sync_panic()
+    );
     ($msg:expr) => ({
         PanicMessage::set(PanicMessage {
             data: $msg.to_string(),
@@ -173,6 +179,8 @@ unsafe extern "C" fn trap_handler(
 /// The stack is gracefully unwound to the last point where a JIT frame was entered.
 /// In comparison to an asynchronous jit panic, this does not require invoking a kernel signal.
 /// For expected panics, this method should be prefered over asynchronous panics.
+#[inline(never)]
+#[no_mangle]
 pub fn jit_sync_panic() -> ! {
     let mut regs = Registers::steal();
     let handled = PanicData::set(|data| {
@@ -238,8 +246,9 @@ unsafe fn backtrace(
             regs.rip - 1
         };
         match unwind_gimli(unwind_data, current_ip, regs, context) {
-            Ok(entry) => {
+            Ok(mut entry) => {
                 jit_frame_c += 1;
+                entry.flags = entry.flags.set_jit_frame();
                 data.backtrace.push(entry);
                 if regs.rip == 0 {
                     return false; // reached end of stack

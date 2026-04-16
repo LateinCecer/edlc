@@ -15,6 +15,7 @@
  */
 
 pub mod macros;
+mod test_setup;
 
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -47,8 +48,9 @@ use crate::codegen::ItemCodegen;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
 use crate::error::{JITError, JITErrorType};
+pub use crate::executor::test_setup::{TestReport, FnReport};
 use crate::prelude::{Program, JIT};
-
+use crate::unwind::{PanicData, PanicError, TrapHandler};
 
 pub trait FunctionContainer<F> {
     fn get_function(
@@ -64,8 +66,27 @@ pub trait FunctionContainer<F> {
     ) -> Result<F, anyhow::Error>;
 }
 
+pub trait CatchUnwind<F, A, R> {
+    fn catch_unwind(&self, func: F, args: A) -> Result<R, PanicError>;
+}
+
 macro_rules! impl_function_container(
-    (fn($($P:ident),*) -> $R:ident) => (
+    (fn($($p:ident: $P:ident),*) -> $R:ident) => (
+impl<$($P,)* $R, Runtime: 'static> CatchUnwind<extern "C" fn($($P),*) -> $R, ($($P,)*), $R> for CraneliftJIT<Runtime>
+where
+    $($P: MirLayout,)*
+    $R: MirLayout,
+{
+    fn catch_unwind(&self, func: extern "C" fn($($P),*) -> $R, ($($p,)*): ($($P,)*)) -> Result<$R, PanicError> {
+        let val = {
+            let _handler = unsafe { TrapHandler::new() };
+            func($($p,)*)
+            // _handler goes out of scope here and the normal trap handler should take over
+        };
+        PanicData::fetch(&self.backend, &self.compiler.phase).map(|_| val)
+    }
+}
+
 impl<$($P,)* $R, Runtime: 'static> FunctionContainer<extern "C" fn($($P),*) -> $R> for CraneliftJIT<Runtime>
 where
     $($P: MirLayout,)*
@@ -135,12 +156,12 @@ pub trait JITBencher {
 }
 
 impl_function_container!(fn() -> R);
-impl_function_container!(fn(A) -> R);
-impl_function_container!(fn(A, B) -> R);
-impl_function_container!(fn(A, B, C) -> R);
-impl_function_container!(fn(A, B, C, D) -> R);
-impl_function_container!(fn(A, B, C, D, E) -> R);
-impl_function_container!(fn(A, B, C, D, E, F) -> R);
+impl_function_container!(fn(a: A) -> R);
+impl_function_container!(fn(a: A, b: B) -> R);
+impl_function_container!(fn(a: A, b: B, c: C) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D, e: E) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D, e: E, f: F) -> R);
 
 
 pub struct CraneliftJIT<Runtime: 'static> {
@@ -178,6 +199,20 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         self.backend.load_i32_math(&mut self.compiler)?;
         self.backend.load_i64_math(&mut self.compiler)?;
         self.backend.load_i128_math(&mut self.compiler)?;
+
+        self.load_u8_special()?;
+        self.load_u16_special()?;
+        self.load_u32_special()?;
+        self.load_u64_special()?;
+        self.load_u128_special()?;
+        self.load_usize_special()?;
+
+        self.load_i8_special()?;
+        self.load_i16_special()?;
+        self.load_i32_special()?;
+        self.load_i64_special()?;
+        self.load_i128_special()?;
+        self.load_isize_special()?;
 
         self.backend.load_f32_math(&mut self.compiler)?;
         self.backend.load_f64_math(&mut self.compiler)?;
@@ -611,21 +646,40 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         is_lib: bool,
         test_name: &Regex,
         path: Option<&QualifierName>,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<TestReport, anyhow::Error> {
         let module = if is_lib {
             self.load_lib(name, supplier)?
         } else {
             self.load_bin(name, supplier)?
         };
         self.prepare_module(&module)?;
-        for (id, test, setup, teardown) in self
+
+        let mut report = TestReport::default();
+        'outer: for (id, test, setup, teardown) in self
             .get_test_cases(test_name, &module, path, "test")? {
 
-            setup.into_iter().for_each(|f| f());
-            test();
-            teardown.into_iter().for_each(|f| f());
+            for setup_fn in setup.into_iter() {
+                if let Err(err) = self.catch_unwind(setup_fn, ()) {
+                    report.insert(id, FnReport::SetupErr(err));
+                    continue 'outer;
+                }
+            }
+            match self.catch_unwind(test, ()) {
+                Ok(()) => (),
+                Err(err) => {
+                    report.insert(id, FnReport::Err(err));
+                    continue 'outer;
+                },
+            }
+            for teardown_fn in teardown.into_iter() {
+                if let Err(err) = self.catch_unwind(teardown_fn, ()) {
+                    report.insert(id, FnReport::TeardownError(err));
+                    continue 'outer;
+                }
+            }
+            report.insert(id, FnReport::Ok);
         }
-        Ok(())
+        Ok(report)
     }
 
     pub fn run_bench<Src: SrcSupplier>(
@@ -636,13 +690,15 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         test_name: &Regex,
         path: Option<&QualifierName>,
         bencher: &mut impl JITBencher,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<TestReport, anyhow::Error> {
         let module = if is_lib {
             self.load_lib(name, supplier)?
         } else {
             self.load_bin(name, supplier)?
         };
         self.prepare_module(&module)?;
+
+        let mut report = TestReport::default();
         for (id, bench, setup, teardown) in self
             .get_test_cases(test_name, &module, path, "bench")? {
 
@@ -650,16 +706,38 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 .as_ref()
                 .unwrap();
             let n = bencher.start_bench(full_name);
-            for _ in 0..n {
-                setup.iter().for_each(|f| f());
+            let mut ok = true;
+            'outer: for _ in 0..n {
+                for setup_fn in setup.iter() {
+                    if let Err(err) = self.catch_unwind(*setup_fn, ()) {
+                        report.insert(id, FnReport::SetupErr(err));
+                        ok = false;
+                        break 'outer;
+                    }
+                }
                 bencher.start_round();
-                bench();
+                let res = self.catch_unwind(bench, ());
                 bencher.stop_round();
-                teardown.iter().for_each(|f| f());
+                if let Err(err) = res {
+                    report.insert(id, FnReport::Err(err));
+                    ok = false;
+                    break 'outer;
+                }
+
+                for teardown_fn in teardown.iter() {
+                    if let Err(err) = self.catch_unwind(*teardown_fn, ()) {
+                        report.insert(id, FnReport::TeardownError(err));
+                        ok = false;
+                        break 'outer;
+                    }
+                }
+            }
+            if ok {
+                report.insert(id, FnReport::Ok);
             }
             bencher.end_bench();
         }
-        Ok(())
+        Ok(report)
     }
 
     fn get_test_cases(
@@ -926,7 +1004,7 @@ mod test {
     use edlc_core::prelude::mir_expr::Context;
     use edlc_core::resolver::QualifierName;
     use crate::compiler::{TypedProgram};
-    use crate::executor::{CraneliftJIT, FunctionContainer, JITBencher};
+    use crate::executor::{CatchUnwind, CraneliftJIT, FunctionContainer, JITBencher};
     use crate::{jit_func, jit_panic, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
@@ -1395,7 +1473,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                panic!("{}", msg);
+                jit_panic!("{}", msg);
             }
         );
 
@@ -1403,34 +1481,14 @@ fn test() -> i32 {
             "test_lib",
             &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
         )?;
-        compiler.run_test(
+        let rep = compiler.run_test(
             "test_bin",
             &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
             false,
             &Regex::new(r".*").unwrap(),
             None,
         )?;
-
-        // execute a more complex script that uses parts of the original program for execution
-        // let script: TypedProgram<f32, _> = compiler.compile_expr(
-        //     &vec!["test_bin"].into(), inline_code!(r#"{
-        //         let x: f32 = foo::pi;
-        //
-        //         let vec = SVector::new(1.0_f32, 2.0);
-        //         vec.print();
-        //         std::io::print("\n");
-        //
-        //         std::io::print(comptime { f32::cos(x) });
-        //         std::io::print("\n");
-        //         foo::pi.sin()
-        //     }"#),
-        // )?;
-        //
-        // println!();
-        // println!(" ## executing script: ");
-        // println!();
-        // let x = script.exec(&mut compiler.backend)?;
-        // println!("script result: {x}");
+        rep.print(&compiler.compiler.phase.types, &compiler.compiler.phase.vars);
         Ok(())
     }
 
@@ -1478,6 +1536,11 @@ fn test() -> i32 {
                 print!("{msg}");
             }
         );
+        jit_func!((&mut compiler), fn<"u64";>(print_fs),
+            fn print_u64<>(msg: u64) -> () where; {
+                print!("{msg}");
+            }
+        );
         jit_func!((&mut compiler), fn<"i32";>(print_fs),
             fn print_i32<>(msg: i32) -> () where; {
                 print!("{msg}");
@@ -1499,7 +1562,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                panic!("{}", msg);
+                jit_panic!("{}", msg);
             }
         );
 
@@ -1547,7 +1610,7 @@ fn test() -> i32 {
             current_sum: 0,
             averages: HashMap::new(),
         };
-        compiler.run_bench(
+        let rep = compiler.run_bench(
             "test_bin",
             &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
             false,
@@ -1556,31 +1619,11 @@ fn test() -> i32 {
             &mut bencher,
         )?;
 
+        rep.print(&compiler.compiler.phase.types, &compiler.compiler.phase.vars);
         println!("benchmarking result:");
         for (func, mu) in bencher.averages.iter() {
             println!(" - {func}: {mu} µs");
         }
-
-        // execute a more complex script that uses parts of the original program for execution
-        // let script: TypedProgram<f32, _> = compiler.compile_expr(
-        //     &vec!["test_bin"].into(), inline_code!(r#"{
-        //         let x: f32 = foo::pi;
-        //
-        //         let vec = SVector::new(1.0_f32, 2.0);
-        //         vec.print();
-        //         std::io::print("\n");
-        //
-        //         std::io::print(comptime { f32::cos(x) });
-        //         std::io::print("\n");
-        //         foo::pi.sin()
-        //     }"#),
-        // )?;
-        //
-        // println!();
-        // println!(" ## executing script: ");
-        // println!();
-        // let x = script.exec(&mut compiler.backend)?;
-        // println!("script result: {x}");
         Ok(())
     }
 
@@ -1645,6 +1688,11 @@ fn test() -> i32 {
                 print!("{msg}");
             }
         );
+        jit_func!((&mut compiler), fn<"u64";>(print_fs),
+            fn print_u64<>(msg: u64) -> () where; {
+                print!("{msg}");
+            }
+        );
         jit_func!((&mut compiler), fn<"i32";>(print_fs),
             fn print_i32<>(msg: i32) -> () where; {
                 print!("{msg}");
@@ -1689,21 +1737,10 @@ fn test_other() {
         "#))?;
 
         let prog: extern "C" fn(usize) = compiler.get_named_function(inline_code!("test"))?;
-        {
-            let i = 0;
-            let _handler = unsafe { TrapHandler::new() };
-            prog(i);
-            // _handler goes out of scope here and the normal trap handler should take over
-        }
-        assert!(PanicData::fetch(&compiler.backend, &compiler.compiler.phase).is_err());
+        assert!(compiler.catch_unwind(prog, (0,)).is_err());
 
         let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test_other"))?;
-        {
-            let _handler = unsafe { TrapHandler::new() };
-            prog();
-            // _handler goes out of scope here and the normal trap handler should take over
-        }
-        match PanicData::fetch(&compiler.backend, &compiler.compiler.phase) {
+        match compiler.catch_unwind(prog, ()) {
             Ok(_) => panic!("that method should have paniced!"),
             Err(err) => {
                 assert_eq!(err.msg.as_ref(), Some(&"this is an error message".to_string()));
