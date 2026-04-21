@@ -10,6 +10,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::mem;
 use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Rem, Sub};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -21,11 +22,14 @@ use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, IntrinsicExecutionError, StaticData};
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
+use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirLayout, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
+use edlc_core::prelude::ast_type_def::LayoutOptions;
+use edlc_core::prelude::edl_type::EdlRepresentation;
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph, SourceObject};
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_str::FatPtr;
+use edlc_core::prelude::mir_type::layout::{Layout, OffsetStructLayoutBuilder};
 use edlc_core::prelude::mir_type::MirTypeRegistry;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::translation::HirTranslationError;
@@ -1243,6 +1247,274 @@ impl Data<i32> {
 
         let data = Data { data: 32_i32 };
         data.print();
+    }
+    "#))?;
+    Ok(())
+}
+
+#[test]
+fn test_auto() -> Result<(), anyhow::Error> {
+    let mut comp = TestCompiler::new();
+    comp.init()?;
+
+    comp.compiler.prepare_module(&vec!["std"].into())?;
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
+    extern "C" fn input_binding() -> i32 {
+        10
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<f32>"), None,
+    )?;
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_f32",
+        )?;
+    extern "C" fn print_f32(val: f32) {
+        print!("{val}");
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_f32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    comp.compiler.define_type(inline_code!(r#"
+    type Rc<T> = struct;
+    "#), LayoutOptions {
+        can_init: false,
+        repr: EdlRepresentation::Rust,
+    })?;
+
+    #[derive(Debug)]
+    struct MockRc<T> {
+        counter: usize,
+        data: T,
+    }
+
+    impl<T: MirLayout + 'static> MirLayout for MockRc<T> {
+        fn layout(types: &MirTypeRegistry) -> Layout {
+            let mut builder = OffsetStructLayoutBuilder::default();
+            builder.add_type::<usize>("counter".to_string(), types, std::mem::offset_of!(Self, counter));
+            builder.add_type::<T>("data".to_string(), types, std::mem::offset_of!(Self, data));
+            builder.make::<Self>(types)
+        }
+    }
+
+    comp.compiler.insert_type_instance::<MockRc<f32>>(inline_code!("std::Rc<f32>"))?;
+
+    let [new_rc] = comp.compiler.parse_impl(
+        inline_code!("<T>"),
+        inline_code!("std::Rc<T>"),
+        [
+            inline_code!("fn new(val: T) -> std::Rc<T>")
+        ],
+        None,
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        new_rc,
+        inline_code!("<>"),
+        Some(inline_code!("std::Rc<f32>")),
+    )?;
+    let mir_id = comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "rc_new",
+        )?;
+    extern "C" fn new_rc__(val: f32) -> MockRc<f32> {
+        MockRc {
+            data: val,
+            counter: 0,
+        }
+    }
+    comp.backend.intrinsics.insert(mir_id, FunctionBinding::from_function(new_rc__ as extern "C" fn(f32) -> MockRc<f32>));
+
+    let [copy_rc] = comp.compiler.parse_impl(
+        inline_code!("<T>"),
+        inline_code!("Rc<T>"),
+        [
+            inline_code!("fn copy(val: &Rc<T>) -> Rc<T>")
+        ],
+        Some((inline_code!("core::Copy"), inline_code!("<Rc<T>>"))),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        copy_rc,
+        inline_code!("<>"),
+        Some(inline_code!("std::Rc<f32>")),
+    )?;
+    let mir_id = comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "rc_copy",
+        )?;
+    extern "C" fn copy_rc__(rc: *const MockRc<f32>) -> MockRc<f32> {
+        let rc = unsafe { &*rc };
+        let mut out = MockRc {
+            counter: rc.counter + 1,
+            data: rc.data.clone(),
+        };
+        println!("copied: Rc {{ counter: {} }}", out.counter);
+        out
+    }
+    comp.backend.intrinsics.insert(mir_id, FunctionBinding::from_function(copy_rc__ as extern "C" fn(*const MockRc<f32>) -> MockRc<f32>));
+
+    let [drop_rc] = comp.compiler.parse_impl(
+        inline_code!("<T>"),
+        inline_code!("Rc<T>"),
+        [
+            inline_code!("fn drop(val: Rc<T>)")
+        ],
+        Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        drop_rc,
+        inline_code!("<>"),
+        Some(inline_code!("std::Rc<f32>")),
+    )?;
+    let mir_id = comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "rc_drop",
+        )?;
+    extern "C" fn drop_rc__(rc: MockRc<f32>) {
+        println!("dropping RC: {rc:?}");
+        mem::drop(rc);
+    }
+    comp.backend.intrinsics.insert(mir_id, FunctionBinding::from_function(drop_rc__ as extern "C" fn(MockRc<f32>)));
+
+
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+type Data<T> = struct {
+    data: T,
+};
+
+impl<T> Data<T> {
+    fn get_value(self: Self) -> T {
+        self.data
+    }
+}
+
+impl Data<f32> {
+    fn print(self: Self) {
+        std::print("Data: ");
+        std::print(self.data);
+        std::print("\n");
+    }
+}
+
+impl Data<i32> {
+    fn print(self: Self) {
+        std::print("Data i32: ");
+        std::print(self.data);
+        std::print("\n");
+    }
+}
+
+fn foo(rc: std::Rc<f32>) {
+    std::print("hello from foo!\n");
+}
+    "#))?;
+    comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
+    {
+        let rc: std::Rc<f32> = std::Rc::new(3.1415);
+        foo(rc);
+        std::print("hello, world!\n");
+        foo(rc);
     }
     "#))?;
     Ok(())

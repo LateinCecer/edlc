@@ -16,7 +16,8 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use crate::core::edl_type::EdlTypeRegistry;
+use std::any::Any;
+use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
@@ -35,6 +36,7 @@ use crate::mir::mir_expr::{BlockCall, BlockLocalStatementUid, BlockParameterInde
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
+use crate::core::edl_value::EdlConstValue;
 use crate::hir::HirPhase;
 use crate::hir::translation::HirTranslationError;
 use crate::mir::mir_backend::{Backend, CodeGen};
@@ -624,7 +626,19 @@ impl MirFlowGraph {
                                 src: block.src.clone(),
                                 scope_id: block.scope,
                             }
-                        )?;
+                        )?.map(|func| {
+                            let ty = mir_phase.types
+                                .get_edl_type(ty)
+                                .unwrap();
+                            let ty = hir_phase.types.new_ref(
+                                EdlMaybeType::Fixed(ty),
+                                Some(EdlConstValue::from_bool(false))
+                            ).unwrap();
+                            let ty = mir_phase.types
+                                .mir_id(&ty, &hir_phase.types)
+                                .unwrap();
+                            (func, ty)
+                        });
                     }
                     Statement::Drop { value, debug, implementation, .. } => {
                         let ty = self.temp_vars[value.0].ty;

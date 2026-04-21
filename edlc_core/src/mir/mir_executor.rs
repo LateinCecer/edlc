@@ -35,9 +35,9 @@ pub struct AmorphusDataMut<'a> {
 }
 
 impl<'a> AmorphusDataMut<'a> {
-    pub fn memcpy(&mut self, dst: &AmorphusData<'_>) {
-        assert_eq!(self.ty, dst.ty);
-        self.data.copy_from_slice(dst.data);
+    pub fn memcpy(&mut self, src: &AmorphusData<'_>) {
+        assert_eq!(self.ty, src.ty);
+        self.data.copy_from_slice(src.data);
     }
 
     /// Reads the contents of the src pointer into the contents of this amorphus data slice.

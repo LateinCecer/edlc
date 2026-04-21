@@ -31,7 +31,7 @@ use crate::mir::mir_expr::lifetime_analysis::{LifetimeAnalysis, LifetimeSpan};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
-use crate::mir::mir_expr::mir_call::MirCall;
+use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::ssa_value::SsaCache;
@@ -393,7 +393,7 @@ pub enum Statement {
         value: MirValue,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
-        implementation: Option<MirFuncId>,
+        implementation: Option<(MirFuncId, MirTypeId)>,
     },
     Drop {
         value: MirValue,
@@ -510,7 +510,7 @@ impl Statement {
     fn execute(
         &self,
         vm: &mut ExecutorVM,
-        expr: &MirExprContainer,
+        cfg: &MirFlowGraph,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
@@ -523,9 +523,21 @@ impl Statement {
                 vm.memcpy(&dst, &src);
                 Ok(())
             }
-            Self::VarCopy { var, value, uid: _, debug: _, implementation } => {
-                if let Some(im) = implementation.as_ref() {
-                    todo!()
+            Self::VarCopy { var, value, uid, debug: _, implementation } => {
+                if let Some((im, param_ty)) = implementation.as_ref() {
+                    MirCall::exec_copy_impl(
+                        *im,
+                        value,
+                        *param_ty,
+                        vm,
+                        stack_frame,
+                        var,
+                        reg,
+                        backend,
+                        &MirLoc::GraphLoc(MirGraphLoc::new(
+                            *block_ref, *uid,
+                        ))
+                    )
                 } else {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
@@ -534,12 +546,28 @@ impl Statement {
                 }
             },
             Self::VarDef { var, value, uid, debug: _ } => {
-                expr.execute(vm,  stack_frame, *value, var, reg, backend, &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)))
+                cfg.expressions
+                    .execute(
+                        vm,
+                        stack_frame,
+                        *value,
+                        var,
+                        reg,
+                        backend,
+                        &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                    )
             }
-            Self::Drop { value, uid: _, debug: _, implementation } => {
-                debug!("dropping value {value:?}");
+            Self::Drop { value, uid, debug: _, implementation } => {
                 if let Some(im) = implementation.as_ref() {
-                    todo!()
+                    MirCall::drop_impl(*im, *value, CallContext::Runtime, reg)
+                        .execute(
+                            vm,
+                            stack_frame,
+                            None,
+                            reg,
+                            backend,
+                            &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                        )
                 } else {
                     Ok(())
                 }
@@ -1452,14 +1480,14 @@ impl Block {
     fn execute(
         &self,
         vm: &mut ExecutorVM,
-        expr: &MirExprContainer,
+        cfg: &MirFlowGraph,
         stack_frame: &StackFrameLayout,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
         block_ref: &MirBlockRef,
     ) -> Result<(), ExecutionError> {
         for statement in self.statements.iter() {
-            statement.execute(vm, expr, stack_frame, reg, backend, block_ref)?;
+            statement.execute(vm, cfg, stack_frame, reg, backend, block_ref)?;
         }
         Ok(())
     }
@@ -1803,7 +1831,7 @@ impl MirFlowGraph {
     ) -> Result<AmorphusDataCopy, ExecutionError> {
         let mut current_block = self.root();
         'outer: loop {
-            self.blocks[current_block.0].execute(vm, &self.expressions, stack_frame, reg, backend, &current_block)?;
+            self.blocks[current_block.0].execute(vm, self, stack_frame, reg, backend, &current_block)?;
             // jump to other block using sealing statement
             match &self.blocks[current_block.0].seal {
                 Seal::Return(value, _) => {

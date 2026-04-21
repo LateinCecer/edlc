@@ -94,21 +94,70 @@ impl MirCall {
         }
     }
 
-    pub fn copy_impl(
+    pub fn exec_copy_impl(
         func: MirFuncId,
-        value: MirValue,
-        context: CallContext,
-        ty: MirTypeId,
-    ) -> Self {
-        Self {
-            id: None,
-            ret: ty,
-            func,
-            args: vec![value],
-            context,
-            comptime_args: vec![],
-            is_recursive: false,
-        }
+        value: &MirValue,
+        value_ref_ty: MirTypeId,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+        loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
+        let (par_range, ty) = stack_frame.get_offset(value, vm).unwrap();
+        let data = vm.get_ptr(par_range);
+        let param = AmorphusDataCopy::new(value_ref_ty, reg, data)
+            .expect("failed to generate data from reference in copy call");
+
+        let ret_value = if backend.is_call_intrinsic(&func) {
+            let mut ret_value = AmorphusDataCopy::uninit(ty, reg).unwrap();
+            let mut params = vec![];
+            let res = if let Some(runtime) = backend.intrinsic_runtime(&func) {
+                let runtime_ptr = backend.runtime(runtime).unwrap();
+                let runtime_ptr = AmorphusDataCopy::new(reg.usize(), reg, runtime_ptr.as_ptr()).unwrap();
+                params.push(runtime_ptr.as_data());
+                params.push(param.as_data());
+                backend.call_intrinsic(&func, params.as_slice(), ret_value.as_data_mut(), reg)
+            } else {
+                let params = vec![param.as_data()];
+                backend.call_intrinsic(&func, params.as_slice(), ret_value.as_data_mut(), reg)
+            };
+
+            match res {
+                Err(IntrinsicExecutionError::TypeError(t)) => {
+                    panic!("encountered type safety error in intrinsic function execution! {t:#?}");
+                },
+                Err(IntrinsicExecutionError::Panic) => {
+                    let mut trace = VmStackTrace::default();
+                    trace.push(loc.clone());
+                    Err(ExecutionError {
+                        error_type: TrapInfo::Other("host code"),
+                        value: None,
+                        trace,
+                    })
+                },
+                Ok(_) => Ok(ret_value),
+            }
+        } else {
+            let func_reg = backend.func_reg();
+            let Some(inline_body) = func_reg.get_inline_body(func).unwrap() else {
+                panic!("function body not found for function {:?}", func);
+            };
+            let params = vec![param.as_data()];
+            match inline_body.execute_in_vm_copies(params.as_slice(), vm, reg, backend) {
+                Ok(s) => Ok(s),
+                Err(mut err) => {
+                    err.trace.push(loc.clone());
+                    Err(err)
+                },
+            }
+        }?;
+
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        let [mut target] = vm.get_data_mut([target_range.clone()], &[target_ty]);
+        target.memcpy(&ret_value.as_data());
+        Ok(())
     }
 
     pub fn record_impl(

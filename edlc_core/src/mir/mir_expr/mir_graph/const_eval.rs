@@ -1733,7 +1733,7 @@ impl Statement {
                 // }
             }
             // for now, just don't look at these during const eval
-            Self::Drop { value: _, uid: _, debug: _, implementation, .. } => {
+            Self::Drop { value, uid: _, debug: _, implementation, .. } => {
                 // TODO: implement correct dropping behavior.
                 // On dropping values during const folding:
                 // If a value is not available during const folding in the first place, we don't
@@ -1755,8 +1755,12 @@ impl Statement {
                 // when we remove it from the compile-constant list.
                 // Additionally, we need to make sure that the value is cleaned up after the program
                 // has run by adding its drop implementation to the global cleanup routine.
-                if let Some(im) = implementation.as_ref() {
-                    todo!()
+                if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
+                    if let Some(_im) = implementation.as_ref() {
+                        todo!("compile-time constants can currently not have a drop implementation")
+                    } else {
+                        Ok(false)
+                    }
                 } else {
                     Ok(false)
                 }

@@ -44,7 +44,7 @@ use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{InferProvider, InferState};
 use crate::mir::mir_expr::mir_call::MirCall;
-use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
 use crate::prelude::edl_type::EdlMaybeType;
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
@@ -1324,6 +1324,65 @@ impl MirFn {
             let param_dst = stack_frame_layout
                 .get_offset(&root_parameters[index], vm).unwrap();
             vm.memcpy(&param_dst, param_src);
+        }
+        assert_eq!(root_parameters.len(), params.len(), "not enough parameters");
+        // get comptime parameters
+        // NOTE: for hybrid functions the new optimization pipeline compiles the input parameters
+        //       directly into the base function!
+
+        // let root_param_offset = params.len();
+        // for (index, param) in self.comptime_params.iter().enumerate() {
+        //     let func_ref = backend.func_reg();
+        //     let value = func_ref.comptime_mapper.get(param.value).unwrap();
+        //     let param_dst = stack_frame_layout
+        //         .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
+        //     vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
+        // }
+
+        // println!("Block parameter values:");
+        // for (index, param) in self.body.get_root_parameters().iter().enumerate() {
+        //     let loc = stack_frame_layout.get_offset(&param, vm).unwrap();
+        //     let data = vm.get_data(loc.0.clone(), loc.1);
+        //     println!("  {index} - ${:x}: {:?}", param.0, data);
+        // }
+
+        // execute body
+        let res = self.body
+            .execute(vm, &stack_frame_layout, reg, backend);
+        vm.pop_frame(&mut stack_frame_layout);
+        match res {
+            Ok(data) => Ok(data),
+            Err(mut err) => {
+                err.trace.contextualize(self.mir_id.unwrap());
+                Err(err)
+            }
+        }
+    }
+
+    /// Executes the function in the virtual executor.
+    pub fn execute_in_vm_copies(
+        &self,
+        params: &[AmorphusData],
+        vm: &mut ExecutorVM,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<AmorphusDataCopy, ExecutionError> {
+        // create a copy of the stack frame layout and allocate memory for it.
+        // we need the copy here since the allocation might do some changes to the layout depending
+        // on the actual location of the stack frame in memory.
+        // since this might be a recursive function call, we need to copy the stack frame layout
+        // just in case.
+        // keep in mind that this is not a problem that we encounter in the actual codegen backend.
+        let mut stack_frame_layout = self.stack_frame_layout
+            .as_ref().unwrap().clone();
+        vm.alloc_stack_frame(&mut stack_frame_layout);
+        // copy parameter values from the source to the parameter slot
+        let root_parameters = self.body.get_root_parameters();
+        for (index, param_src) in params.iter().enumerate() {
+            let param_dst = stack_frame_layout
+                .get_offset(&root_parameters[index], vm).unwrap();
+            vm.get_data_mut([param_dst.0], &[param_dst.1])[0]
+                .memcpy(param_src);
         }
         assert_eq!(root_parameters.len(), params.len(), "not enough parameters");
         // get comptime parameters
