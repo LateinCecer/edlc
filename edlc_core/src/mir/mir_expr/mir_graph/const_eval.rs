@@ -38,6 +38,7 @@ use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
 use crate::hir::HirPhase;
+use crate::hir::translation::HirTranslationError;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::mir::mir_expr::mir_graph::scope_check::ScopeError;
 use crate::mir::mir_expr::mir_graph::validate::ContextError;
@@ -756,25 +757,25 @@ impl ConstEval {
                             buf.get_mut(u.0).unwrap().in_use = true;
                         }
                     }
-                    Statement::VarMove { var, value, uid, debug: _ } => {
+                    Statement::VarMove { var, value, uid, .. } => {
                         buf.view_mut(var.0).set(Info::def(block_ref, *uid));
                         buf.get_mut(value.0).unwrap()
                             .insert_move(VarUse::Statement(block_ref, *value, *uid));
                     }
-                    Statement::VarCopy { var, value, uid, debug: _ } => {
+                    Statement::VarCopy { var, value, uid, .. } => {
                         buf.view_mut(var.0).set(Info::def(block_ref, *uid));
                         buf.get_mut(value.0).unwrap()
                             .insert_copy(VarUse::Statement(block_ref, *value, *uid));
                     }
-                    Statement::Drop { value, uid, debug: _ } => {
+                    Statement::Drop { value, uid, .. } => {
                         buf.get_mut(value.0).unwrap()
                             .insert_drop(VarUse::Statement(block_ref, *value, *uid));
                     }
-                    Statement::Sync { event, uid, debug: _ } => {
+                    Statement::Sync { event, uid, .. } => {
                         buf.get_mut(event.internal_value.0).unwrap()
                             .insert_drop(VarUse::Statement(block_ref, event.internal_value, *uid));
                     }
-                    Statement::Record { event, uid, debug: _ } => {
+                    Statement::Record { event, uid, .. } => {
                         let mut info = Info::def(block_ref, *uid);
                         info.remove_allowed = false;
                         buf.view_mut(event.internal_value.0).set(info);
@@ -871,7 +872,7 @@ impl ConstEval {
                         };
                         report.record_err(|| self.check_constant(value, block, debug, phase))
                     }
-                    Statement::VarCopy { var: _, value, uid: _, debug } => {
+                    Statement::VarCopy { var: _, value, uid: _, debug, .. } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
@@ -881,7 +882,7 @@ impl ConstEval {
                         };
                         report.record_err(|| self.check_constant(value, block, debug, phase))
                     }
-                    Statement::Drop { value, uid: _, debug } => {
+                    Statement::Drop { value, uid: _, debug, .. } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
@@ -1616,14 +1617,28 @@ impl Statement {
         block_ref: &MirBlockRef,
     ) -> Result<bool, ExecutionError> {
         match self {
-            Self::VarMove { var, value, uid: _, debug: _ }
-                | Self::VarCopy { var, value, uid: _, debug: _ } => {
+            Self::VarMove { var, value, uid: _, debug: _ } => {
                 // check if value exists
                 Ok(if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
                     vm.memcpy(&dst, &src);
                     const_eval.insert_const_value(cfg, var, vm, stack_frame, reg)
+                } else {
+                    const_eval.mark_runtime(var)
+                })
+            }
+            Self::VarCopy { var, value, uid: _, debug: _, implementation } => {
+                // check if value exists
+                Ok(if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
+                    if let Some(im) = implementation {
+                        todo!()
+                    } else {
+                        let dst = stack_frame.get_offset(var, vm).unwrap();
+                        let src = stack_frame.get_offset(value, vm).unwrap();
+                        vm.memcpy(&dst, &src);
+                        const_eval.insert_const_value(cfg, var, vm, stack_frame, reg)
+                    }
                 } else {
                     const_eval.mark_runtime(var)
                 })
@@ -1718,9 +1733,36 @@ impl Statement {
                 // }
             }
             // for now, just don't look at these during const eval
-            Self::Drop { value: _, uid: _, debug: _ } => Ok(false),
-            Self::Sync { event: _, uid: _, debug: _ } => Ok(false),
-            Self::Record { event, uid: _, debug: _ } => {
+            Self::Drop { value: _, uid: _, debug: _, implementation, .. } => {
+                // TODO: implement correct dropping behavior.
+                // On dropping values during const folding:
+                // If a value is not available during const folding in the first place, we don't
+                // need to drop it at all.
+                // If the value is available, there are two possible cases:
+                // 1. the value is available in the current execution branch, but is not a
+                //    compile-time constant as different branch executions hold different states of
+                //    this value.
+                //    In this case, we should drop the value when the drop implementation is reached.
+                // 2. the value is available AND it is a compile-time constant.
+                //    In this case, we don't want to drop the value, since we want to keep it alive
+                //    after this drop is executed.
+                //
+                // In the second case, additional logic applies.
+                // We don't want drop logic to be run during runtime for this value either, so we
+                // need to somehow track that this should not have a drop implementation.
+                // Then, if at a later point during constant analysis, it turns out that the value
+                // is not contant after all, we need to call the drop implementation of that value
+                // when we remove it from the compile-constant list.
+                // Additionally, we need to make sure that the value is cleaned up after the program
+                // has run by adding its drop implementation to the global cleanup routine.
+                if let Some(im) = implementation.as_ref() {
+                    todo!()
+                } else {
+                    Ok(false)
+                }
+            },
+            Self::Sync { event: _, uid: _, debug: _, .. } => Ok(false),
+            Self::Record { event, uid: _, debug: _, .. } => {
                 Ok(const_eval.mark_runtime(&event.internal_value))
             },
         }
@@ -1739,6 +1781,7 @@ pub enum OptimizationError {
     ScopeChecking(Report<ScopeError, ()>),
     ContextChecking(Report<ContextError, ()>),
     ConstCapture(Report<ConstError, ()>),
+    AutoImpl(HirTranslationError),
 }
 
 impl From<DropError> for OptimizationError {
@@ -1817,18 +1860,22 @@ impl Display for OptimizationError {
                 write!(f, "const capture report with {} errors and {} warnings",
                        report.num_errors(), report.num_warnings())
             }
+            Self::AutoImpl(err) => {
+                write!(f, "automatic impl error: {}", err)
+            }
         }
     }
 }
 
 impl Error for OptimizationError {}
 
-fn process_function(
+fn process_function<B: Backend>(
     body: &mut MirFn,
     vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
-    backend: &mut impl Backend,
-) -> Result<(), OptimizationError> {
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     body.body.promote_moves_with_lifetimes(&lifeness);
 
@@ -1849,6 +1896,8 @@ fn process_function(
         &compiler.phase.vars,
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     let deconstruction = body.body.deconstruct(&lifeness)?;
@@ -1926,6 +1975,8 @@ fn process_function(
     body.body.check_scopes(&borrow_graph, &mut compiler.phase)
         .ok::<OptimizationError>()?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
     body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend)
         .ok::<OptimizationError>()?;
 
@@ -2078,6 +2129,8 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &compiler.phase.vars,
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
     process_comptime_functions(vm, compiler, backend)?;
 
     #[cfg(feature = "debug_printouts")] {
@@ -2142,6 +2195,8 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     }
 
     body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     body.validate_call_context(
         &mut compiler.phase,

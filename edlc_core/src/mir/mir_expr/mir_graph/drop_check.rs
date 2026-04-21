@@ -35,6 +35,11 @@ use crate::mir::mir_expr::{BlockCall, BlockLocalStatementUid, BlockParameterInde
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
+use crate::hir::HirPhase;
+use crate::hir::translation::HirTranslationError;
+use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_funcs::{AutoFnLoc, FnCodeGen, MirFn, MirFuncRegistry, SpecialFunction};
+use crate::mir::MirPhase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LocalVarUsage {
@@ -304,6 +309,7 @@ impl DropAnalysis {
                     value: var,
                     uid,
                     debug,
+                    implementation: None,
                 });
         }
         self.last_point_alive.clear();
@@ -339,6 +345,7 @@ impl DropAnalysis {
                         value,
                         uid,
                         debug,
+                        implementation: None,
                     });
                 },
                 DefPoint::BlockParameter(block_ref, BlockParameterIndex(_)) => {
@@ -350,6 +357,7 @@ impl DropAnalysis {
                         value,
                         uid,
                         debug,
+                        implementation: None,
                     });
                 },
             }
@@ -589,6 +597,86 @@ impl AnalyseDrop for MirGlobalVar {
 
 
 impl MirFlowGraph {
+    /// Requests auto implementations for all statements that ultimately get translated as such.
+    pub fn generate_auto_implementations<B: Backend>(
+        &mut self,
+        mir_phase: &mut MirPhase,
+        hir_phase: &mut HirPhase,
+        func_reg: &mut MirFuncRegistry<B>,
+    ) -> Result<(), HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
+        for block_ref in self.iter_blocks() {
+            if self.is_block_unreachable(&block_ref) {
+                continue;
+            }
+            let block = &mut self.blocks[block_ref.0];
+            for statement in block.statements.iter_mut() {
+                match statement {
+                    Statement::VarCopy { value, debug, implementation, .. } => {
+                        let ty = self.temp_vars[value.0].ty;
+                        *implementation = func_reg.auto_impl(
+                            ty,
+                            SpecialFunction::Copy,
+                            hir_phase,
+                            mir_phase,
+                            &AutoFnLoc {
+                                pos: debug.pos,
+                                src: block.src.clone(),
+                                scope_id: block.scope,
+                            }
+                        )?;
+                    }
+                    Statement::Drop { value, debug, implementation, .. } => {
+                        let ty = self.temp_vars[value.0].ty;
+                        *implementation = func_reg.auto_impl(
+                            ty,
+                            SpecialFunction::Drop,
+                            hir_phase,
+                            mir_phase,
+                            &AutoFnLoc {
+                                pos: debug.pos,
+                                src: block.src.clone(),
+                                scope_id: block.scope,
+                            }
+                        )?;
+                    }
+                    Statement::Sync { event, debug, implementation, .. } => {
+                        let ty = self.temp_vars[event.internal_value.0].ty;
+                        *implementation = func_reg.auto_impl(
+                            ty,
+                            SpecialFunction::Sync,
+                            hir_phase,
+                            mir_phase,
+                            &AutoFnLoc {
+                                pos: debug.pos,
+                                src: block.src.clone(),
+                                scope_id: block.scope,
+                            }
+                        )?;
+                    }
+                    Statement::Record { event, debug, implementation, .. } => {
+                        let ty = self.temp_vars[event.internal_value.0].ty;
+                        *implementation = func_reg.auto_impl(
+                            ty,
+                            SpecialFunction::Record,
+                            hir_phase,
+                            mir_phase,
+                            &AutoFnLoc {
+                                pos: debug.pos,
+                                src: block.src.clone(),
+                                scope_id: block.scope,
+                            }
+                        )?;
+                    }
+                    _ => {
+                        continue;
+                    },
+                };
+            }
+        }
+        Ok(())
+    }
+
     /// Inserts manual drops for all values that need dropping.
     ///
     /// # Rebuilding

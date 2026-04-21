@@ -159,7 +159,7 @@ impl MirExprContainer {
         match &expr.ty {
             MirExprVariant::ArrayInit => self.array_inits[expr.id].execute(vm, stack_frame, target, reg),
             MirExprVariant::As => self.ases[expr.id].execute(vm, stack_frame, target, reg, loc),
-            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, target, reg, backend,loc),
+            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, Some(target), reg, backend,loc),
             MirExprVariant::Literal => self.literals[expr.id].execute(vm, stack_frame, target, reg, backend),
             MirExprVariant::Variable => self.variables[expr.id].execute(vm, stack_frame, target, reg, backend),
             MirExprVariant::Constant => self.constants[expr.id].execute(vm, stack_frame, target, reg),

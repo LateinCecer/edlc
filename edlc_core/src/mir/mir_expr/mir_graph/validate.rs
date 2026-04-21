@@ -165,16 +165,16 @@ impl Statement {
             Statement::VarMove { var, value, uid, debug } => {
                 validate_move(var, value, DebugInfo { uid, debug, block_ref: *block_ref, ctx: block.ctx, src: &block.src }, validator);
             }
-            Statement::VarCopy { var, value, uid, debug } => {
+            Statement::VarCopy { var, value, uid, debug, .. } => {
                 validate_copy(var, value, DebugInfo { uid, debug, block_ref: *block_ref, ctx: block.ctx, src: &block.src }, validator);
             }
-            Statement::Drop { value, uid, debug } => {
+            Statement::Drop { value, uid, debug, .. } => {
                 validate_drop(value, DebugInfo { uid, debug, block_ref: *block_ref, ctx: block.ctx, src: &block.src }, validator);
             }
-            Statement::Sync { event, uid, debug } => {
+            Statement::Sync { event, uid, debug, .. } => {
                 validate_sync(event, DebugInfo { uid, debug, block_ref: *block_ref, ctx: block.ctx, src: &block.src }, validator);
             }
-            Statement::Record { event, uid, debug } => {
+            Statement::Record { event, uid, debug, .. } => {
                 validate_record(event, DebugInfo { uid, debug, block_ref: *block_ref, ctx: block.ctx, src: &block.src }, validator);
             }
         }

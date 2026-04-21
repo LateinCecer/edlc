@@ -1960,7 +1960,7 @@ impl MakeGraph for HirFunctionCall {
         // create call expression
         let expr = graph.graph.expressions
             .insert_call(MirCall {
-                id: mir_uid,
+                id: Some(mir_uid),
                 args: parameter_values,
                 comptime_args: comptime_parameter_values,
                 ret,

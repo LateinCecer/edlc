@@ -1129,7 +1129,7 @@ pub struct EdlParamStack {
     //
     // TL;DR: If you're a clean code fanatic and think that linked lists and hash maps should be carelessly put
     // everywhere, think again. Thanks.
-    stack: Vec<EdlParameterDef>,
+    pub stack: Vec<EdlParameterDef>,
 }
 
 impl From<EdlParamStack> for Vec<EdlParameterDef> {

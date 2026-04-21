@@ -40,7 +40,7 @@ pub enum CallContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirCall {
-    pub id: MirUid,
+    pub id: Option<MirUid>,
     pub ret: MirTypeId,
     pub args: Vec<MirValue>,
     pub func: MirFuncId,
@@ -77,6 +77,73 @@ impl MirGraphElement for MirCall {
 }
 
 impl MirCall {
+    pub fn drop_impl(
+        func: MirFuncId,
+        value: MirValue,
+        context: CallContext,
+        reg: &MirTypeRegistry,
+    ) -> Self {
+        Self {
+            id: None,
+            ret: reg.empty(),
+            func,
+            args: vec![value],
+            context,
+            comptime_args: vec![],
+            is_recursive: false,
+        }
+    }
+
+    pub fn copy_impl(
+        func: MirFuncId,
+        value: MirValue,
+        context: CallContext,
+        ty: MirTypeId,
+    ) -> Self {
+        Self {
+            id: None,
+            ret: ty,
+            func,
+            args: vec![value],
+            context,
+            comptime_args: vec![],
+            is_recursive: false,
+        }
+    }
+
+    pub fn record_impl(
+        func: MirFuncId,
+        context: CallContext,
+        ty: MirTypeId,
+    ) -> Self {
+        Self {
+            id: None,
+            ret: ty,
+            func,
+            args: vec![],
+            context,
+            comptime_args: vec![],
+            is_recursive: false,
+        }
+    }
+
+    pub fn sync_impl(
+        func: MirFuncId,
+        value: MirValue,
+        context: CallContext,
+        reg: &MirTypeRegistry,
+    ) -> Self {
+        Self {
+            id: None,
+            ret: reg.empty(),
+            func,
+            args: vec![value],
+            context,
+            comptime_args: vec![],
+            is_recursive: false,
+        }
+    }
+
     pub fn collect_debug_info<B: Backend>(
         &self,
         info: &mut DebugInformation,
@@ -91,7 +158,7 @@ impl MirCall {
         &self,
         vm: &mut ExecutorVM,
         stack_frame: &StackFrameLayout,
-        target: &MirValue,
+        target: Option<&MirValue>,
         reg: &MirTypeRegistry,
         backend: &impl Backend,
         loc: &MirLoc,
@@ -155,9 +222,11 @@ impl MirCall {
             }
         }?;
 
-        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
-        let [mut target] = vm.get_data_mut([target_range.clone()], &[target_ty]);
-        target.memcpy(&ret_value.as_data());
+        if let Some(target) = target {
+            let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+            let [mut target] = vm.get_data_mut([target_range.clone()], &[target_ty]);
+            target.memcpy(&ret_value.as_data());
+        }
         Ok(())
     }
 
@@ -225,7 +294,7 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            id: opt.mir_phase.new_id(),
+            id: Some(opt.mir_phase.new_id()),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
             func: func_id,
@@ -250,7 +319,7 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            id: opt.mir_phase.new_id(),
+            id: Some(opt.mir_phase.new_id()),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
             func: func_id,
@@ -275,7 +344,7 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            id: opt.mir_phase.new_id(),
+            id: Some(opt.mir_phase.new_id()),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
             func: func_id,
@@ -300,7 +369,7 @@ impl MirCall {
         let ctx = Self::call_context(opt.funcs, func_id);
 
         Ok(MirCall {
-            id: opt.mir_phase.new_id(),
+            id: Some(opt.mir_phase.new_id()),
             ret: opt.mir_phase.types.usize(),
             args: vec![lhs, rhs],
             func: func_id,

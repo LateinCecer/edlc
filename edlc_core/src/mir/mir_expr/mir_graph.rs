@@ -392,22 +392,26 @@ pub enum Statement {
         var: MirValue,
         value: MirValue,
         uid: BlockLocalStatementUid,
-        debug: DebugSymbols
+        debug: DebugSymbols,
+        implementation: Option<MirFuncId>,
     },
     Drop {
         value: MirValue,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
+        implementation: Option<MirFuncId>,
     },
     Sync {
         event: SyncEvent,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
+        implementation: Option<MirFuncId>,
     },
     Record {
         event: SyncEvent,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
+        implementation: Option<MirFuncId>,
     },
 }
 
@@ -457,7 +461,7 @@ impl Statement {
             Statement::VarMove { uid: _, value, var: _, debug: _ } => {
                 value == var
             },
-            Statement::VarCopy { uid: _, value, var: _, debug: _ } => {
+            Statement::VarCopy { uid: _, value, var: _, debug: _, implementation: _ } => {
                 value == var
             },
             Statement::VarDef { uid: _, value, var: _, debug: _ } => {
@@ -513,30 +517,48 @@ impl Statement {
         block_ref: &MirBlockRef,
     ) -> Result<(), ExecutionError> {
         match self {
-            Self::VarMove { var, value, uid: _, debug: _ }
-                | Self::VarCopy { var, value, uid: _, debug: _ } => {
+            Self::VarMove { var, value, uid: _, debug: _ } => {
                 let dst = stack_frame.get_offset(var, vm).unwrap();
                 let src = stack_frame.get_offset(value, vm).unwrap();
                 vm.memcpy(&dst, &src);
                 Ok(())
             }
+            Self::VarCopy { var, value, uid: _, debug: _, implementation } => {
+                if let Some(im) = implementation.as_ref() {
+                    todo!()
+                } else {
+                    let dst = stack_frame.get_offset(var, vm).unwrap();
+                    let src = stack_frame.get_offset(value, vm).unwrap();
+                    vm.memcpy(&dst, &src);
+                    Ok(())
+                }
+            },
             Self::VarDef { var, value, uid, debug: _ } => {
                 expr.execute(vm,  stack_frame, *value, var, reg, backend, &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)))
             }
-            Self::Drop { value, uid: _, debug: _ } => {
+            Self::Drop { value, uid: _, debug: _, implementation } => {
                 debug!("dropping value {value:?}");
-                Ok(())
-                // TODO
+                if let Some(im) = implementation.as_ref() {
+                    todo!()
+                } else {
+                    Ok(())
+                }
             }
-            Self::Record { event, uid: _, debug: _ } => {
+            Self::Record { event, uid: _, debug: _, implementation } => {
                 debug!("recording event {event:?}");
-                Ok(())
-                // TODO
+                if let Some(im) = implementation.as_ref() {
+                    todo!()
+                } else {
+                    Ok(())
+                }
             }
-            Self::Sync { event, uid: _, debug: _ } => {
+            Self::Sync { event, uid: _, debug: _, implementation } => {
                 debug!("synchronizing event {event:?}");
-                Ok(())
-                // TODO
+                if let Some(im) = implementation.as_ref() {
+                    todo!()
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -1199,7 +1221,7 @@ impl Block {
             .for_each(|statement| match statement {
                 Statement::VarDef { var, value: _, uid, debug: _ } |
                 Statement::VarMove { var, value: _, uid, debug: _ } |
-                Statement::VarCopy { var, value: _, uid, debug: _ } |
+                Statement::VarCopy { var, value: _, uid, .. } |
                 Statement::Record { event: SyncEvent {
                     internal_value: var, ..
                 }, uid, .. } => {
@@ -1225,7 +1247,7 @@ impl Block {
             .for_each(|statement| match statement {
                 Statement::VarDef { var, value: _, uid, debug: _ } |
                 Statement::VarMove { var, value: _, uid, debug: _ } |
-                Statement::VarCopy { var, value: _, uid, debug: _ } |
+                Statement::VarCopy { var, value: _, uid, .. } |
                 Statement::Record { event: SyncEvent {
                     internal_value: var, ..
                 }, uid, .. }=> {
@@ -1328,7 +1350,7 @@ impl Block {
                         });
                 }
                 Statement::VarMove { var: _, value, uid, debug: _ } |
-                Statement::VarCopy { var: _, value, uid, debug: _ } |
+                Statement::VarCopy { var: _, value, uid, .. } |
                 Statement::Sync { event: SyncEvent { internal_value: value }, uid, .. } |
                 Statement::Drop { value, uid, .. } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
@@ -1359,7 +1381,7 @@ impl Block {
                         });
                 }
                 Statement::VarMove { var: _, value, uid, debug: _ } |
-                Statement::VarCopy { var: _, value, uid, debug: _ } |
+                Statement::VarCopy { var: _, value, uid, .. } |
                 Statement::Sync { event: SyncEvent { internal_value: value }, uid, .. } |
                 Statement::Drop { value, uid, .. } => {
                     let use_point = VarUse::Statement(block_ref, *value, *uid);
@@ -2443,7 +2465,13 @@ impl MirFlowGraph {
                 };
                 // look ahead to find latest use point
                 if block.find_closest_use(block_ref, &self.expressions, idx + 1, value).is_some() {
-                    let new_statement = Statement::VarCopy { var: *var, uid: *uid, value: *value, debug: debug.clone() };
+                    let new_statement = Statement::VarCopy {
+                        var: *var,
+                        uid: *uid,
+                        value: *value,
+                        debug: debug.clone(),
+                        implementation: None,
+                    };
                     block.statements[idx] = new_statement;
                 }
             }
@@ -2502,7 +2530,8 @@ impl MirFlowGraph {
                         var: *var,
                         uid: *uid,
                         value: *value,
-                        debug: debug.clone()
+                        debug: debug.clone(),
+                        implementation: None,
                     };
                     self.blocks[block_index].statements[idx] = new_statement;
                 }
@@ -3563,16 +3592,16 @@ impl Statement {
             Statement::VarMove { value, var, uid, debug: _ } => {
                 S::transfer_move(value, input, ctx, &MirGraphLoc(block, *uid), var)
             }
-            Statement::VarCopy { value, var, uid, debug: _ } => {
+            Statement::VarCopy { value, var, uid, .. } => {
                 S::transfer_copy(value, input, ctx, &MirGraphLoc(block, *uid), var)
             }
-            Statement::Drop { value, uid, debug: _ } => {
+            Statement::Drop { value, uid, .. } => {
                 S::transfer_drop(value, input, ctx, &MirGraphLoc(block, *uid))
             }
-            Statement::Sync { event, uid, debug: _ } => {
+            Statement::Sync { event, uid, .. } => {
                 S::transfer_sync(event, input, ctx, &MirGraphLoc(block, *uid))
             }
-            Statement::Record { event, uid, debug: _ } => {
+            Statement::Record { event, uid, .. } => {
                 S::transfer_record(event, input, ctx, &MirGraphLoc(block, *uid))
             }
         }

@@ -16,9 +16,9 @@
 mod comptime_value;
 
 use crate::core::edl_error::EdlError;
-use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTypeId, EdlTypeRegistry, FmtType};
+use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
 use crate::core::index_map::IndexMap;
-use crate::core::EdlVarId;
+use crate::core::{edl_trait, EdlVarId};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
@@ -31,15 +31,21 @@ use crate::mir::mir_expr::{ExecutionError, MirExprId, MirFlowGraph, MirLoc, MirV
 pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
 use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
-use crate::mir::{DebugInformation, MirError, MirPhase, MirUid};
+use crate::mir::{DebugInformation, MirError, MirFnId, MirPhase, MirUid};
 use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::{mem, ops};
 use std::path::PathBuf;
+use crate::core::edl_fn::FnArgumentConstraints;
+use crate::core::edl_impl::{CallResolver, GenericTypeHints};
+use crate::core::edl_param_env::EdlParameterDef;
+use crate::core::edl_value::EdlConstValue;
+use crate::core::type_analysis::{InferProvider, InferState};
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use crate::prelude::edl_type::EdlMaybeType;
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
 pub const INTR_SUB_USIZE: &str = "sub_usize";
@@ -868,6 +874,236 @@ impl<B: Backend> MirFuncRegistry<B> {
         let id = self.func_id;
         self.func_id.0 += 1;
         id
+    }
+
+    pub fn auto_impl(
+        &mut self,
+        ty: MirTypeId,
+        sp: SpecialFunction,
+        hir_phase: &mut HirPhase,
+        mir_phase: &mut MirPhase,
+        info: &AutoFnLoc,
+    ) -> Result<Option<MirFuncId>, HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
+        let ty = mir_phase.types.get_edl_type(ty)
+            .expect("MIR type definition does not exist");
+        if let Some(loc) = sp.lookup(
+            &ty, hir_phase, &info.src, &info.pos, info.scope_id,
+        ) {
+            return Ok(Some(self
+                .mir_id(&loc, hir_phase, mir_phase, ComptimeParams::empty(), false)?));
+        }
+
+        // TODO do auto implementation stuff here
+        Ok(None)
+    }
+}
+
+pub struct AutoFnLoc {
+    pub src: ModuleSrc,
+    pub pos: SrcPos,
+    pub scope_id: ScopeId,
+}
+
+pub enum SpecialFunction {
+    Drop,
+    Copy,
+    Record,
+    Sync,
+}
+
+impl SpecialFunction {
+    fn lookup(
+        &self,
+        ty: &EdlTypeInstance,
+        hir_phase: &mut HirPhase,
+        src: &ModuleSrc,
+        pos: &SrcPos,
+        scope: ScopeId,
+    ) -> Option<EdlFnInstance> {
+        use crate::core::type_analysis::*;
+        let impls = hir_phase.impl_reg.clone();
+        let impls = impls.borrow_mut();
+        let mut infer_state = InferState::new();
+
+        let mut resolver = match self {
+            SpecialFunction::Drop => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_DROP_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_DROP_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let empty = hir_phase.types.empty();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, &empty).unwrap();
+                inferer.at(node).eq(&val, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(val, "drop".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            }
+            SpecialFunction::Copy => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_COPY_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_COPY_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let ref_ty = hir_phase.types.new_ref(
+                    EdlMaybeType::Fixed(ty.clone()),
+                    Some(EdlConstValue::from_bool(false)),
+                ).unwrap();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, ty).unwrap();
+                inferer.at(node).eq(&val, &ref_ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(ret, "copy".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+            SpecialFunction::Sync => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_SYNC_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_SYNC_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let empty = hir_phase.types.empty();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, &empty).unwrap();
+                inferer.at(node).eq(&val, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(val, "sync".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+            SpecialFunction::Record => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_SYNC_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_SYNC_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                inferer.at(node).eq(&ret, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(ret, "record".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+        };
+
+        let mut inferer = hir_phase.infer_from(&mut infer_state);
+        let (func_id, stack, base) = resolver.finalize_types(&mut inferer)?;
+        let fn_instance = EdlFnInstance {
+            func: func_id,
+            param: stack,
+            associated_ty: base.map(|base| base.unwrap()),
+        };
+        Some(fn_instance)
     }
 }
 

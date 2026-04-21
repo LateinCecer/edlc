@@ -709,6 +709,7 @@ struct TMirType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TMirParams {
+    env: EdlEnvId,
     params: Vec<TMirParamValue>,
 }
 
@@ -816,6 +817,13 @@ impl TMirType {
         }
         Ok(ty)
     }
+
+    fn to_edl(&self) -> EdlTypeInstance {
+        EdlTypeInstance {
+            ty: self.id,
+            param: self.param.to_edl(),
+        }
+    }
 }
 
 impl TMirParamStack {
@@ -829,6 +837,15 @@ impl TMirParamStack {
             stack: output_stack,
         })
     }
+
+    fn to_edl(&self) -> EdlParamStack {
+        let stack: Vec<_> = self.stack.iter()
+            .map(|params| params.to_edl())
+            .collect();
+        EdlParamStack {
+            stack,
+        }
+    }
 }
 
 impl TMirParams {
@@ -838,8 +855,20 @@ impl TMirParams {
             params.push(TMirParamValue::from_edl(param.clone(), reg, edl_types)?);
         }
         Ok(Self {
-            params
+            env: value.env_id,
+            params,
         })
+    }
+
+    fn to_edl(&self) -> EdlParameterDef {
+        let mut params = self.params
+            .iter()
+            .map(|param| param.to_edl())
+            .collect();
+        EdlParameterDef {
+            params,
+            env_id: self.env,
+        }
     }
 }
 
@@ -871,6 +900,17 @@ impl TMirParamValue {
             }
             EdlGenericParamValue::ElicitType => {
                 Err(EdlError::E017)
+            }
+        }
+    }
+
+    fn to_edl(&self) -> EdlGenericParamValue {
+        match self {
+            TMirParamValue::Type(val) => {
+                EdlGenericParamValue::Type(val.to_edl())
+            }
+            TMirParamValue::Const(val) => {
+                EdlGenericParamValue::Const(EdlConstValue::Literal(val.clone()))
             }
         }
     }
@@ -1249,6 +1289,10 @@ impl MirTypeRegistry {
 
     pub fn get_rust_from_type(&self, id: MirTypeId) -> Option<TypeId> {
         self.types.get(id.0).map(|ty| &ty.rust_repr)?.clone()
+    }
+
+    pub fn get_edl_type(&self, id: MirTypeId) -> Option<EdlTypeInstance> {
+        self.types.get(id.0).map(|item| item.tmir_version.to_edl())
     }
 
     /// Registers a new type for the MIR type registry.
