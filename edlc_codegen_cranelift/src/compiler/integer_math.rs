@@ -24,7 +24,7 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
 use edlc_core::inline_code;
-use crate::codegen::{FunctionTranslator, IntoValue, short_vec, ShortVec};
+use crate::codegen::FunctionTranslator;
 use crate::compiler::JIT;
 use crate::jit_func;
 use crate::executor::CraneliftJIT;
@@ -80,7 +80,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for UnopGen {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 1);
@@ -94,7 +94,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for UnopGen {
         let val = (self.op)(backend.builder.ins(), input);
         backend.layout.store_pod(
             val,
-            target,
+            target.expect("UnopGen should always have a target"),
             &mut backend.ir_values,
             &mut backend.builder,
             &phase.types,
@@ -111,7 +111,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for BinopGen {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 2);
@@ -131,7 +131,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for BinopGen {
         let val = (self.op)(backend.builder.ins(), lhs, rhs);
         backend.layout.store_pod(
             val,
-            target,
+            target.expect("BinopGen should always have a target"),
             &mut backend.ir_values,
             &mut backend.builder,
             &phase.types,
@@ -149,7 +149,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for TriopGen {
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
         call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 3);
@@ -175,7 +175,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for TriopGen {
         let val = (self.op)(backend.builder.ins(), a, b, c);
         backend.layout.store_pod(
             val,
-            target,
+            target.expect("TriopGen should always have a target"),
             &mut backend.ir_values,
             &mut backend.builder,
             &phase.types,

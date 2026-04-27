@@ -62,20 +62,26 @@ impl CallingConv for SysV {
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
-        target: MirValue,
+        target: Option<MirValue>,
         reg: &MirTypeRegistry,
         backend: &B,
     ) -> Result<CallLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
-        let return_value = if reg.byte_size(call.ret).unwrap() > self.abi.large_aggregate_bytes {
+        let ret_ty_size = reg.byte_size(call.ret).unwrap();
+        let return_value = if ret_ty_size > self.abi.large_aggregate_bytes {
             args.push(Argument {
                 rxx: 1,
                 xmm: 0,
-                purpose: ArgumentPurpose::ReturnBuffer(target),
+                purpose: ArgumentPurpose::ReturnBuffer(target
+                    .expect("return type in function signature is not zero-sized; \
+                    therefore a return buffer must be specified.")),
             });
             None
+        } else if ret_ty_size > 0 {
+            Some(target.expect("return type in function signature is not zero-sized; \
+                    therefore a return buffer must be specified."))
         } else {
-            Some(target)
+            None
         };
 
         let runtime_ordinal = if let Some(ordinal) = backend.intrinsic_runtime(&call.func) {
@@ -127,15 +133,18 @@ impl CallingConv for SysV {
     ) -> Result<FunctionLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
         let ret_ty = cfg.get_return_type();
-        let return_type = if reg.byte_size(ret_ty).unwrap() > self.abi.large_aggregate_bytes {
+        let ret_ty_size = reg.byte_size(ret_ty).unwrap();
+        let return_type = if ret_ty_size > self.abi.large_aggregate_bytes {
             args.push(Argument {
                 rxx: 1,
                 xmm: 0,
                 purpose: FunctionParameterPurpose::ReturnBuffer,
             });
             None
-        } else {
+        } else if ret_ty_size > 0 {
             Some(ret_ty)
+        } else {
+            None
         };
 
         for value in cfg.get_root_parameters() {

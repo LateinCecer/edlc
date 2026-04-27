@@ -25,7 +25,7 @@ use crate::compiler::{RuntimeId, JIT};
 use cranelift_module::Linkage;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirExprVariant, MirLoc, MirValue};
 use edlc_core::prelude::{DebugInformation, MirError, MirPhase};
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
@@ -63,13 +63,20 @@ impl JITExternCall {
     }
 }
 
+/// Generates a call to a copy auto function
+fn gen_copy_call<Runtime>(
+
+) -> Result<(), MirError<JIT<Runtime>>> {
+    todo!()
+}
+
 impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
     fn code_gen(
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &mut MirPhase,
-        _call: &MirCall,
-        _target: &MirValue,
+        call: &MirCall,
+        target: Option<&MirValue>,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let call_layout = backend.layout.call_layout(expr_id).clone();

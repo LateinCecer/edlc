@@ -322,7 +322,7 @@ impl CodeGen<TestBackend> for TestCodegen {
         backend: &mut <TestBackend as Backend>::FuncGen<'_>,
         type_reg: &mut MirPhase,
         call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         exor_id: &MirExprId,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
@@ -339,7 +339,7 @@ impl CodeGen<TestBackend> for TestCallGen {
         backend: &mut <TestBackend as Backend>::FuncGen<'_>,
         type_reg: &mut MirPhase,
         mir_call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         exor_id: &MirExprId,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())

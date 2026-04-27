@@ -947,6 +947,7 @@ pub struct MirTypeRegistry {
     variables: IndexMap<MirTypeId>,
     literal_types: Option<MirLiteralTypes>,
     stack: EnvStack,
+    event_type: Option<MirTypeId>,
 }
 
 impl MirTypeRegistry {
@@ -1161,6 +1162,23 @@ impl MirTypeRegistry {
             never: self.register::<()>(types.never(), types)?,
         });
         Ok(())
+    }
+
+    pub fn register_event_type<T: MirLayout + 'static>(
+        &mut self,
+        types: &EdlTypeRegistry,
+    ) -> Result<(), EdlError> {
+        if let Some(event_ty) = types.get_event_type() {
+            let id = self.register::<T>(event_ty.clone(), types)?;
+            self.event_type = Some(id);
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn event_type(&self) -> Option<&MirTypeId> {
+        self.event_type.as_ref()
     }
 
     pub fn is_array(&self, id: &MirTypeId) -> bool {

@@ -23,7 +23,7 @@ use crate::core::index_map::IndexMap;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
-use crate::mir::mir_expr::mir_call::MirCall;
+use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowSource};
@@ -32,7 +32,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{BlockCall, BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
+use crate::mir::mir_expr::{AutoImplDetails, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
@@ -599,6 +599,71 @@ impl AnalyseDrop for MirGlobalVar {
 
 
 impl MirFlowGraph {
+    pub fn generate_copy_implementation(
+        &mut self,
+        mir_phase: &mut MirPhase,
+    ) -> Result<(), HirTranslationError> {
+        for block_ref in self.iter_blocks() {
+            if self.is_block_unreachable(&block_ref) {
+                continue;
+            }
+            let mut i: usize = 0;
+            while i < self.blocks[block_ref.0].statements.len() {
+                let Statement::VarCopy {
+                    var,
+                    value,
+                    implementation: Some((auto_details, reference_type)),
+                    debug,
+                    uid,
+                } = &self.blocks[block_ref.0].statements[i] else {
+                    i += 1;
+                    continue;
+                };
+                let var = *var;
+                let value = *value;
+                let call_ctx = auto_details.ctx;
+                let func_id = auto_details.func_id;
+                let ret_ty = *self.get_var_type(&var);
+                let reference_type = *reference_type;
+                let debug = debug.clone();
+                let uid = *uid;
+                // replace copy statement with reference call to 'value'
+                let value_ref_value = self.create_temp_variable(reference_type);
+                let ref_expr_id = self.expressions
+                    .insert_ref(MirRef::shared(value, reference_type, self, &mir_phase.types));
+
+                let block = &mut self.blocks[block_ref.0];
+                let call_expr_id = self.expressions
+                    .insert_call(MirCall {
+                        id: Some(mir_phase.new_id()),
+                        ret: ret_ty,
+                        func: func_id,
+                        args: vec![value_ref_value],
+                        context: call_ctx,
+                        comptime_args: vec![],
+                        is_recursive: false,
+                    });
+
+                let ref_statement = Statement::VarDef {
+                    var: value_ref_value,
+                    value: ref_expr_id,
+                    debug: debug.clone(),
+                    uid: block.new_uid(),
+                };
+                let call_statement = Statement::VarDef {
+                    var,
+                    value: call_expr_id,
+                    uid,
+                    debug,
+                };
+                block.statements[i] = call_statement;
+                block.statements.insert(i, ref_statement);
+                i += 2;
+            }
+        }
+        Ok(())
+    }
+
     /// Requests auto implementations for all statements that ultimately get translated as such.
     pub fn generate_auto_implementations<B: Backend>(
         &mut self,
@@ -626,7 +691,7 @@ impl MirFlowGraph {
                                 src: block.src.clone(),
                                 scope_id: block.scope,
                             }
-                        )?.map(|func| {
+                        )?.map(|(func, ctx)| {
                             let ty = mir_phase.types
                                 .get_edl_type(ty)
                                 .unwrap();
@@ -637,7 +702,7 @@ impl MirFlowGraph {
                             let ty = mir_phase.types
                                 .mir_id(&ty, &hir_phase.types)
                                 .unwrap();
-                            (func, ty)
+                            (AutoImplDetails { func_id: func, ctx }, ty)
                         });
                     }
                     Statement::Drop { value, debug, implementation, .. } => {
@@ -652,7 +717,8 @@ impl MirFlowGraph {
                                 src: block.src.clone(),
                                 scope_id: block.scope,
                             }
-                        )?;
+                        )?
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
                     }
                     Statement::Sync { event, debug, implementation, .. } => {
                         let ty = self.temp_vars[event.internal_value.0].ty;
@@ -666,7 +732,8 @@ impl MirFlowGraph {
                                 src: block.src.clone(),
                                 scope_id: block.scope,
                             }
-                        )?;
+                        )?
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
                     }
                     Statement::Record { event, debug, implementation, .. } => {
                         let ty = self.temp_vars[event.internal_value.0].ty;
@@ -680,7 +747,8 @@ impl MirFlowGraph {
                                 src: block.src.clone(),
                                 scope_id: block.scope,
                             }
-                        )?;
+                        )?
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
                     }
                     _ => {
                         continue;

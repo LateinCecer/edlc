@@ -1085,6 +1085,7 @@ pub struct EdlTypeRegistry {
     generic_param_def: EdlParameterDef,
     alias: IndexMap<EdlAlias>,
     anon_types: AnonymousTypes,
+    event_type: Option<EdlTypeInstance>,
 }
 
 impl Default for EdlTypeRegistry {
@@ -1103,6 +1104,7 @@ impl Default for EdlTypeRegistry {
             generic_param_def,
             alias: IndexMap::default(),
             anon_types: AnonymousTypes::default(),
+            event_type: None,
         };
 
         let env = reg.new_env();
@@ -1397,6 +1399,21 @@ impl EdlTypeRegistry {
 
     pub fn insert_type(&mut self, val: EdlType) -> EdlTypeId {
         EdlTypeId(self.types.insert(val))
+    }
+
+    /// Registers a global event type for synchronization events.
+    /// There can only be one event type per compiler instance and the type must be fully resolved.
+    /// This function may also only be called once per compiler instance.
+    pub fn register_event_type(&mut self, ty: EdlTypeInstance) {
+        assert!(ty.is_fully_resolved());
+        if let Some(prev) = self.event_type.as_ref() {
+            assert_eq!(prev, &ty, "tried to re-register global event type");
+        }
+        self.event_type = Some(ty);
+    }
+
+    pub fn get_event_type(&self) -> Option<&EdlTypeInstance> {
+        self.event_type.as_ref()
     }
 
     pub fn update_type_state(&mut self, id: EdlTypeId, new_state: EdlTypeState) -> Result<(), EdlError> {

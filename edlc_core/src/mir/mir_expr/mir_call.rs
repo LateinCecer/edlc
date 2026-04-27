@@ -13,6 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
+use crate::core::edl_fn::EdlFnSignature;
 use crate::mir::mir_backend::{Backend, IntrinsicExecutionError};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
@@ -36,6 +37,20 @@ pub enum CallContext {
     Runtime,
     Comptime,
     MaybeComptime,
+}
+
+impl CallContext {
+    pub fn from_sig(edl_sig: &EdlFnSignature) -> Self {
+        if edl_sig.comptime || edl_sig.comptime_only {
+            if edl_sig.comptime_only {
+                CallContext::Comptime
+            } else {
+                CallContext::MaybeComptime
+            }
+        } else {
+            CallContext::Runtime
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

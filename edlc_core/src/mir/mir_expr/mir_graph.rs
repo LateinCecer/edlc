@@ -375,6 +375,12 @@ pub struct DebugSymbols {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct AutoImplDetails {
+    pub func_id: MirFuncId,
+    pub ctx: CallContext,
+}
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Statement {
     VarDef {
         var: MirValue,
@@ -393,25 +399,25 @@ pub enum Statement {
         value: MirValue,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
-        implementation: Option<(MirFuncId, MirTypeId)>,
+        implementation: Option<(AutoImplDetails, MirTypeId)>,
     },
     Drop {
         value: MirValue,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
-        implementation: Option<MirFuncId>,
+        implementation: Option<AutoImplDetails>,
     },
     Sync {
         event: SyncEvent,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
-        implementation: Option<MirFuncId>,
+        implementation: Option<AutoImplDetails>,
     },
     Record {
         event: SyncEvent,
         uid: BlockLocalStatementUid,
         debug: DebugSymbols,
-        implementation: Option<MirFuncId>,
+        implementation: Option<AutoImplDetails>,
     },
 }
 
@@ -526,7 +532,7 @@ impl Statement {
             Self::VarCopy { var, value, uid, debug: _, implementation } => {
                 if let Some((im, param_ty)) = implementation.as_ref() {
                     MirCall::exec_copy_impl(
-                        *im,
+                        im.func_id,
                         value,
                         *param_ty,
                         vm,
@@ -559,7 +565,7 @@ impl Statement {
             }
             Self::Drop { value, uid, debug: _, implementation } => {
                 if let Some(im) = implementation.as_ref() {
-                    MirCall::drop_impl(*im, *value, CallContext::Runtime, reg)
+                    MirCall::drop_impl(im.func_id, *value, im.ctx, reg)
                         .execute(
                             vm,
                             stack_frame,
@@ -572,18 +578,33 @@ impl Statement {
                     Ok(())
                 }
             }
-            Self::Record { event, uid: _, debug: _, implementation } => {
-                debug!("recording event {event:?}");
+            Self::Record { event, uid, debug: _, implementation } => {
                 if let Some(im) = implementation.as_ref() {
-                    todo!()
+                    let event_ty = cfg.get_var_type(&event.internal_value);
+                    MirCall::record_impl(im.func_id, im.ctx, *event_ty)
+                        .execute(
+                            vm,
+                            stack_frame,
+                            Some(&event.internal_value),
+                            reg,
+                            backend,
+                            &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                        )
                 } else {
                     Ok(())
                 }
             }
-            Self::Sync { event, uid: _, debug: _, implementation } => {
-                debug!("synchronizing event {event:?}");
+            Self::Sync { event, uid, debug: _, implementation } => {
                 if let Some(im) = implementation.as_ref() {
-                    todo!()
+                    MirCall::sync_impl(im.func_id, event.internal_value, im.ctx, reg)
+                        .execute(
+                            vm,
+                            stack_frame,
+                            None,
+                            reg,
+                            backend,
+                            &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid))
+                        )
                 } else {
                     Ok(())
                 }

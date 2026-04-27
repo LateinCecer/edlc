@@ -1882,6 +1882,14 @@ fn process_function<B: Backend>(
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
     body.body.promote_moves_with_lifetimes(&lifeness);
+    body.body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    body.body.generate_copy_implementation(&mut compiler.mir_phase)
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     let mut borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
@@ -1900,7 +1908,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
         &compiler.phase.vars,
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+    body.body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
         .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     let lifeness = body.body.lifetimes(&compiler.mir_phase.types)?;
@@ -1979,7 +1991,13 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     body.body.check_scopes(&borrow_graph, &mut compiler.phase)
         .ok::<OptimizationError>()?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+    body.body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    body.body.generate_copy_implementation(&mut compiler.mir_phase)
         .map_err(|err| OptimizationError::AutoImpl(err))?;
     body.body.validate_call_context(&mut compiler.phase, &mut compiler.mir_phase, backend)
         .ok::<OptimizationError>()?;
@@ -2111,6 +2129,14 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
     body.promote_moves_with_lifetimes(&lifeness);
+    body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    body.generate_copy_implementation(&mut compiler.mir_phase)
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     // do scope checking
     let mut borrow_graph = body.borrows(
@@ -2133,7 +2159,11 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &compiler.phase.vars,
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+    body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
         .map_err(|err| OptimizationError::AutoImpl(err))?;
     process_comptime_functions(vm, compiler, backend)?;
 
@@ -2199,7 +2229,13 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     }
 
     body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.generate_auto_implementations(&mut compiler.mir_phase, &mut compiler.phase, &mut backend.func_reg_mut())
+    body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    body.generate_copy_implementation(&mut compiler.mir_phase)
         .map_err(|err| OptimizationError::AutoImpl(err))?;
 
     body.validate_call_context(

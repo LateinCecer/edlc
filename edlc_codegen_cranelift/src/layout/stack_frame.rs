@@ -79,7 +79,7 @@ impl StackFrameMapping {
                 continue;
             }
             let call = cfg.expressions.get_call(*value);
-            let call_layout = conv.make_call_layout(cfg, call, *var, reg, backend)?;
+            let call_layout = conv.make_call_layout(cfg, call, Some(*var), reg, backend)?;
             stack_spill_size = usize::max(stack_spill_size, call_layout.spill_size());
             stack_spill_alignment = usize::max(stack_spill_alignment, call_layout.spill_alignment());
 
@@ -842,7 +842,7 @@ pub enum FunctionParameterPurpose {
     Runtime,
 }
 
-pub(crate) struct FunctionLayout {
+pub struct FunctionLayout {
     pub(crate) args: Vec<Argument<FunctionParameterPurpose>>,
     pub(crate) stack_spill: Option<StackSpill>,
     pub(crate) return_type: Option<MirTypeId>,
@@ -1310,7 +1310,7 @@ pub trait CallingConv {
         &self,
         cfg: &MirFlowGraph,
         call: &MirCall,
-        target: MirValue,
+        target: Option<MirValue>,
         reg: &MirTypeRegistry,
         backend: &B,
     ) -> Result<CallLayout, Self::Error>;

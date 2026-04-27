@@ -74,7 +74,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for AssertCodegen {
         backend: &mut FunctionTranslator<Runtime>,
         type_reg: &mut MirPhase,
         call: &MirCall,
-        _target: &MirValue,
+        _target: Option<&MirValue>,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 1);

@@ -43,7 +43,7 @@ use crate::core::edl_impl::{CallResolver, GenericTypeHints};
 use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{InferProvider, InferState};
-use crate::mir::mir_expr::mir_call::MirCall;
+use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
 use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
 use crate::prelude::edl_type::EdlMaybeType;
 
@@ -767,7 +767,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
         mir_call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<B>> {
         let code_gen = &mut self.generators.get_mut(id.0)
@@ -779,6 +779,20 @@ impl<B: Backend> MirFuncRegistry<B> {
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
                 .code_gen(backend, type_reg, mir_call, target, expr_id),
+        }
+    }
+
+    /// Returns a reference to the code generator.
+    pub fn get_call_gen(
+        &self,
+        id: MirFuncId,
+    ) -> Option<&dyn CodeGen<B>> {
+        let code_gen = &self.generators.get(id.0)
+            .expect("Invalid MIR function id").code_gen;
+        match code_gen {
+            CodeGenState::Ready { call_gen, .. }
+                | CodeGenState::Internal { call_gen } => Some(call_gen.as_ref()),
+            _ => None,
         }
     }
 
@@ -883,15 +897,22 @@ impl<B: Backend> MirFuncRegistry<B> {
         hir_phase: &mut HirPhase,
         mir_phase: &mut MirPhase,
         info: &AutoFnLoc,
-    ) -> Result<Option<MirFuncId>, HirTranslationError>
+    ) -> Result<Option<(MirFuncId, CallContext)>, HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
         let ty = mir_phase.types.get_edl_type(ty)
             .expect("MIR type definition does not exist");
         if let Some(loc) = sp.lookup(
             &ty, hir_phase, &info.src, &info.pos, info.scope_id,
         ) {
-            return Ok(Some(self
-                .mir_id(&loc, hir_phase, mir_phase, ComptimeParams::empty(), false)?));
+            let id = self.mir_id(
+                &loc,
+                hir_phase,
+                mir_phase,
+                ComptimeParams::empty(),
+                false,
+            )?;
+            let sig = hir_phase.types.get_fn_signature(loc.func)?;
+            return Ok(Some((id, CallContext::from_sig(sig))));
         }
 
         // TODO do auto implementation stuff here

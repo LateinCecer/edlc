@@ -1947,15 +1947,7 @@ impl MakeGraph for HirFunctionCall {
 
         // get call context from function signature
         // how the function is actually called is ultimately up to the MIR compiler
-        let call_context = if edl_sig.comptime || edl_sig.comptime_only {
-            if edl_sig.comptime_only {
-                CallContext::Comptime
-            } else {
-                CallContext::MaybeComptime
-            }
-        } else {
-            CallContext::Runtime
-        };
+        let call_context = CallContext::from_sig(&edl_sig);
 
         // create call expression
         let expr = graph.graph.expressions

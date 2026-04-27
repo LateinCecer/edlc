@@ -119,7 +119,7 @@ where B: Backend {
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
         call: &MirCall,
-        target: &MirValue,
+        target: Option<&MirValue>,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<B>>;
 
