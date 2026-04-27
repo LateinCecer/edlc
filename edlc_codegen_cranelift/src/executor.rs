@@ -996,11 +996,12 @@ mod test {
     use edlc_core::inline_code;
     use edlc_core::prelude::{AmorphusDataCopy, FileSupplier};
     use edlc_core::prelude::mir_str::FatPtr;
-    use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, StructLayoutBuilder};
+    use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
     use log::{error, info};
     use regex::Regex;
-    use edlc_core::prelude::edl_type::{EdlMaybeType, EdlTypeId};
+    use edlc_core::prelude::ast_type_def::LayoutOptions;
+    use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
     use edlc_core::prelude::mir_expr::Context;
     use edlc_core::resolver::QualifierName;
     use crate::compiler::{TypedProgram};
@@ -1645,12 +1646,7 @@ fn test() -> i32 {
         }
     }
 
-    #[test]
-    fn test_unwind() -> Result<(), anyhow::Error> {
-        let _ = setup_logger();
-        let mut compiler = CraneliftJIT::<()>::default();
-        compiler.init()?;
-
+    fn setup_print<Runtime>(compiler: &mut CraneliftJIT<Runtime>) -> Result<(), anyhow::Error> {
         compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
         let print_fs = compiler.compiler.parse_fn_signature(
             inline_code!(r#"
@@ -1658,7 +1654,7 @@ fn test() -> i32 {
             fn print<T>(msg: T)"#),
         )?;
 
-        jit_func!((&mut compiler), fn<"str";>(print_fs),
+        jit_func!(compiler, fn<"str";>(print_fs),
             fn print_str<>(msg: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
@@ -1668,36 +1664,45 @@ fn test() -> i32 {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+        jit_func!(compiler, fn<"f32";>(print_fs),
             fn print_f32<>(msg: f32) -> () where; {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+        jit_func!(compiler, fn<"f64";>(print_fs),
             fn print_f64<>(msg: f64) -> () where; {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+        jit_func!(compiler, fn<"usize";>(print_fs),
             fn print_usize<>(msg: usize) -> () where; {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+        jit_func!(compiler, fn<"u32";>(print_fs),
             fn print_u32<>(msg: u32) -> () where; {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"u64";>(print_fs),
+        jit_func!(compiler, fn<"u64";>(print_fs),
             fn print_u64<>(msg: u64) -> () where; {
                 print!("{msg}");
             }
         );
-        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+        jit_func!(compiler, fn<"i32";>(print_fs),
             fn print_i32<>(msg: i32) -> () where; {
                 print!("{msg}");
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwind() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
 
         compiler.compiler.prepare_module(&vec!["std"].into())?;
         let panic_fs = compiler.compiler.parse_fn_signature(
@@ -1747,6 +1752,142 @@ fn test_other() {
             }
         }
         println!("panic handling was a success!");
+        Ok(())
+    }
+
+    /// Test for non-trivial drop and copy implementations.
+    #[test]
+    fn test_drop_copy() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        compiler.compiler.define_type(inline_code!(r#"
+    type Rc<T> = struct;
+    "#), LayoutOptions {
+            can_init: false,
+            repr: EdlRepresentation::Rust,
+        })?;
+
+        #[derive(Debug)]
+        struct MockRc<T> {
+            counter: usize,
+            data: T,
+        }
+
+        impl<T: MirLayout + 'static> MirLayout for MockRc<T> {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<usize>("counter".to_string(), types, std::mem::offset_of!(Self, counter));
+                builder.add_type::<T>("data".to_string(), types, std::mem::offset_of!(Self, data));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.insert_type_instance::<MockRc<f32>>(inline_code!("std::Rc<f32>"))?;
+
+        let [new_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!(r#"
+                    fn new(val: T) -> Self
+                    "#)
+                ],
+                None,
+            )?;
+        let [copy_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!("fn copy(val: &Rc<T>) -> Rc<T>"),
+                ],
+                Some((inline_code!("core::Copy"), inline_code!("<Rc<T>>"))),
+            )?;
+        let [drop_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!("fn drop(val: Rc<T>)")
+                ],
+                Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
+            )?;
+
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(new_rc),
+            fn new_rc_<>(val: f32) -> MockRc<f32> where; {
+                MockRc {
+                    counter: 0,
+                    data: val,
+                }
+            }
+        );
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(copy_rc),
+            fn copy_rc_<>(val: *const MockRc<f32>) -> MockRc<f32> where; {
+                let rc = unsafe { &*val };
+                let out = MockRc {
+                    counter: rc.counter + 1,
+                    data: rc.data,
+                };
+                println!("copied rc: {:?} -> {:?}", rc, out);
+                out
+            }
+        );
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(drop_rc),
+            fn drop_rc_<>(val: MockRc<f32>) -> () where; {
+                println!("dropping rc: {:?}", val);
+                std::mem::drop(val);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::Rc;
+
+type Data<T> = struct {
+    data: T,
+};
+
+impl Data<f32> {
+    fn print(self: Self) {
+        print("Data { data: ");
+        print(self.data);
+        print(" }");
+    }
+}
+
+impl core::Drop for Data<f32> {
+    fn drop(self: Data<f32>) {
+        print("dropping data: ");
+        self.print();
+        print("!\n");
+    }
+}
+
+fn test() {
+    let rc: Rc<f32> = Rc::new(3.14);
+    foo(rc);
+    print("hello, world!\n");
+    foo(rc);
+
+    // create some data
+    let data = Data { data: 2.73 };
+    print("created data buffer: ");
+    data.print();
+    print("\n");
+}
+
+fn foo(rc: Rc<f32>) {
+    print("hello from foo!\n");
+}
+        "#))?;
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, ()).is_ok());
         Ok(())
     }
 }

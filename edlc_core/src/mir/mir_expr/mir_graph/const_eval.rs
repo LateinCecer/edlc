@@ -1758,6 +1758,7 @@ impl Statement {
                 if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
                     if let Some(_im) = implementation.as_ref() {
                         todo!("compile-time constants can currently not have a drop implementation")
+                        // Ok(false)
                     } else {
                         Ok(false)
                     }

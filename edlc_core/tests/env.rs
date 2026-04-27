@@ -1492,7 +1492,11 @@ impl<T> Data<T> {
 }
 
 impl Data<f32> {
-    fn print(self: Self) {
+    fn modify(self: Self) -> Self {
+        self
+    }
+
+    fn print(self: Data<f32>) {
         std::print("Data: ");
         std::print(self.data);
         std::print("\n");
@@ -1507,6 +1511,14 @@ impl Data<i32> {
     }
 }
 
+// impl core::Drop for Data<f32> {
+//     fn drop(self: Self) {
+//         std::print("dropping data: ");
+//         std::print(self.data);
+//         std::print("!\n");
+//     }
+// }
+
 fn foo(rc: std::Rc<f32>) {
     std::print("hello from foo!\n");
 }
@@ -1517,6 +1529,10 @@ fn foo(rc: std::Rc<f32>) {
         foo(rc);
         std::print("hello, world!\n");
         foo(rc);
+
+        // create data
+        let data: Data<f32> = Data { data: 2.73_f32 };
+        data.print();
     }
     "#))?;
     Ok(())
