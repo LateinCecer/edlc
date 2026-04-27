@@ -155,7 +155,7 @@ impl Backtrace {
         let Some(first) = iter.next() else {
             return true;
         };
-        if !first.flags.jit_frame() {
+        if first.flags.jit_frame() {
             return true;
         }
         if first.func as *const u8 != jit_sync_panic as *const u8 {
