@@ -18,5 +18,5 @@ use crate::mir::mir_expr::MirValue;
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct SyncEvent {
     /// internal value for sync events
-    pub(crate) internal_value: MirValue,
+    pub internal_value: MirValue,
 }

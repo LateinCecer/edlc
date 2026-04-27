@@ -766,9 +766,10 @@ impl<B: Backend> MirFuncRegistry<B> {
         id: MirFuncId,
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
+        cfg: &MirFlowGraph,
         mir_call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: &MirExprId,
+        expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<B>> {
         let code_gen = &mut self.generators.get_mut(id.0)
             .expect("Invalid MIR function id").code_gen;
@@ -778,7 +779,7 @@ impl<B: Backend> MirFuncRegistry<B> {
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
-                .code_gen(backend, type_reg, mir_call, target, expr_id),
+                .code_gen(backend, type_reg, cfg, mir_call, target, expr_id),
         }
     }
 

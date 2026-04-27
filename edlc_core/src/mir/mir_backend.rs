@@ -22,7 +22,7 @@ use std::ops::AddAssign;
 use std::ptr::NonNull;
 use log::debug;
 use crate::core::EdlVarId;
-use crate::mir::mir_expr::{MirExprId, MirLoc, MirValue};
+use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
 use crate::mir::{MirError, MirPhase};
 use crate::mir::debug::DebugInformation;
 use crate::mir::mir_expr::mir_call::MirCall;
@@ -118,9 +118,10 @@ where B: Backend {
         &self,
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
+        cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: &MirExprId,
+        expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<B>>;
 
     /// Attaches the debug information about this MIR function call to the output buffer.

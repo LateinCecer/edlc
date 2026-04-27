@@ -16,14 +16,17 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::any::Any;
 use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
+use crate::hir::translation::HirTranslationError;
+use crate::hir::HirPhase;
+use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
-use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
+use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowSource};
@@ -33,15 +36,11 @@ use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{AutoImplDetails, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
+use crate::mir::mir_funcs::{AutoFnLoc, FnCodeGen, MirFn, MirFuncRegistry, SpecialFunction};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::MirPhase;
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
-use crate::core::edl_value::EdlConstValue;
-use crate::hir::HirPhase;
-use crate::hir::translation::HirTranslationError;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{AutoFnLoc, FnCodeGen, MirFn, MirFuncRegistry, SpecialFunction};
-use crate::mir::MirPhase;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LocalVarUsage {

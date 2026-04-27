@@ -20,7 +20,7 @@ use crate::layout::SSARepr;
 use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_module::Module;
 use edlc_core::prelude::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::*;
 
 impl<Runtime> Compilable<Runtime> for MirLiteral {
@@ -28,6 +28,7 @@ impl<Runtime> Compilable<Runtime> for MirLiteral {
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         target: &MirValue,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {

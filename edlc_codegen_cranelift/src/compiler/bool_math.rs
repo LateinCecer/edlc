@@ -20,7 +20,7 @@ use cranelift_codegen::ir::{InstBuilder, TrapCode};
 use edlc_core::inline_code;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
 use crate::codegen::FunctionTranslator;
 use crate::compiler::integer_math::*;
 use crate::compiler::JIT;
@@ -73,9 +73,10 @@ impl<Runtime> CodeGen<JIT<Runtime>> for AssertCodegen {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         type_reg: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         call: &MirCall,
         _target: Option<&MirValue>,
-        _expr_id: &MirExprId,
+        _expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 1);
         let input = backend

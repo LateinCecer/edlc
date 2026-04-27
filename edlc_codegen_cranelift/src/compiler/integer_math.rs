@@ -22,7 +22,7 @@ use cranelift_codegen::ir;
 use cranelift_codegen::ir::{InstBuilder};
 use cranelift_codegen::ir::condcodes::IntCC;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
 use edlc_core::inline_code;
 use crate::codegen::FunctionTranslator;
 use crate::compiler::JIT;
@@ -79,9 +79,10 @@ impl<Runtime> CodeGen<JIT<Runtime>> for UnopGen {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        _expr_id: &MirExprId,
+        _expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 1);
         let input = backend.layout.load_pod(
@@ -110,9 +111,10 @@ impl<Runtime> CodeGen<JIT<Runtime>> for BinopGen {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        _expr_id: &MirExprId,
+        _expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 2);
         let lhs = backend.layout.load_pod(
@@ -148,9 +150,10 @@ impl<Runtime> CodeGen<JIT<Runtime>> for TriopGen {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        _expr_id: &MirExprId,
+        _expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 3);
         let a = backend.layout.load_pod(

@@ -17,7 +17,7 @@
 use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_type_init::{MirInitAssign, MirTypeInit};
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirTypeInit {
@@ -25,6 +25,7 @@ impl<Runtime> Compilable<Runtime> for MirTypeInit {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         target: &MirValue,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {

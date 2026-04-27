@@ -30,7 +30,7 @@ use cranelift_codegen::ir::{SourceLoc, StackSlot};
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::{MirExprId, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
@@ -413,8 +413,19 @@ pub trait Compilable<Runtime> {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
         target: &MirValue,
         expr_id: &MirExprId,
+    ) -> Result<(), MirError<JIT<Runtime>>>;
+}
+
+pub trait HeadlessCompilable<Runtime> {
+    fn compile_headless(
+        &self,
+        backend: &mut FunctionTranslator<Runtime>,
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        target: Option<&MirValue>,
     ) -> Result<(), MirError<JIT<Runtime>>>;
 }
 

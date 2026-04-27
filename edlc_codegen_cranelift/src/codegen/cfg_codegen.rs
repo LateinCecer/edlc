@@ -1,4 +1,4 @@
-use crate::codegen::{Compilable, FunctionTranslator};
+use crate::codegen::{Compilable, FunctionTranslator, HeadlessCompilable};
 use crate::compiler::JIT;
 use crate::layout::SSARepr;
 use cranelift_codegen::ir;
@@ -8,6 +8,7 @@ use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContain
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::ops::Index;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
 
 /// Maps MIR blocks to Cranelift blocks.
 struct BlockMapper {
@@ -117,13 +118,13 @@ fn block_codegen<Runtime>(
 ) -> Result<(), MirError<JIT<Runtime>>> {
     let block = cfg.get_block(&block_ref).unwrap();
     for statement in block.statements.iter() {
-        statement_codegen(&cfg.expressions, statement, builder, phase, block_ref)?;
+        statement_codegen(cfg, statement, builder, phase, block_ref)?;
     }
     seal_codegen(cfg, block_ref, &block.seal, builder, phase, mapping)
 }
 
 fn statement_codegen<Runtime>(
-    expressions: &MirExprContainer,
+    cfg: &MirFlowGraph,
     statement: &Statement,
     builder: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
@@ -137,97 +138,109 @@ fn statement_codegen<Runtime>(
         Statement::VarDef { var, value, .. } => {
             match value.ty {
                 MirExprVariant::ArrayInit => {
-                    expressions.get_array_init(*value).compile(
+                    cfg.expressions.get_array_init(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::As => {
-                    expressions.get_as(*value).compile(
+                    cfg.expressions.get_as(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Call => {
-                    expressions.get_call(*value).compile(
+                    cfg.expressions.get_call(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Literal => {
-                    expressions.get_literal(*value).compile(
+                    cfg.expressions.get_literal(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Variable => {
-                    expressions.get_variable(*value).compile(
+                    cfg.expressions.get_variable(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Constant => {
-                    expressions.get_constant(*value).compile(
+                    cfg.expressions.get_constant(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Assign => {
-                    expressions.get_assign(*value).compile(
+                    cfg.expressions.get_assign(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Data => {
-                    expressions.get_data(*value).compile(
+                    cfg.expressions.get_data(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Init => {
-                    expressions.get_init(*value).compile(
+                    cfg.expressions.get_init(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Ref => {
-                    expressions.get_ref(*value).compile(
+                    cfg.expressions.get_ref(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::Deref => {
-                    expressions.get_deref(*value).compile(
+                    cfg.expressions.get_deref(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
                 }
                 MirExprVariant::DowncastRef => {
-                    expressions.get_downcast_ref(*value).compile(
+                    cfg.expressions.get_downcast_ref(*value).compile(
                         builder,
                         phase,
+                        cfg,
                         var,
                         value,
                     )
@@ -256,11 +269,24 @@ fn statement_codegen<Runtime>(
             );
             Ok(())
         }
+        Statement::Drop { value, implementation: Some(details), .. } => {
+            let call = MirCall::drop_impl(details.func_id, *value, details.ctx, &phase.types);
+            call.compile_headless(builder, phase, cfg, None)
+        }
         Statement::Drop { .. } => {
             Ok(())
         }
+        Statement::Sync { event, implementation: Some(details), .. } => {
+            let call = MirCall::sync_impl(details.func_id, event.internal_value, details.ctx, &phase.types);
+            call.compile_headless(builder, phase, cfg, None)
+        }
         Statement::Sync { .. } => {
             Ok(())
+        }
+        Statement::Record { event, implementation: Some(details), .. } => {
+            let event_ty = cfg.get_var_type(&event.internal_value);
+            let call = MirCall::record_impl(details.func_id, details.ctx, *event_ty);
+            call.compile_headless(builder, phase, cfg, Some(&event.internal_value))
         }
         Statement::Record { .. } => {
             Ok(())

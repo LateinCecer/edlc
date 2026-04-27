@@ -25,8 +25,9 @@ use crate::compiler::{RuntimeId, JIT};
 use cranelift_module::Linkage;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirExprVariant, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirExprVariant, MirFlowGraph, MirLoc, MirValue};
 use edlc_core::prelude::{DebugInformation, MirError, MirPhase};
+use crate::layout::stack_frame::native_calling_conv;
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
 /// is passed to the callee from the global context.
@@ -63,25 +64,30 @@ impl JITExternCall {
     }
 }
 
-/// Generates a call to a copy auto function
-fn gen_copy_call<Runtime>(
-
-) -> Result<(), MirError<JIT<Runtime>>> {
-    todo!()
-}
-
 impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
     fn code_gen(
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
         phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: &MirExprId,
+        expr_id: Option<&MirExprId>,
     ) -> Result<(), MirError<JIT<Runtime>>> {
-        let call_layout = backend.layout.call_layout(expr_id).clone();
-        let sig = call_layout.compile(backend, phase).unwrap();
-        sig.generate(backend, phase, self)
+        if let Some(expr_id) = expr_id {
+            assert!(target.is_some());
+            let call_layout = backend.layout.call_layout(expr_id).clone();
+            let sig = call_layout.compile(backend, phase).unwrap();
+            sig.generate(backend, phase, self)
+        } else {
+            use crate::layout::stack_frame::CallingConv;
+            let call_conv = native_calling_conv();
+            let call_layout = call_conv
+                .make_call_layout::<JIT<Runtime>>(cfg, call, target.cloned(), &phase.types, None)
+                .expect("calling convention layout should always be valid");
+            let sig = call_layout.compile(backend, phase).unwrap();
+            sig.generate(backend, phase, self)
+        }
     }
 
     fn debug_info(

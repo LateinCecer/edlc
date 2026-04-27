@@ -13,11 +13,10 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-use std::any::Any;
-use crate::codegen::{Compilable, FunctionTranslator};
+use crate::codegen::{Compilable, FunctionTranslator, HeadlessCompilable};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirValue};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirCall {
@@ -25,6 +24,7 @@ impl<Runtime> Compilable<Runtime> for MirCall {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
         target: &MirValue,
         expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
@@ -32,7 +32,23 @@ impl<Runtime> Compilable<Runtime> for MirCall {
         backend.func_reg
             .clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase, self, Some(target), expr_id)?;
+            .generate_call_code(self.func, backend, phase, cfg, self, Some(target), Some(expr_id))?;
+        Ok(())
+    }
+}
+
+impl<Runtime> HeadlessCompilable<Runtime> for MirCall {
+    fn compile_headless(
+        &self,
+        backend: &mut FunctionTranslator<Runtime>,
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        target: Option<&MirValue>,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
+        backend.func_reg
+            .clone()
+            .borrow_mut()
+            .generate_call_code(self.func, backend, phase, cfg, self, target, None)?;
         Ok(())
     }
 }

@@ -64,7 +64,7 @@ impl CallingConv for SysV {
         call: &MirCall,
         target: Option<MirValue>,
         reg: &MirTypeRegistry,
-        backend: &B,
+        backend: Option<&B>,
     ) -> Result<CallLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
         let ret_ty_size = reg.byte_size(call.ret).unwrap();
@@ -84,13 +84,17 @@ impl CallingConv for SysV {
             None
         };
 
-        let runtime_ordinal = if let Some(ordinal) = backend.intrinsic_runtime(&call.func) {
-            args.push(Argument {
-                rxx: 1,
-                xmm: 0,
-                purpose: ArgumentPurpose::Runtime,
-            });
-            Some(ordinal)
+        let runtime_ordinal = if let Some(backend) = backend {
+            if let Some(ordinal) = backend.intrinsic_runtime(&call.func) {
+                args.push(Argument {
+                    rxx: 1,
+                    xmm: 0,
+                    purpose: ArgumentPurpose::Runtime,
+                });
+                Some(ordinal)
+            } else {
+                None
+            }
         } else {
             None
         };

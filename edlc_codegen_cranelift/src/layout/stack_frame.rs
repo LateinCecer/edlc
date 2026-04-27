@@ -32,7 +32,6 @@ use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_core::prelude::{AmorphusData, MirError, MirPhase};
 use std::ops::Range;
 use std::sync::Arc;
-use cranelift_codegen::ir::stackslot::StackSize;
 use cranelift_jit::JITModule;
 use crate::layout::sysv::SysV;
 
@@ -79,7 +78,7 @@ impl StackFrameMapping {
                 continue;
             }
             let call = cfg.expressions.get_call(*value);
-            let call_layout = conv.make_call_layout(cfg, call, Some(*var), reg, backend)?;
+            let call_layout = conv.make_call_layout(cfg, call, Some(*var), reg, Some(backend))?;
             stack_spill_size = usize::max(stack_spill_size, call_layout.spill_size());
             stack_spill_alignment = usize::max(stack_spill_alignment, call_layout.spill_alignment());
 
@@ -332,7 +331,7 @@ impl StackFrameMapping {
         reg: &MirTypeRegistry,
         abi: &Arc<AbiConfig>,
     ) -> bool {
-        let call_layout = self.call_layouts.get(call.ordinal()).unwrap();
+        let call_layout = self.call_layout(call);
         if let Some(spill) = call_layout.stack_spill.as_ref() {
             let spill_offset = self.layout.size + self.stack_spill_offset;
             for (m, dst_range) in spill.members.iter() {
@@ -471,7 +470,7 @@ impl StackFrameMapping {
         if !matches!(self.mapping.get(value.0), Some(Mapping::Stack)) {
             panic!("cannot get reference to register mapped value");
         }
-        let (src_range, ty) = self.layout.local_offset(value).unwrap();
+        let (src_range, _ty) = self.layout.local_offset(value).unwrap();
         let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
         assert_eq!(ptr_type.bytes() as usize, abi.pointer_width);
         builder
@@ -1312,7 +1311,7 @@ pub trait CallingConv {
         call: &MirCall,
         target: Option<MirValue>,
         reg: &MirTypeRegistry,
-        backend: &B,
+        backend: Option<&B>,
     ) -> Result<CallLayout, Self::Error>;
 
     fn make_function_layout(

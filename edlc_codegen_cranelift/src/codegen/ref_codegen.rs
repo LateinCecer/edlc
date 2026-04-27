@@ -4,7 +4,7 @@ use crate::trap;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{InstBuilder, TrapCode};
 use edlc_core::prelude::mir_expr::mir_ref::RefOffset;
-use edlc_core::prelude::mir_expr::{MirDeref, MirDowncastRef, MirExprId, MirRef, MirValue};
+use edlc_core::prelude::mir_expr::{MirDeref, MirDowncastRef, MirExprId, MirFlowGraph, MirRef, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirRef {
@@ -12,6 +12,7 @@ impl<Runtime> Compilable<Runtime> for MirRef {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         target: &MirValue,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
@@ -135,6 +136,7 @@ impl<Runtime> Compilable<Runtime> for MirDeref {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         target: &MirValue,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
@@ -156,6 +158,7 @@ impl<Runtime> Compilable<Runtime> for MirDowncastRef {
         &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
         target: &MirValue,
         _expr_id: &MirExprId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
