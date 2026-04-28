@@ -69,6 +69,7 @@ pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, Stac
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::{MirPhase, TrapInfo};
+use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncConnContext, AsyncConnState, AsyncConnectome};
 use crate::prelude::mir_funcs::MirFuncId;
 use crate::resolver::ScopeId;
 
@@ -2774,6 +2775,18 @@ impl MirFlowGraph {
         state.1.consolidate(&mut state.0, lifeness, self);
         // state.1.reduce_further(lifeness, self);
         Ok(state.1)
+    }
+
+    pub fn async_connectome<B: Backend>(
+        &self,
+        mir_types: &MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        mir_func_reg: &MirFuncRegistry<B>,
+    ) -> Result<AsyncConnectome, <AsyncConnState as LatticeElement>::Conflict> {
+        let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types);
+        let mut state: MirGraphState<AsyncConnState, AsyncConnContext<B>> = MirGraphState::new(context);
+        WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
+        Ok(AsyncConnectome::new(&state.0.map))
     }
 
     /// Find SESE regions in the call graph.
