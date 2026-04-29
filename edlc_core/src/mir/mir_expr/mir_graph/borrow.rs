@@ -76,6 +76,28 @@ pub enum FlowState {
     Floating,
 }
 
+impl FlowState {
+    /// Returns the upper state for this flow state.
+    /// Effectively, only if both values are fixed, will this function return a fixed state.
+    /// Otherwise, it will default to a floating state.
+    pub fn upper(self, other: Self) -> Self {
+        if self == Self::Fixed && other == Self::Fixed {
+            Self::Fixed
+        } else {
+            Self::Floating
+        }
+    }
+
+    /// The opposite of [Self::upper].
+    pub fn lower(self, other: Self) -> Self {
+        if self == Self::Floating && other == Self::Floating {
+            Self::Floating
+        } else {
+            Self::Fixed
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReferenceState<V> {
     /// Each state corresponds to a node in a borrow tree
