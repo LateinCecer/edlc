@@ -20,12 +20,12 @@ use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::mir_expr::{MirBlockRef, MirGraphLoc, MirLoc};
 
-struct CfgBlockMap<T> {
+pub(crate) struct CfgBlockMap<T> {
     statement_data: IndexMap<T>,
     seal_data: Option<T>,
 }
 
-struct CfgMap<T> {
+pub(crate) struct CfgMap<T> {
     blocks: Vec<CfgBlockMap<T>>,
 }
 

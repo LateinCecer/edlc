@@ -21,6 +21,7 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use crate::mir::debug::CfgMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -228,17 +229,17 @@ impl AsyncConnectome {
         value: &MirValue,
         join_op: fn(V, V) -> V,
         state: &AsyncSourceState<V>,
-    ) -> V
-    where V: LatticeElement + Clone {
+    ) -> Option<V>
+    where V: Clone {
         let mut iter = self.index(*value).iter();
         let Some(first) = iter.next() else {
-            return V::bottom();
+            return None;
         };
         let mut out = state[*first].clone();
         while let Some(item) = iter.next() {
             out = join_op(out, state[*item].clone());
         }
-        out
+        Some(out)
     }
 
     fn set_state<V>(&self, key: &MirValue, value: V, state: &mut AsyncSourceState<V>)
@@ -581,15 +582,25 @@ impl IndexMut<EventId> for AsyncEventState {
     }
 }
 
-struct SyncPositions {}
+struct SyncPositions {
+    map: CfgMap<HashSet<EventId>>,
+}
 
 impl SyncPositions {
     fn new() -> Self {
-        SyncPositions {}
+        SyncPositions {
+            map: CfgMap::new(),
+        }
     }
 
-    fn insert(&mut self, loc: MirGraphLoc, event: EventId) {
-        todo!()
+    fn insert(&mut self, loc: &MirLoc, event: EventId) {
+        self.map
+            .get_mut_with(loc, HashSet::new)
+            .insert(event);
+    }
+
+    fn get_sync_events(&self, loc: &MirLoc) -> Option<&HashSet<EventId>> {
+        self.map.get(loc)
     }
 }
 
@@ -659,6 +670,63 @@ struct PooledData<V> {
     data: Vec<V>,
 }
 
+struct FindDataIndicesIter<'a, V> {
+    pool: &'a PooledData<V>,
+    target: &'a V,
+    current: usize,
+}
+
+impl<'a, V: PartialEq> Iterator for FindDataIndicesIter<'a, V> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(data) = self.pool.data.get(self.current) {
+            let idx = self.current;
+            self.current += 1;
+            if data == self.target {
+                return Some(self.pool.index_from_data_index(&idx));
+            }
+        }
+        None
+    }
+}
+
+impl<V> PooledData<V> {
+    /// Searches for all occurrences of `data` within the internal collection and returns
+    /// their corresponding mapped indices.
+    ///
+    /// Iterates through `self.data`, compares each element to `data` using equality,
+    /// and collects the results of `index_from_data_index` for every matching element.
+    /// The returned indices appear in the same order as the matches in the original data.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The value to search for.
+    ///
+    /// # Returns
+    ///
+    /// A vector of `usize` indices corresponding to each occurrence of `data`. Returns
+    /// an empty vector if no matches are found.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `V` - The type of data stored in the collection. Must implement `PartialEq` and `Eq`.
+    fn find_data_indices<'a>(&'a self, data: &'a V) -> FindDataIndicesIter<'_, V>
+    where V: PartialEq {
+        FindDataIndicesIter {
+            current: 0,
+            pool: self,
+            target: data,
+        }
+    }
+
+    /// Maps an index from `data` to the index in `indices` that corresponds the range that contains
+    /// the original `data` index.
+    fn index_from_data_index(&self, data_index: &usize) -> usize {
+        self.indices.binary_search(data_index).unwrap_or_else(|idx| idx - 1)
+    }
+}
+
 impl<V> Index<usize> for PooledData<V> {
     type Output = [V];
 
@@ -696,6 +764,7 @@ pub(super) struct AsyncFlowAnalysis<'cfg> {
     block_exit_states: Vec<BlockExitState>,
     events: Vec<AsyncEvent>,
     event_sync: PooledData<AsyncId>,
+    event_values: PooledData<MirValue>,
 }
 
 impl<'cfg> AsyncFlowAnalysis<'cfg> {
@@ -737,7 +806,6 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             source_state.merge(&exit_state.source_states, FlowState::upper);
         }
         let EventStateMerge {
-            mut syncs,
             mut state,
             ..
         } = AsyncEventState::merge(cfg.backlinks[block_ref.0]
@@ -750,28 +818,24 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
 
         for statement in block.statements.iter() {
             match statement {
-                Statement::VarDef { var, value, uid, debug } => {
+                Statement::VarDef { var: _, value, uid, debug } => {
                     match until {
                         Some(until) if until == uid => break,
                         _ => (),
                     }
 
-
-                    match value.ty {
-                        MirExprVariant::ArrayInit => {}
-                        MirExprVariant::As => {}
-                        MirExprVariant::Call => {}
-                        MirExprVariant::Literal => {}
-                        MirExprVariant::Variable => {}
-                        MirExprVariant::Constant => {}
-                        MirExprVariant::Assign => {}
-                        MirExprVariant::Data => {}
-                        MirExprVariant::Init => {}
-                        MirExprVariant::Ref => {}
-                        MirExprVariant::Deref => {}
-                        MirExprVariant::DowncastRef => {}
+                    if MirExprVariant::Call == value.ty {
+                        // If there is a function call, we sync all function arguments that are
+                        // currently floating.
+                        let call = cfg.expressions.get_call(*value);
+                        call.transfer(
+                            &mut source_state,
+                            &mut state,
+                            &mut sync_positions,
+                            self,
+                            &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                        )?;
                     }
-                    todo!()
                 }
                 Statement::VarMove { uid, .. }
                 | Statement::VarCopy { uid, .. }
@@ -797,6 +861,40 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         })
     }
 
+    /// When the output states for blocks are merged to form the input state for another block,
+    /// synchronizations may have to be inserted on the sealing statements of the parent blocks.
+    /// This method effective does that.
+    /// This method should only be called once, after the main analysis is already done.
+    pub(super) fn insert_merge_syncs(&mut self, cfg: &MirFlowGraph) {
+        for block_ref in cfg.iter_blocks() {
+            if cfg.is_block_unreachable(&block_ref) {
+                continue;
+            }
+            let EventStateMerge {
+                syncs,
+                ..
+            } = AsyncEventState::merge(cfg.backlinks[block_ref.0]
+                .iter()
+                .map(|block_ref| {
+                    let exit_state = &self.block_exit_states[block_ref.0];
+                    (*block_ref, &exit_state.event_states)
+                }));
+
+            for (events, parent) in syncs.into_iter()
+                .zip(cfg.backlinks[block_ref.0].iter()) {
+
+                let loc = MirLoc::Seal(*parent);
+                let sync_positions = &mut self
+                    .block_exit_states[parent.0]
+                    .sync_positions;
+                events
+                    .into_iter()
+                    .for_each(|event_id| sync_positions
+                        .insert(&loc, event_id));
+            }
+        }
+    }
+
     pub(super) fn state_at(&self, id: &MirLoc) -> BlockExitState {
         todo!()
     }
@@ -816,6 +914,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             .expect("event type not registered");
 
         let mut event_pool_builder = PooledDataBuilder::<AsyncId>::new();
+        let mut event_values_builder = PooledDataBuilder::<MirValue>::new();
+
         for block_ref in cfg.iter_blocks() {
             if cfg.is_block_unreachable(&block_ref) {
                 continue;
@@ -852,7 +952,9 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                 sync_event,
                             );
                             let pool_id = event_pool_builder.push_index();
+                            let value_id = event_values_builder.push_index();
                             assert_eq!(pool_id, event.0);
+                            assert_eq!(value_id, event.0);
 
                             // register event for all values that it syncs
                             if sig.async_return {
@@ -860,6 +962,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                 self.conn[target_var].iter().for_each(|id| {
                                     event_pool_builder.push_data(*id);
                                 });
+                                event_values_builder.push_data(target_var);
                             }
                             let call = cfg.expressions.get_call(expr_id);
                             let mut param_idx: usize = 0;
@@ -879,6 +982,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                     self.conn[value].iter().for_each(|id| {
                                         event_pool_builder.push_data(*id);
                                     });
+                                    event_values_builder.push_data(value);
                                 }
                             }
                         }
@@ -888,6 +992,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             }
         }
         self.event_sync = event_pool_builder.build();
+        self.event_values = event_values_builder.build();
     }
 
     /// Inserts synchronization records into the CFG.
@@ -926,13 +1031,35 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         EventId(id)
     }
 
+    /// Synchronizes a recorded event at the specified MIR graph location.
+    ///
+    /// Transitions the given event from `Recorded` to `Synchronized`, updates all associated
+    /// source states to `Fixed`, and records the synchronization location.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `event_state[event]` is not `EventState::Recorded`.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The identifier of the event to synchronize.
+    /// * `event_state` - Mutable state tracking the lifecycle of events.
+    /// * `state` - Mutable state tracking source flow states, updated to `Fixed` for event sources.
+    /// * `sync_positions` - Collection mapping MIR graph locations to synchronized events.
+    /// * `loc` - The MIR graph location where the synchronization occurs.
+    ///
+    /// # Side Effects
+    ///
+    /// - Updates `state[*source]` to `FlowState::Fixed` for all sources linked to the event.
+    /// - Inserts the `(loc, event)` pair into `sync_positions`.
+    /// - Sets `event_state[event]` to `EventState::Synchronized`.
     fn sync_event(
         &self,
         event: EventId,
         event_state: &mut AsyncEventState,
         state: &mut AsyncSourceState<FlowState>,
         sync_positions: &mut SyncPositions,
-        loc: MirGraphLoc,
+        loc: &MirLoc,
     ) {
         assert_eq!(
             event_state[event],
@@ -944,6 +1071,35 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         });
         sync_positions.insert(loc, event);
         event_state[event] = EventState::Synchronized;
+    }
+
+    /// Synchronizes all **events** that are actively synchronizing `value` and that are currently
+    /// in a recording state.
+    /// If the event is _not_ in a recorded state, the event has either not been reached yet, or it
+    /// was already synchronized.
+    /// Thus, if that case is reached, nothing happens.
+    fn sync_value(
+        &self,
+        value: &MirValue,
+        event_state: &mut AsyncEventState,
+        state: &mut AsyncSourceState<FlowState>,
+        sync_positions: &mut SyncPositions,
+        loc: &MirLoc,
+    ) {
+        self.event_values
+            .find_data_indices(value)
+            .for_each(|event_id_raw| {
+                let event_id = EventId(event_id_raw);
+                if event_state[event_id] == EventState::Recorded {
+                    self.sync_event(
+                        event_id,
+                        event_state,
+                        state,
+                        sync_positions,
+                        loc,
+                    );
+                }
+            });
     }
 }
 
@@ -964,22 +1120,44 @@ impl<'cfg> IndexMut<EventId> for AsyncFlowAnalysis<'cfg> {
 trait TransferAsyncState {
     fn transfer(
         &self,
-        state: &mut AsyncConnState,
-        event_state: &mut EventState,
+        state: &mut AsyncSourceState<FlowState>,
+        event_state: &mut AsyncEventState,
         sync_positions: &mut SyncPositions,
         flow_analysis: &mut AsyncFlowAnalysis,
+        loc: &MirLoc,
     ) -> Result<(), AsyncConnConflict>;
 }
 
 impl TransferAsyncState for MirCall {
     fn transfer(
         &self,
-        state: &mut AsyncConnState,
-        event_state: &mut EventState,
+        source_states: &mut AsyncSourceState<FlowState>,
+        event_state: &mut AsyncEventState,
         sync_positions: &mut SyncPositions,
         flow_analysis: &mut AsyncFlowAnalysis,
+        loc: &MirLoc,
     ) -> Result<(), AsyncConnConflict> {
-
-        todo!()
+        for param in self.args.iter() {
+            let state = flow_analysis
+                .conn
+                .get_state(param, FlowState::upper, source_states);
+            if matches!(state, Some(FlowState::Floating)) {
+                flow_analysis.sync_value(
+                    param,
+                    event_state,
+                    source_states,
+                    sync_positions,
+                    loc,
+                );
+                let state = flow_analysis
+                    .conn
+                    .get_state(param, FlowState::upper, source_states);
+                assert!(
+                    matches!(state, Some(FlowState::Fixed)),
+                    "MIR value async flow-state did not change after synchronizing",
+                );
+            }
+        }
+        Ok(())
     }
 }
