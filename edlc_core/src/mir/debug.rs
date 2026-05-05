@@ -29,6 +29,24 @@ pub(crate) struct CfgMap<T> {
     blocks: Vec<CfgBlockMap<T>>,
 }
 
+pub(crate) struct CfgMapIter<'a, T> {
+    map: &'a CfgMap<T>,
+    block_idx: usize,
+    statement_idx: usize,
+}
+
+impl<'a, T> CfgMapIter<'a, T> {
+
+}
+
+impl<'a, T> Iterator for CfgMapIter<'a, T> {
+    type Item = (MirLoc, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
+
 impl<T> CfgMap<T> {
     pub fn new() -> Self {
         CfgMap {

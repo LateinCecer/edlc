@@ -152,13 +152,22 @@ impl<V> AsyncSourceState<V> {
         }
     }
 
+    fn set(&mut self, other: &Self) -> bool
+    where V: Copy + PartialEq {
+        self.merge(other, |_, rhs| rhs)
+    }
+
     /// Merges the values from `other` into `self`.
-    fn merge(&mut self, other: &Self, join: fn(V, V) -> V)
-    where V: Copy {
+    fn merge(&mut self, other: &Self, join: fn(V, V) -> V) -> bool
+    where V: Copy + PartialEq {
         assert_eq!(self.states.len(), other.states.len());
+        let mut changed = false;
         for (lhs, rhs) in self.states.iter_mut().zip(other.states.iter()) {
-            *lhs = join(*lhs, *rhs);
+            let new = join(*lhs, *rhs);
+            changed |= &new != lhs;
+            *lhs = new;
         }
+        changed
     }
 }
 
@@ -548,23 +557,104 @@ struct AsyncEvent {
     sync_event: SyncEvent,
 }
 
+#[derive(Clone, Debug)]
 struct AsyncEventState {
     event_states: Vec<EventState>,
+}
+
+impl AsyncEventState {
+    fn set(&mut self, other: &Self) -> bool {
+        assert_eq!(self.event_states.len(), other.event_states.len());
+        let mut changed = false;
+        for (lhs, rhs) in self.event_states.iter_mut().zip(other.event_states.iter()) {
+            changed |= lhs != rhs;
+            *lhs = *rhs;
+        }
+        changed
+    }
+
+    fn compare(&self, other: &Self) -> HashSet<EventId> {
+        assert_eq!(self.event_states.len(), other.event_states.len());
+        let mut diff = HashSet::new();
+        for (idx, (lhs, rhs)) in self.event_states
+            .iter()
+            .zip(other.event_states.iter())
+            .enumerate() {
+
+            if lhs != rhs {
+                diff.insert(EventId(idx));
+            }
+        }
+        diff
+    }
+
+    /// Sets the state of a number of events to `synchronized`.
+    fn sync(&mut self, ids: &[EventId]) {
+        for id in ids {
+            self.event_states[id.0] = EventState::Synchronized;
+        }
+    }
+
+    fn new(len: usize, default: EventState) -> Self {
+        Self {
+            event_states: vec![default; len],
+        }
+    }
+
+    fn extend_to_len(&mut self, len: usize, default: EventState) {
+        while self.event_states.len() < len {
+            self.event_states.push(default);
+        }
+    }
 }
 
 struct EventStateMerge {
     state: AsyncEventState,
     /// Encodes which events must be synchronized in every participating block to join the event
     /// states.
-    syncs: Vec<Vec<EventId>>,
+    syncs: Vec<HashSet<EventId>>,
+}
+
+impl EventStateMerge {
+    fn get_syncs_mut(&mut self, block_ref: &MirBlockRef) -> &mut HashSet<EventId> {
+        while self.syncs.len() <= block_ref.0 {
+            self.syncs.push(HashSet::new());
+        }
+        &mut self.syncs[block_ref.0]
+    }
+
+    fn sync<I: IntoIterator<Item=EventId>>(&mut self, block_ref: &MirBlockRef, events: I) {
+        for event in events {
+            if self.state.event_states[event.0] == EventState::Recorded {
+                self.state.event_states[event.0] = EventState::Synchronized;
+                self.get_syncs_mut(block_ref).insert(event);
+            }
+        }
+    }
 }
 
 impl AsyncEventState {
-    fn merge<'a, I: IntoIterator<Item=(MirBlockRef, &'a Self), IntoIter=Iter>, Iter: Iterator<Item=(MirBlockRef, &'a Self)>>(iter: I) -> EventStateMerge {
-        for (block, item) in iter.into_iter() {
+    fn merge<'a, I: IntoIterator<Item=(MirBlockRef, &'a Self), IntoIter=Iter>, Iter: Iterator<Item=(MirBlockRef, &'a Self)>>(iter: I) -> Option<EventStateMerge> {
+        let mut iterator = iter.into_iter();
+        let mut already_synced = Vec::new();
+        let mut state = if let Some((block, item)) = iterator.next() {
+            already_synced.push(block);
+            EventStateMerge {
+                state: item.clone(),
+                syncs: vec![],
+            }
+        } else {
+            return None;
+        };
 
+        while let Some((block, item)) = iterator.next() {
+            let comp = state.state.compare(item);
+            state.sync(&block, comp.iter().cloned());
+            for prev in already_synced.iter() {
+                state.sync(prev, comp.iter().cloned());
+            }
         }
-        todo!()
+        Some(state)
     }
 }
 
@@ -618,7 +708,10 @@ impl BlockExitState {
         &mut self,
         other: Self,
     ) -> bool {
-        todo!()
+        let changed = self.event_states.set(&other.event_states)
+            | self.source_states.set(&other.source_states);
+        self.sync_positions = other.sync_positions;
+        changed
     }
 }
 
@@ -771,6 +864,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// Executes a forward-fixed-point algorithm to determine what the floating state of each MIR
     /// value / synchronization source is at any given point in the CFG.
     pub(super) fn update(&mut self, cfg: &MirFlowGraph) -> Result<(), AsyncConnConflict> {
+        self.update_state_length();
         let mut worklist = VecDeque::from([cfg.root()]);
         while let Some(next) = worklist.pop_front() {
             assert!(!cfg.is_block_unreachable(&next));
@@ -789,6 +883,12 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         Ok(())
     }
 
+    fn update_state_length(&mut self) {
+        for state in self.block_exit_states.iter_mut() {
+            state.event_states.extend_to_len(self.events.len(), EventState::Invalid);
+        }
+    }
+
     fn update_block(
         &mut self,
         cfg: &MirFlowGraph,
@@ -805,6 +905,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             let exit_state = &self.block_exit_states[parent.0];
             source_state.merge(&exit_state.source_states, FlowState::upper);
         }
+
         let EventStateMerge {
             mut state,
             ..
@@ -813,7 +914,13 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             .map(|block_ref| {
                 let exit_state = &self.block_exit_states[block_ref.0];
                 (*block_ref, &exit_state.event_states)
-            }));
+            }))
+            .unwrap_or_else(|| {
+                EventStateMerge {
+                    state: AsyncEventState::new(self.events.len(), EventState::Invalid),
+                    syncs: Vec::new(),
+                }
+            });
         let mut sync_positions = SyncPositions::new();
 
         for statement in block.statements.iter() {
@@ -866,6 +973,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// This method effective does that.
     /// This method should only be called once, after the main analysis is already done.
     pub(super) fn insert_merge_syncs(&mut self, cfg: &MirFlowGraph) {
+        self.update_state_length();
         for block_ref in cfg.iter_blocks() {
             if cfg.is_block_unreachable(&block_ref) {
                 continue;
@@ -878,7 +986,13 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 .map(|block_ref| {
                     let exit_state = &self.block_exit_states[block_ref.0];
                     (*block_ref, &exit_state.event_states)
-                }));
+                }))
+                .unwrap_or_else(|| {
+                    EventStateMerge {
+                        state: AsyncEventState::new(self.events.len(), EventState::Invalid),
+                        syncs: Vec::new(),
+                    }
+                });
 
             for (events, parent) in syncs.into_iter()
                 .zip(cfg.backlinks[block_ref.0].iter()) {
@@ -893,10 +1007,6 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                         .insert(&loc, event_id));
             }
         }
-    }
-
-    pub(super) fn state_at(&self, id: &MirLoc) -> BlockExitState {
-        todo!()
     }
 
     /// Inserts record statements into the CFG.
@@ -1017,7 +1127,11 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
     }
 
-    pub(super) fn infer_syncs(&mut self, cfg: &MirFlowGraph) {
+    pub(super) fn insert_syncs(&self, cfg: &mut MirFlowGraph) {
+        for (block, state) in self.block_exit_states.iter().enumerate() {
+            let block = MirBlockRef(block);
+            
+        }
         todo!()
     }
 
