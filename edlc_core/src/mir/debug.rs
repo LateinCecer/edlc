@@ -18,7 +18,7 @@ use std::ops;
 use crate::core::index_map::IndexMap;
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::mir::mir_expr::{MirBlockRef, MirGraphLoc, MirLoc};
+use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirGraphLoc, MirLoc};
 
 pub(crate) struct CfgBlockMap<T> {
     statement_data: IndexMap<T>,
@@ -29,21 +29,44 @@ pub(crate) struct CfgMap<T> {
     blocks: Vec<CfgBlockMap<T>>,
 }
 
-pub(crate) struct CfgMapIter<'a, T> {
+pub(crate) struct CfgMapIter<'a, 'cfg, T> {
     map: &'a CfgMap<T>,
+    cfg: &'cfg MirFlowGraph,
     block_idx: usize,
     statement_idx: usize,
 }
 
-impl<'a, T> CfgMapIter<'a, T> {
-
-}
-
-impl<'a, T> Iterator for CfgMapIter<'a, T> {
+impl<'a, 'cfg, T> Iterator for CfgMapIter<'a, 'cfg, T> {
     type Item = (MirLoc, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        loop {
+            let block = self.map.blocks.get(self.block_idx)?;
+            let cfg_block = self.cfg.get_block(&MirBlockRef(self.block_idx)).unwrap();
+            while self.statement_idx < cfg_block.statements.len() {
+                let Some(statement_data) = block.statement_data.get(self.statement_idx) else {
+                    self.statement_idx += 1;
+                    continue;
+                };
+                let uid = *cfg_block.statements[self.statement_idx].uid();
+                self.statement_idx += 1;
+                return Some((
+                    MirLoc::GraphLoc(MirGraphLoc::new(MirBlockRef(self.block_idx), uid)),
+                    statement_data,
+                ));
+            }
+            if self.statement_idx == cfg_block.statements.len() {
+                if let Some(seal_data) = block.seal_data.as_ref() {
+                    self.statement_idx += 1;
+                    break Some((
+                        MirLoc::Seal(MirBlockRef(self.block_idx)),
+                        seal_data,
+                    ));
+                }
+            }
+            self.block_idx += 1;
+            self.statement_idx = 0;
+        }
     }
 }
 
@@ -51,6 +74,15 @@ impl<T> CfgMap<T> {
     pub fn new() -> Self {
         CfgMap {
             blocks: Vec::new(),
+        }
+    }
+
+    pub(crate) fn iter<'cfg>(&self, cfg: &'cfg MirFlowGraph) -> CfgMapIter<'_, 'cfg, T> {
+        CfgMapIter {
+            map: self,
+            cfg,
+            block_idx: 0,
+            statement_idx: 0,
         }
     }
 

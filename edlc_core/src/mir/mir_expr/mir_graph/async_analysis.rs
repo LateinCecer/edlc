@@ -141,6 +141,12 @@ impl Display for AsyncConnState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AsyncId(u32);
 
+impl Display for AsyncId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "${}", self.0)
+    }
+}
+
 struct AsyncSourceState<V> {
     states: Vec<V>,
 }
@@ -185,10 +191,34 @@ impl<V> IndexMut<AsyncId> for AsyncSourceState<V> {
     }
 }
 
+#[derive(Debug)]
 pub struct AsyncConnectome {
     value_index: Vec<usize>,
     ids: Vec<AsyncId>,
     id_to_source: Vec<AsyncSource>,
+}
+
+impl Display for AsyncConnectome {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for value_raw in 0..self.value_index.len() {
+            let value = MirValue(value_raw);
+            let async_ids = &self[value];
+
+            write!(f, "sources for value: [")?;
+            let mut first = true;
+            for id in async_ids.iter() {
+                let source = self.get_source(*id).unwrap();
+                if first {
+                    first = false;
+                } else {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{source}")?;
+            }
+            writeln!(f, "]")?;
+        }
+        Ok(())
+    }
 }
 
 impl AsyncConnectome {
@@ -196,12 +226,18 @@ impl AsyncConnectome {
         let mut id_to_source = vec![];
         let mut source_to_id = HashMap::<AsyncSource, AsyncId>::new();
 
-        let mut value_index = vec![];
+        let mut value_index = vec![0];
         let mut ids = vec![];
 
-        for (value, state) in map.iter() {
-            while value_index.len() < value.0 {
-                value_index.push(0);
+        let mut sorted_ids = map.keys().cloned().collect::<Vec<_>>();
+        sorted_ids.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+
+        for (value, state) in sorted_ids
+            .iter()
+            .map(|val| (val, map.get(val).unwrap())) {
+
+            while value_index.len() <= value.0 {
+                value_index.push(ids.len());
             }
             value_index[value.0] = ids.len();
 
@@ -763,6 +799,34 @@ struct PooledData<V> {
     data: Vec<V>,
 }
 
+impl<V> Default for PooledData<V> {
+    fn default() -> Self {
+        PooledData {
+            indices: vec![],
+            data: vec![],
+        }
+    }
+}
+
+impl<V: Display> Display for PooledData<V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        for i in 0..self.indices.len() {
+            let mut first = true;
+            write!(f, "{i:<2}: [")?;
+            for data in self[i].iter() {
+                if first {
+                    first = false;
+                } else {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{data}")?;
+            }
+            writeln!(f, "]")?;
+        }
+        Ok(())
+    }
+}
+
 struct FindDataIndicesIter<'a, V> {
     pool: &'a PooledData<V>,
     target: &'a V,
@@ -818,6 +882,14 @@ impl<V> PooledData<V> {
     fn index_from_data_index(&self, data_index: &usize) -> usize {
         self.indices.binary_search(data_index).unwrap_or_else(|idx| idx - 1)
     }
+
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
 }
 
 impl<V> Index<usize> for PooledData<V> {
@@ -852,7 +924,7 @@ impl<V> IndexMut<usize> for PooledData<V> {
     }
 }
 
-pub(super) struct AsyncFlowAnalysis<'cfg> {
+pub struct AsyncFlowAnalysis<'cfg> {
     conn: &'cfg AsyncConnectome,
     block_exit_states: Vec<BlockExitState>,
     events: Vec<AsyncEvent>,
@@ -861,9 +933,19 @@ pub(super) struct AsyncFlowAnalysis<'cfg> {
 }
 
 impl<'cfg> AsyncFlowAnalysis<'cfg> {
+    pub fn new(conn: &'cfg AsyncConnectome) -> Self {
+        AsyncFlowAnalysis {
+            conn,
+            block_exit_states: vec![],
+            events: vec![],
+            event_sync: PooledData::default(),
+            event_values: PooledData::default(),
+        }
+    }
+
     /// Executes a forward-fixed-point algorithm to determine what the floating state of each MIR
     /// value / synchronization source is at any given point in the CFG.
-    pub(super) fn update(&mut self, cfg: &MirFlowGraph) -> Result<(), AsyncConnConflict> {
+    pub fn update(&mut self, cfg: &MirFlowGraph) -> Result<(), AsyncConnConflict> {
         self.update_state_length();
         let mut worklist = VecDeque::from([cfg.root()]);
         while let Some(next) = worklist.pop_front() {
@@ -1012,7 +1094,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// Inserts record statements into the CFG.
     /// Usually, this only has to be called once, as this function simply inserts once record
     /// event for every call to an async function.
-    pub(super) fn create_records<B: Backend>(
+    pub fn create_records<B: Backend>(
         &mut self,
         cfg: &mut MirFlowGraph,
         func_reg: &MirFuncRegistry<B>,
@@ -1103,6 +1185,11 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
         self.event_sync = event_pool_builder.build();
         self.event_values = event_values_builder.build();
+        self.init_exit_states();
+    }
+
+    fn init_exit_states(&mut self) {
+
     }
 
     /// Inserts synchronization records into the CFG.
@@ -1130,9 +1217,20 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     pub(super) fn insert_syncs(&self, cfg: &mut MirFlowGraph) {
         for (block, state) in self.block_exit_states.iter().enumerate() {
             let block = MirBlockRef(block);
-            
         }
         todo!()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn debug_print(&self, _cfg: &MirFlowGraph) {
+        println!(" -- [DEBUG]> async code analysis -- ");
+        println!(" connectome:");
+        println!("{}", &self.conn);
+        println!(" event sources:");
+        println!("{}", &self.event_sync);
+        println!(" event values:");
+        println!("{}", &self.event_values);
+        println!(" -- [DEBUG]> end of record -- ");
     }
 
     fn new_event(&mut self, loc: MirGraphLoc, target: MirValue, internal: SyncEvent) -> EventId {

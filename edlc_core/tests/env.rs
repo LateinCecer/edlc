@@ -20,7 +20,7 @@ use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, IntrinsicExecutionError, StaticData};
-use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, AsyncFlowAnalysis, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirLayout, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
@@ -296,6 +296,22 @@ impl TestCompiler {
             writer.print(&body)?;
             out.flush()?;
         }
+
+        // create connectome
+        let connectome = body.async_connectome(
+            &self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+            &self.backend.func_reg(),
+        )?;
+        let mut async_analysis = AsyncFlowAnalysis::new(&connectome);
+        async_analysis.create_records(
+            &mut body,
+            &self.backend.func_reg(),
+            &self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+        );
+        #[cfg(debug_assertions)]
+        async_analysis.debug_print(&body);
 
 
         vm.alloc_stack_frame(&stack_frame);
@@ -1259,6 +1275,11 @@ fn test_auto() -> Result<(), anyhow::Error> {
     let mut comp = TestCompiler::new();
     comp.init()?;
 
+    let event_ty = comp.compiler.parse_type(inline_code!("isize"))?
+        .unwrap();
+    comp.compiler.phase.types.register_event_type(event_ty);
+    comp.compiler.mir_phase.types.register_event_type::<isize>(&comp.compiler.phase.types)?;
+
     comp.compiler.prepare_module(&vec!["std"].into())?;
     let input_fs = comp.compiler.parse_fn_signature(
         inline_code!("fn input() -> i32"),
@@ -1533,6 +1554,147 @@ fn foo(rc: std::Rc<f32>) {
         // create data
         let data: Data<f32> = Data { data: 2.73_f32 };
         data.print();
+    }
+    "#))?;
+    Ok(())
+}
+
+#[test]
+fn test_async() -> Result<(), anyhow::Error> {
+    let mut comp = TestCompiler::new();
+    comp.init()?;
+
+    let event_ty = comp.compiler.parse_type(inline_code!("isize"))?
+        .unwrap();
+    comp.compiler.phase.types.register_event_type(event_ty);
+    comp.compiler.mir_phase.types.register_event_type::<isize>(&comp.compiler.phase.types)?;
+
+    comp.compiler.prepare_module(&vec!["std"].into())?;
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
+    extern "C" fn input_binding() -> i32 {
+        10
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<f32>"), None,
+    )?;
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_f32",
+        )?;
+    extern "C" fn print_f32(val: f32) {
+        print!("{val}");
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_f32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+type Field = struct {
+    pointer: usize,
+};
+
+type DevicePointer = struct {
+    ptr: usize,
+};
+
+impl Field {
+    fn as_device_ptr(self: Self) -> DevicePointer {
+        DevicePointer { ptr: self.pointer }
+    }
+}
+
+async fn calc_gradient(async dst: Field) {}
+async fn calc_laplace(src: Field, async dst: Field) {}
+    "#))?;
+    comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
+    {
+        std::print("hello, world!\n");
+        let p = Field { pointer: 0 };
+        calc_gradient(p);
     }
     "#))?;
     Ok(())

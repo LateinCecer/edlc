@@ -66,6 +66,7 @@ pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unk
 pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
+pub use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncFlowAnalysis};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::{MirPhase, TrapInfo};
@@ -74,7 +75,7 @@ use crate::prelude::mir_funcs::MirFuncId;
 use crate::resolver::ScopeId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MirBlockRef(pub(super) usize);
+pub struct MirBlockRef(pub(crate) usize);
 
 impl MirBlockRef {
     pub fn ordinal(&self) -> usize {
@@ -147,7 +148,7 @@ impl CurrentMirLoc {
 }
 
 impl MirGraphLoc {
-    fn new(block_ref: MirBlockRef, uid: BlockLocalStatementUid) -> Self {
+    pub(crate) fn new(block_ref: MirBlockRef, uid: BlockLocalStatementUid) -> Self {
         Self(block_ref, uid)
     }
 }
