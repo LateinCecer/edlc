@@ -1681,7 +1681,13 @@ async fn calc_laplace(async src: DevicePointer, async dst: DevicePointer) {}
         let laplace = Field { pointer: 2 };
 
         calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
+
+
+
         calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
+
+
+
         calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
     }
     "#))?;

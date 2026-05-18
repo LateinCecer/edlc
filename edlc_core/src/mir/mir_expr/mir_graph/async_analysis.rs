@@ -756,19 +756,21 @@ impl IndexMut<EventId> for AsyncEventState {
 }
 
 struct SyncPositions {
-    map: CfgMap<HashSet<EventId>>,
+    // map: CfgMap<HashSet<EventId>>,
+    map: HashMap<MirLoc, HashSet<EventId>>,
 }
 
 impl SyncPositions {
     fn new() -> Self {
         SyncPositions {
-            map: CfgMap::new(),
+            map: HashMap::new(),
         }
     }
 
     fn insert(&mut self, loc: &MirLoc, event: EventId) {
         self.map
-            .get_mut_with(loc, HashSet::new)
+            .entry(loc.clone())
+            .or_insert_with(HashSet::new)
             .insert(event);
     }
 
@@ -1115,7 +1117,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             let exit_state = &self.block_exit_states[block_ref.0];
             let block = cfg.get_block(&block_ref).unwrap();
             let mut block_pos = Vec::new();
-            for (loc, events) in exit_state.sync_positions.map.iter(cfg) {
+            for (loc, events) in exit_state.sync_positions.map.iter() {
                 if let Some(pos) = block.find_pos(&loc) {
                     block_pos.push((pos, events));
                 }
