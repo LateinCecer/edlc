@@ -185,5 +185,5 @@ For the funding statement, please refer to [FUNDING.md](FUNDING.md#academic-fund
 
 ## License
 
-EDL is primarily distributed under the terms of the Apache-2.0 license.
+EDL is primarily distributed under the terms of the AGPLv3 license.
 See [LICENSE](LICENSE), and [COPYRIGHT](COPYRIGHT) for details.
