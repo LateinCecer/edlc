@@ -23,7 +23,7 @@ use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowS
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
-use crate::mir::mir_expr::{AsciPrinter, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
+use crate::mir::mir_expr::{AsciPrinter, AsyncFlowAnalysis, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
@@ -2174,6 +2174,28 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         writer.print(body).unwrap();
         out.flush().unwrap();
     }
+
+    // create connectome
+    let connectome = body.async_connectome(
+        &compiler.mir_phase.types,
+        &compiler.phase.types,
+        &backend.func_reg(),
+        None,
+    ).unwrap();
+    let mut async_analysis = AsyncFlowAnalysis::new(&connectome);
+    async_analysis.create_records(
+        body,
+        &backend.func_reg(),
+        &compiler.mir_phase.types,
+        &compiler.phase.types,
+    );
+    #[cfg(debug_assertions)]
+    async_analysis.debug_print(&body);
+
+    async_analysis.update(&body).unwrap();
+    async_analysis.insert_merge_syncs(&body);
+    #[cfg(debug_assertions)]
+    async_analysis.debug_print(&body);
 
     // create stack frame
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;

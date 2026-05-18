@@ -297,23 +297,6 @@ impl TestCompiler {
             out.flush()?;
         }
 
-        // create connectome
-        let connectome = body.async_connectome(
-            &self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-            &self.backend.func_reg(),
-        )?;
-        let mut async_analysis = AsyncFlowAnalysis::new(&connectome);
-        async_analysis.create_records(
-            &mut body,
-            &self.backend.func_reg(),
-            &self.compiler.mir_phase.types,
-            &self.compiler.phase.types,
-        );
-        #[cfg(debug_assertions)]
-        async_analysis.debug_print(&body);
-
-
         vm.alloc_stack_frame(&stack_frame);
         let res = body
             .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
@@ -1682,19 +1665,24 @@ type DevicePointer = struct {
 };
 
 impl Field {
-    fn as_device_ptr(self: Self) -> DevicePointer {
+    fn as_device_ptr(async self: Self) -> async DevicePointer {
         DevicePointer { ptr: self.pointer }
     }
 }
 
-async fn calc_gradient(async dst: Field) {}
-async fn calc_laplace(src: Field, async dst: Field) {}
+async fn calc_gradient(src: DevicePointer, async dst: DevicePointer) {}
+async fn calc_laplace(async src: DevicePointer, async dst: DevicePointer) {}
     "#))?;
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
         std::print("hello, world!\n");
         let p = Field { pointer: 0 };
-        calc_gradient(p);
+        let grad = Field { pointer: 1 };
+        let laplace = Field { pointer: 2 };
+
+        calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
+        calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
+        calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
     }
     "#))?;
     Ok(())

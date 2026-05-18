@@ -1481,6 +1481,19 @@ impl Block {
             })
     }
 
+    pub fn find_pos(&self, loc: &MirLoc) -> Option<&SrcPos> {
+        match loc {
+            MirLoc::GraphLoc(MirGraphLoc(_, uid)) => {
+                self.find_current_index(uid)
+                    .and_then(|idx| self.statements.get(idx))
+                    .map(|statement| &statement.debug().pos)
+            },
+            MirLoc::Seal(_) => {
+                Some(&self.seal.debug().pos)
+            },
+        }
+    }
+
     fn down_link(&self) -> Vec<MirBlockRef> {
         match &self.seal {
             Seal::Return(_, _) => Vec::new(),
@@ -2783,9 +2796,10 @@ impl MirFlowGraph {
         mir_types: &MirTypeRegistry,
         edl_types: &EdlTypeRegistry,
         mir_func_reg: &MirFuncRegistry<B>,
+        func_id: Option<MirFuncId>,
     ) -> Result<AsyncConnectome, <AsyncConnState as LatticeElement>::Conflict> {
-        let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types);
-        let mut state: MirGraphState<AsyncConnState, AsyncConnContext<B>> = MirGraphState::new(context);
+        let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types, func_id);
+        let mut state = context.create_state();
         WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
         Ok(AsyncConnectome::new(&state.0.map))
     }

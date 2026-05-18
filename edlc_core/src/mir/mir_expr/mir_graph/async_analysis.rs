@@ -1,3 +1,4 @@
+use std::arch::x86_64::_blcfill_u64;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::index_map::IndexMap;
 use crate::core::EdlVarId;
@@ -14,14 +15,17 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, SealEval, TransferCopy, Transfer
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{BlockLocalStatementUid, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, MirRef, MirValue, Seal, Statement};
+use crate::mir::mir_expr::{BlockLocalStatementUid, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::MirTypeRegistry;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use crate::file::ModuleSrc;
+use crate::lexer::SrcPos;
 use crate::mir::debug::CfgMap;
+use crate::prelude::mir_funcs::MirFuncId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -32,12 +36,16 @@ pub struct AsyncData(usize);
 pub enum AsyncSource {
     Local(AsyncData),
     Global(EdlVarId),
+    SyncParam(AsyncData),
+    AsyncParam(AsyncData),
 }
 
 impl Display for AsyncSource {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Local(data) => write!(f, "local #{:x}", data.0),
+            Self::SyncParam(data) => write!(f, "param #{:x}", data.0),
+            Self::AsyncParam(data) => write!(f, "async #{:x}", data.0),
             Self::Global(id) => write!(f, "global {}", id.0),
         }
     }
@@ -147,6 +155,7 @@ impl Display for AsyncId {
     }
 }
 
+#[derive(Debug)]
 struct AsyncSourceState<V> {
     states: Vec<V>,
 }
@@ -203,8 +212,11 @@ impl Display for AsyncConnectome {
         for value_raw in 0..self.value_index.len() {
             let value = MirValue(value_raw);
             let async_ids = &self[value];
+            if async_ids.is_empty() {
+                continue;
+            }
 
-            write!(f, "sources for value: [")?;
+            write!(f, "sources for value ${:x}: [", value.0)?;
             let mut first = true;
             for id in async_ids.iter() {
                 let source = self.get_source(*id).unwrap();
@@ -320,7 +332,7 @@ pub struct AsyncConnContext<'reg, B: Backend> {
     func: &'reg MirFuncRegistry<B>,
     edl_types: &'reg EdlTypeRegistry,
 
-    parameters: Vec<(AsyncData, bool)>,
+    parameters: Vec<AsyncSource>,
     source_counter: usize,
     source_references: IndexMap<AsyncData>,
     source_reverse: IndexMap<MirValue>,
@@ -332,8 +344,9 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
         cfg: &'reg MirFlowGraph,
         func: &'reg MirFuncRegistry<B>,
         edl_types: &'reg EdlTypeRegistry,
+        func_id: Option<MirFuncId>,
     ) -> Self {
-        AsyncConnContext {
+        let mut ctx = AsyncConnContext {
             reg,
             cfg,
             func,
@@ -343,11 +356,38 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
             source_counter: 0,
             source_references: IndexMap::default(),
             source_reverse: IndexMap::default(),
-        }
-    }
-}
+        };
 
-impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
+        if let Some(func_id) = func_id {
+            let func_id = func.get_edl_id(func_id)
+                .expect("invalid function id");
+            let sig = edl_types.get_fn_signature(func_id).unwrap();
+            for (param, value) in sig.params
+                .iter()
+                .filter(|param| !param.comptime)
+                .chain(sig.params.iter().filter(|param| param.comptime))
+                .zip(cfg.get_root_parameters().iter()) {
+                let data = ctx.get_async_data(value);
+                ctx.parameters.push(if param.async_ {
+                    AsyncSource::AsyncParam(data)
+                } else {
+                    AsyncSource::SyncParam(data)
+                });
+            }
+        }
+        ctx
+    }
+
+    pub fn create_state(self) -> MirGraphState<AsyncConnState, Self> {
+        let mut state = MirGraphState::new(self);
+        for (param, value) in state.1.parameters
+            .iter()
+            .zip(state.1.cfg.get_root_parameters()) {
+            state.0.replace(value, AsyncConnState::new(*param));
+        }
+        state
+    }
+
     fn get_async_data(&mut self, target: &MirValue) -> AsyncData {
         if let Some(data) = self.source_references.get(target.0) {
             return *data;
@@ -585,12 +625,19 @@ enum EventState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
-struct EventId(usize);
+pub struct EventId(usize);
 
-struct AsyncEvent {
+impl Display for EventId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EventId({})", self.0)
+    }
+}
+
+pub struct AsyncEvent {
     call: MirGraphLoc,
     target: MirValue,
     sync_event: SyncEvent,
+    alive: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -947,7 +994,10 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// value / synchronization source is at any given point in the CFG.
     pub fn update(&mut self, cfg: &MirFlowGraph) -> Result<(), AsyncConnConflict> {
         self.update_state_length();
-        let mut worklist = VecDeque::from([cfg.root()]);
+        let mut worklist = cfg
+            .iter_blocks()
+            .filter(|block| !cfg.is_block_unreachable(block))
+            .collect::<VecDeque<_>>();
         while let Some(next) = worklist.pop_front() {
             assert!(!cfg.is_block_unreachable(&next));
             let exit_state = self.update_block(cfg, &next, None)?;
@@ -976,7 +1026,10 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         cfg: &MirFlowGraph,
         block_ref: &MirBlockRef,
         until: Option<&BlockLocalStatementUid>,
+        // mir_funcs: &MirFuncRegistry<B>,
+        // edl_types: &EdlTypeRegistry,
     ) -> Result<BlockExitState, AsyncConnConflict> {
+        dbg!(block_ref);
         let block = cfg.get_block(block_ref).unwrap();
         // assemble entry state
         let mut source_state: AsyncSourceState<FlowState> = AsyncSourceState::new(
@@ -1003,7 +1056,11 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     syncs: Vec::new(),
                 }
             });
-        let mut sync_positions = SyncPositions::new();
+        let mut exit_state = BlockExitState {
+            sync_positions: SyncPositions::new(),
+            event_states: state,
+            source_states: source_state,
+        };
 
         for statement in block.statements.iter() {
             match statement {
@@ -1016,14 +1073,14 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     if MirExprVariant::Call == value.ty {
                         // If there is a function call, we sync all function arguments that are
                         // currently floating.
+                        let loc = MirGraphLoc::new(*block_ref, *uid);
                         let call = cfg.expressions.get_call(*value);
                         call.transfer(
-                            &mut source_state,
-                            &mut state,
-                            &mut sync_positions,
+                            &mut exit_state,
                             self,
-                            &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
+                            &MirLoc::GraphLoc(loc),
                         )?;
+                        self.record_event(&loc, &mut exit_state);
                     }
                 }
                 Statement::VarMove { uid, .. }
@@ -1043,18 +1100,36 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 }
             }
         }
-        Ok(BlockExitState {
-            sync_positions,
-            event_states: state,
-            source_states: source_state,
-        })
+        Ok(exit_state)
+    }
+
+    /// Collects all positions at which the compiler inserts synchronization events.
+    /// Since this function returns source locations instead of CFG locations, this is used
+    /// mostly for debugging and compiler diagnostics.
+    pub fn collect_sync_positions<'a>(
+        &self,
+        cfg: &'a MirFlowGraph,
+    ) -> Vec<(&'a ModuleSrc, Vec<(&'a SrcPos, &HashSet<EventId>)>)> {
+        let mut out = Vec::new();
+        for block_ref in cfg.iter_blocks() {
+            let exit_state = &self.block_exit_states[block_ref.0];
+            let block = cfg.get_block(&block_ref).unwrap();
+            let mut block_pos = Vec::new();
+            for (loc, events) in exit_state.sync_positions.map.iter(cfg) {
+                if let Some(pos) = block.find_pos(&loc) {
+                    block_pos.push((pos, events));
+                }
+            }
+            out.push((&block.src, block_pos));
+        }
+        out
     }
 
     /// When the output states for blocks are merged to form the input state for another block,
     /// synchronizations may have to be inserted on the sealing statements of the parent blocks.
     /// This method effective does that.
     /// This method should only be called once, after the main analysis is already done.
-    pub(super) fn insert_merge_syncs(&mut self, cfg: &MirFlowGraph) {
+    pub fn insert_merge_syncs(&mut self, cfg: &MirFlowGraph) {
         self.update_state_length();
         for block_ref in cfg.iter_blocks() {
             if cfg.is_block_unreachable(&block_ref) {
@@ -1080,15 +1155,125 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 .zip(cfg.backlinks[block_ref.0].iter()) {
 
                 let loc = MirLoc::Seal(*parent);
-                let sync_positions = &mut self
-                    .block_exit_states[parent.0]
-                    .sync_positions;
+                let state = &mut self.block_exit_states[parent.0];
                 events
                     .into_iter()
-                    .for_each(|event_id| sync_positions
-                        .insert(&loc, event_id));
+                    .for_each(|event_id| {
+                        Self::sync_event__(
+                            &self.event_sync,
+                            event_id,
+                            &mut state.event_states,
+                            &mut state.source_states,
+                            &mut state.sync_positions,
+                            &loc,
+                        )
+                    });
+            }
+
+            match &cfg.get_block(&block_ref).unwrap().seal {
+                Seal::Return(_, _) | Seal::Panic(_, _) => {
+                    // function execution halts completely.
+                    // we must sync all outstanding events
+                    let loc = MirLoc::Seal(block_ref);
+                    for (event_id, _event) in self.events.iter().enumerate() {
+                        let event_id = EventId(event_id);
+                        if !self.sync_event_on_exit(event_id) {
+                            continue;
+                        }
+
+                        let state = &mut self.block_exit_states[block_ref.0];
+                        if state.event_states[event_id] != EventState::Recorded {
+                            continue;
+                        }
+                        Self::sync_event__(
+                            &self.event_sync,
+                            event_id,
+                            &mut state.event_states,
+                            &mut state.source_states,
+                            &mut state.sync_positions,
+                            &loc,
+                        );
+                    }
+                },
+                _ => (),
             }
         }
+        self.unify_unsynced_events(cfg);
+    }
+
+    /// After inserting merger synchronizations and solving asynchronous dependencies, there might
+    /// be events that synchronize on some exit blocks, but not on others.
+    /// This can be the case if an event does not need to be synchronized on exit (see
+    /// [Self::sync_event_on_exit]) but in another execution path the event must be synchronized as
+    /// asynchronous dependencies require synchronization.
+    ///
+    /// There are two ways to deal with that:
+    /// 1. If there is at least one execution path that sees the event synchronized, we need to
+    ///    make sure that the event is synchronized on __all__ execution paths
+    /// 2. If there is no execution path that synchronizes the event then [Self::sync_event_on_exit]
+    ///    must be false for that event and we can remove the record entirely.
+    ///
+    /// After running this function, all records that still exist **must** be synchronized on all
+    /// execution paths where they are created exactly once before the function exists.
+    /// Since events are inserted into the CFG only after the entire async analysis pipeline - and
+    /// with that this function - ran, we don't actually need to remove the record from the CFG.
+    /// Instead, we set the `alive` flag of the event to `false`.
+    /// This can then be used by the [Self::insert_records] function, which inhibits it
+    /// from actually generating record code for dead events.
+    fn unify_unsynced_events(&mut self, cfg: &MirFlowGraph) {
+        let exit_blocks = cfg.iter_blocks()
+            .filter(|block_ref| {
+                !cfg.is_block_unreachable(block_ref)
+                    && matches!(
+                        &cfg.get_block(block_ref).unwrap().seal,
+                        Seal::Return(_, _) | Seal::Panic(_, _),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        for event_id in 0..self.events.len() {
+            let event_id = EventId(event_id);
+            let any_recorded = exit_blocks.iter().any(|block| {
+                self.block_exit_states[block.0].event_states[event_id] == EventState::Recorded
+            });
+            let any_synced = exit_blocks.iter().any(|block| {
+                self.block_exit_states[block.0].event_states[event_id] == EventState::Synchronized
+            });
+
+            if !any_synced && (!any_recorded || !self.sync_event_on_exit(event_id)) {
+                self.events[event_id.0].alive = false;
+                continue;
+            }
+
+            exit_blocks.iter()
+                .for_each(|block_ref| {
+                    let state = &mut self.block_exit_states[block_ref.0];
+                    if state.event_states[event_id] == EventState::Recorded {
+                        let loc = MirLoc::Seal(*block_ref);
+                        Self::sync_event__(
+                            &self.event_sync,
+                            event_id,
+                            &mut state.event_states,
+                            &mut state.source_states,
+                            &mut state.sync_positions,
+                            &loc,
+                        );
+                    }
+                });
+        }
+    }
+
+    fn sync_event_on_exit(&self, ev: EventId) -> bool {
+        self.event_sync[ev.0]
+            .iter()
+            .any(|id| self.sync_src_on_exit(id))
+    }
+
+    /// Synchronize every source, except async sources that are tied only to an async parameter
+    /// passed to the function.
+    /// In that case, the caller is responsible for insuring synchronization on that parameter.
+    fn sync_src_on_exit(&self, id: &AsyncId) -> bool {
+        !matches!(self.conn.id_to_source[id.0 as usize], AsyncSource::AsyncParam(_))
     }
 
     /// Inserts record statements into the CFG.
@@ -1185,16 +1370,28 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
         self.event_sync = event_pool_builder.build();
         self.event_values = event_values_builder.build();
-        self.init_exit_states();
+        self.init_exit_states(cfg);
     }
 
-    fn init_exit_states(&mut self) {
-
+    fn init_exit_states(&mut self, cfg: &MirFlowGraph) {
+        self.block_exit_states.clear();
+        for _ in cfg.iter_blocks() {
+            let exit_state: BlockExitState = BlockExitState {
+                event_states: AsyncEventState::new(self.events.len(), EventState::Invalid),
+                source_states: AsyncSourceState::new(self.conn, || FlowState::Fixed),
+                sync_positions: SyncPositions::new(),
+            };
+            self.block_exit_states.push(exit_state);
+        }
     }
 
     /// Inserts synchronization records into the CFG.
     pub(super) fn insert_records(&self, cfg: &mut MirFlowGraph) {
         for event in self.events.iter() {
+            if !event.alive {
+                continue;
+            }
+
             let block = &mut cfg.blocks[event.call.0.0];
             let id = block.find_current_index(&event.call.1)
                 .expect("failed to find call index for synchronization record");
@@ -1222,14 +1419,33 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     }
 
     #[cfg(debug_assertions)]
-    pub fn debug_print(&self, _cfg: &MirFlowGraph) {
+    pub fn debug_print(&self, cfg: &MirFlowGraph) {
         println!(" -- [DEBUG]> async code analysis -- ");
         println!(" connectome:");
         println!("{}", &self.conn);
+        println!(" events:");
+        for (event_id, event) in self.events.iter().enumerate() {
+            let block = cfg.get_block(&event.call.0).unwrap();
+            println!("{:>2}: {}", event_id, block.src.format_pos(*block.find_pos(&MirLoc::GraphLoc(event.call)).unwrap()));
+        }
+        println!();
         println!(" event sources:");
         println!("{}", &self.event_sync);
         println!(" event values:");
         println!("{}", &self.event_values);
+
+        // print sync positions
+        println!(" sync positions:");
+        let sync_positions = self.collect_sync_positions(cfg);
+        for (src, locations) in sync_positions.into_iter() {
+            for (pos, events) in locations.into_iter() {
+                println!("   ° {}", src.format_pos(*pos));
+                for ev in events.iter() {
+                    println!("      -> {ev}");
+                }
+            }
+        }
+
         println!(" -- [DEBUG]> end of record -- ");
     }
 
@@ -1239,8 +1455,26 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             call: loc,
             target,
             sync_event: internal,
+            alive: true,
         });
         EventId(id)
+    }
+
+    fn record_event(&self, loc: &MirGraphLoc, exit_state: &mut BlockExitState) {
+        for event_id in self.events.iter()
+            .enumerate()
+            .filter_map(|(idx, event)| if &event.call == loc {
+                Some(EventId(idx))
+            } else {
+                None
+            }) {
+
+            assert_eq!(exit_state.event_states[event_id], EventState::Invalid);
+            for source_id in self.event_sync[event_id.0].iter() {
+                exit_state.source_states[*source_id] = FlowState::Floating;
+            }
+            exit_state.event_states[event_id] = EventState::Recorded;
+        }
     }
 
     /// Synchronizes a recorded event at the specified MIR graph location.
@@ -1273,12 +1507,24 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
+        Self::sync_event__(&self.event_sync, event, event_state, state, sync_positions, loc);
+    }
+
+    #[inline(always)]
+    fn sync_event__(
+        event_sync: &PooledData<AsyncId>,
+        event: EventId,
+        event_state: &mut AsyncEventState,
+        state: &mut AsyncSourceState<FlowState>,
+        sync_positions: &mut SyncPositions,
+        loc: &MirLoc,
+    ) {
         assert_eq!(
             event_state[event],
             EventState::Recorded,
             "tried to synchronize an event that is not yet recorded",
         );
-        self.event_sync[event.0].iter().for_each(|source| {
+        event_sync[event.0].iter().for_each(|source| {
             state[*source] = FlowState::Fixed;
         });
         sync_positions.insert(loc, event);
@@ -1298,19 +1544,24 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
-        self.event_values
-            .find_data_indices(value)
-            .for_each(|event_id_raw| {
-                let event_id = EventId(event_id_raw);
-                if event_state[event_id] == EventState::Recorded {
-                    self.sync_event(
-                        event_id,
-                        event_state,
-                        state,
-                        sync_positions,
-                        loc,
-                    );
-                }
+        dbg!("syncing value ", value);
+        self.conn[*value]
+            .iter()
+            .for_each(|val| {
+                self.event_sync
+                    .find_data_indices(val)
+                    .for_each(|event_id_raw| {
+                        let event_id = EventId(event_id_raw);
+                        if event_state[event_id] == EventState::Recorded {
+                            self.sync_event(
+                                event_id,
+                                event_state,
+                                state,
+                                sync_positions,
+                                loc,
+                            );
+                        }
+                    })
             });
     }
 }
@@ -1329,46 +1580,84 @@ impl<'cfg> IndexMut<EventId> for AsyncFlowAnalysis<'cfg> {
     }
 }
 
+struct TransferCtx<'a, B: Backend> {
+    funcs: &'a MirFuncRegistry<B>,
+    types: &'a EdlTypeRegistry,
+}
+
 trait TransferAsyncState {
     fn transfer(
         &self,
-        state: &mut AsyncSourceState<FlowState>,
-        event_state: &mut AsyncEventState,
-        sync_positions: &mut SyncPositions,
+        state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
+        // ctx: &TransferCtx<'_, B>,
     ) -> Result<(), AsyncConnConflict>;
+}
+
+impl MirCall {
+    fn transfer_param(
+        param: &MirValue,
+        exit_state: &mut BlockExitState,
+        flow_analysis: &mut AsyncFlowAnalysis,
+        loc: &MirLoc,
+        // is_async: bool,
+    ) -> Result<(), AsyncConnConflict> {
+        let state = flow_analysis
+            .conn
+            .get_state(param, FlowState::upper, &exit_state.source_states);
+        dbg!(&flow_analysis.conn[*param]);
+        if matches!(state, Some(FlowState::Floating)) {
+            flow_analysis.sync_value(
+                param,
+                &mut exit_state.event_states,
+                &mut exit_state.source_states,
+                &mut exit_state.sync_positions,
+                loc,
+            );
+            let state = flow_analysis
+                .conn
+                .get_state(param, FlowState::upper, &exit_state.source_states);
+            assert!(
+                matches!(state, Some(FlowState::Fixed)),
+                "MIR value async flow-state did not change after synchronizing",
+            );
+        } else {
+            dbg!(&exit_state.source_states);
+        }
+        Ok(())
+    }
 }
 
 impl TransferAsyncState for MirCall {
     fn transfer(
         &self,
-        source_states: &mut AsyncSourceState<FlowState>,
-        event_state: &mut AsyncEventState,
-        sync_positions: &mut SyncPositions,
+        exit_state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
+        // ctx: &TransferCtx<'_, B>,
     ) -> Result<(), AsyncConnConflict> {
-        for param in self.args.iter() {
-            let state = flow_analysis
-                .conn
-                .get_state(param, FlowState::upper, source_states);
-            if matches!(state, Some(FlowState::Floating)) {
-                flow_analysis.sync_value(
-                    param,
-                    event_state,
-                    source_states,
-                    sync_positions,
-                    loc,
-                );
-                let state = flow_analysis
-                    .conn
-                    .get_state(param, FlowState::upper, source_states);
-                assert!(
-                    matches!(state, Some(FlowState::Fixed)),
-                    "MIR value async flow-state did not change after synchronizing",
-                );
-            }
+        // let func_id = ctx.funcs.get_edl_id(self.func).unwrap();
+        // let sig = ctx.types.get_fn_signature(func_id).unwrap();
+
+        // let mut runtime_idx = 0usize;
+        // let mut comptime_idx = 0usize;
+        // for param in sig.params.iter() {
+        //     let val = if param.comptime {
+        //         let val = self.comptime_args[comptime_idx].value_expr;
+        //         comptime_idx += 1;
+        //         val
+        //     } else {
+        //         let val = self.args[runtime_idx];
+        //         runtime_idx += 1;
+        //         val
+        //     };
+        //     Self::transfer_param(&val, exit_state, flow_analysis, loc, param.async_)?;
+        // }
+
+        for param in self.args.iter()
+            .chain(self.comptime_args.iter().map(|arg| &arg.value_expr)) {
+            Self::transfer_param(param, exit_state, flow_analysis, loc)?;
         }
         Ok(())
     }
