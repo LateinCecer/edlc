@@ -1,16 +1,17 @@
 Short version for non-lawyers:
 
-The EDL Project is licensed under Apache 2.0 terms.
+EDLc, a compiler for the EDL programming language.
+Copyright (C) 2026  Adrian Paskert
 
-It is Copyright (c) The EDL Project Contributors.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-Longer version:
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
 
-Copyrights in the EDL project are retained by their contributors. No
-copyright assignment is required to contribute to the EDL project.
-
-Some files include explicit copyright notices and/or license notices.
-For full authorship information, see the version control history.
-
-Except as otherwise noted, EDL is licensed under the Apache 2.0
-license <LICENSE> or <http://www.apache.org/licenses/LICENSE-2.0>, at your option.
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
