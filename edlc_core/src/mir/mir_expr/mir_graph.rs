@@ -2343,6 +2343,51 @@ impl MirFlowGraph {
         ssa_values
     }
 
+    /// Verifies that all block calls in the CFG at the very least match the parameter definition
+    /// list of the target block.
+    /// Since this should always be the case of the compiler works correctly, this does not emit a
+    /// proper error message and failure and just panics.
+    /// You should treat calls to this method as effectively a sanity check.
+    fn assert_block_params(
+        &self,
+    ) {
+        fn verify_call(cfg: &MirFlowGraph, call: &BlockCall) {
+            assert_eq!(
+                call.params.len(),
+                cfg.blocks[call.target.0].parameters.len(),
+                "block call parameter mismatch",
+            );
+            for (lhs, rhs) in call.params
+                .iter()
+                .zip(cfg.blocks[call.target.0].parameters.iter()) {
+
+                assert_eq!(
+                    cfg.get_var_type(lhs),
+                    cfg.get_var_type(rhs),
+                    "block call parameter type mismatch",
+                );
+            }
+        }
+
+        for block in self.blocks.iter() {
+            match &block.seal {
+                Seal::Jump(call, _) => {
+                    verify_call(self, call);
+                }
+                Seal::Cond { then_target, else_target, .. } => {
+                    verify_call(self, then_target);
+                    verify_call(self, else_target);
+                }
+                Seal::Switch { targets, default, .. } => {
+                    targets.iter()
+                        .for_each(|target| verify_call(self, &target.block_call));
+                    verify_call(self, default);
+                }
+                _ => (),
+            }
+        }
+    }
+
     /// Routes TempVars through the block parameters.
     /// If a block uses a temporary variable, the variable must be available in the block.
     /// This means, that it must the channeled into the bock through block parameters.

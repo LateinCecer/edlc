@@ -118,7 +118,7 @@ pub(crate) struct Router {
 }
 
 impl Router {
-    pub fn new(cfg: MirFlowGraph) -> Self {
+    pub fn new(cfg: &MirFlowGraph) -> Self {
         Router {
             blocks: cfg.iter_blocks().map(|id| BlockEntries::new(id)).collect(),
         }
@@ -201,6 +201,7 @@ impl Router {
                 }
             }
         }
+        cfg.assert_block_params();
     }
 
     fn update_block_call(&self, call: &mut BlockCall, this_block: &BlockEntries) {

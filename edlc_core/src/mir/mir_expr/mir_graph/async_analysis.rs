@@ -25,6 +25,7 @@ use std::ops::{Index, IndexMut};
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::mir::debug::CfgMap;
+use crate::mir::mir_expr::mir_graph::router::{DataDefinition, Router};
 use crate::prelude::mir_funcs::MirFuncId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1388,8 +1389,13 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     }
 
     /// Inserts synchronization records into the CFG.
-    pub(super) fn insert_records(&self, cfg: &mut MirFlowGraph) {
-        for event in self.events.iter() {
+    /// This method outputs a [Router] with the record definitions already input.
+    /// That information can then be used in [Self::insert_syncs] to insert the corresponding
+    /// synchronization events at the required positions.
+    fn insert_records(&self, cfg: &mut MirFlowGraph) -> (Router, IndexMap<DataDefinition>) {
+        let mut router = Router::new(cfg);
+        let mut data_map: IndexMap<DataDefinition> = IndexMap::default();
+        for (event_id, event) in self.events.iter().enumerate() {
             if !event.alive {
                 continue;
             }
@@ -1410,14 +1416,70 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 debug,
                 implementation: None,
             });
+            let event_data = router.add_definition(
+                event.sync_event.internal_value,
+                MirGraphLoc::new(event.call.0, uid),
+            );
+            data_map.view_mut(event_id).set(event_data);
+        }
+        (router, data_map)
+    }
+
+    fn insert_syncs(
+        &self,
+        cfg: &mut MirFlowGraph,
+        router: &mut Router,
+        data_map: IndexMap<DataDefinition>,
+    ) {
+        for (block, state) in self.block_exit_states.iter().enumerate() {
+            let block_ref = MirBlockRef(block);
+            for (loc, events) in state.sync_positions.map.iter() {
+                for event in events.iter() {
+                    let data = data_map[event.0];
+                    let sync_value = *router.route_to(&data, loc.clone(), cfg);
+
+                    // insert statement into graph
+                    let block = &mut cfg.blocks[block_ref.0];
+                    let debug_symbols = match loc {
+                        MirLoc::GraphLoc(MirGraphLoc(_, uid)) => {
+                            let idx = block.find_current_index(uid)
+                                .expect("failed to find referring statement for sync");
+                            block.statements[idx].debug().clone()
+                        }
+                        MirLoc::Seal(_) => {
+                            block.pos.clone()
+                        }
+                    };
+                    let sync_uid = block.new_uid();
+                    let sync = Statement::Sync {
+                        event: SyncEvent { internal_value: sync_value },
+                        uid: sync_uid,
+                        debug: debug_symbols,
+                        implementation: None,
+                    };
+                    match loc {
+                        MirLoc::GraphLoc(MirGraphLoc(block_ref_, uid)) => {
+                            assert_eq!(&block_ref, block_ref_);
+                            let idx = block.find_current_index(uid)
+                                .expect("failed to find referring statement for sync");
+                            block.statements.insert(idx, sync);
+                        },
+                        MirLoc::Seal(block_ref_) => {
+                            assert_eq!(&block_ref, block_ref_);
+                            block.statements.push(sync);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    pub(super) fn insert_syncs(&self, cfg: &mut MirFlowGraph) {
-        for (block, state) in self.block_exit_states.iter().enumerate() {
-            let block = MirBlockRef(block);
-        }
-        todo!()
+    /// Bakes event recording and synchronization into the CFG by inserting the necessary
+    /// [Statement::Record] and [Statement::Sync] entries into the graph.
+    pub fn canonize(&self, cfg: &mut MirFlowGraph) {
+        let (mut router, data_map) = self.insert_records(cfg);
+        self.insert_syncs(cfg, &mut router, data_map);
+        router.finish(cfg);
     }
 
     #[cfg(debug_assertions)]
