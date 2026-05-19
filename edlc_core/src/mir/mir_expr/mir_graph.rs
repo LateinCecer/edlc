@@ -28,6 +28,7 @@ mod drop_check;
 mod sync;
 mod validate;
 mod async_analysis;
+mod router;
 
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
