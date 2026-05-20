@@ -1909,6 +1909,33 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
         &compiler.phase.vars,
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
+
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
+        // create connectome
+        let connectome = body.body.async_connectome(
+            &compiler.mir_phase.types,
+            &compiler.phase.types,
+            &backend.func_reg(),
+            None,
+        ).unwrap();
+        let mut async_analysis = AsyncFlowAnalysis::new(&connectome, body.signature.async_);
+        async_analysis.create_records(
+            &mut body.body,
+            &backend.func_reg(),
+            &compiler.mir_phase.types,
+            &compiler.phase.types,
+        );
+        #[cfg(debug_assertions)]
+        async_analysis.debug_print(&body.body);
+
+        async_analysis.update(&body.body).unwrap();
+        async_analysis.insert_merge_syncs(&body.body);
+        #[cfg(debug_assertions)]
+        async_analysis.debug_print(&body.body);
+        async_analysis.canonize(&mut body.body);
+        // -- async analysis end here
+    }
+
     body.body.generate_auto_implementations(
         &mut compiler.mir_phase,
         &mut compiler.phase,
@@ -2090,6 +2117,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 #[derive(Debug, Default)]
 pub struct CompileOptions {
     pub comptime_args: Option<Vec<AmorphusDataCopy>>,
+    pub is_async: bool,
 }
 
 /// Compiles a MIR expression by performing all necessary code transformation and validation steps
@@ -2122,7 +2150,7 @@ pub fn compile_expression<B: Backend>(
     vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
     backend: &mut B,
-    _options: &CompileOptions,
+    options: &CompileOptions,
 ) -> Result<StackFrameLayout, OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     compiler.phase.report_mode.print_errors = true;
@@ -2161,28 +2189,31 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
 
-    // create connectome
-    let connectome = body.async_connectome(
-        &compiler.mir_phase.types,
-        &compiler.phase.types,
-        &backend.func_reg(),
-        None,
-    ).unwrap();
-    let mut async_analysis = AsyncFlowAnalysis::new(&connectome);
-    async_analysis.create_records(
-        body,
-        &backend.func_reg(),
-        &compiler.mir_phase.types,
-        &compiler.phase.types,
-    );
-    #[cfg(debug_assertions)]
-    async_analysis.debug_print(&body);
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
+        // create connectome
+        let connectome = body.async_connectome(
+            &compiler.mir_phase.types,
+            &compiler.phase.types,
+            &backend.func_reg(),
+            None,
+        ).unwrap();
+        let mut async_analysis = AsyncFlowAnalysis::new(&connectome, options.is_async);
+        async_analysis.create_records(
+            body,
+            &backend.func_reg(),
+            &compiler.mir_phase.types,
+            &compiler.phase.types,
+        );
+        #[cfg(debug_assertions)]
+        async_analysis.debug_print(&body);
 
-    async_analysis.update(&body).unwrap();
-    async_analysis.insert_merge_syncs(&body);
-    #[cfg(debug_assertions)]
-    async_analysis.debug_print(&body);
-    async_analysis.canonize(body);
+        async_analysis.update(&body).unwrap();
+        async_analysis.insert_merge_syncs(&body);
+        #[cfg(debug_assertions)]
+        async_analysis.debug_print(&body);
+        async_analysis.canonize(body);
+        // -- async analysis end here
+    }
 
     body.generate_auto_implementations(
         &mut compiler.mir_phase,

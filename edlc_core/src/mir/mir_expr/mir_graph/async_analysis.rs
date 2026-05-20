@@ -980,16 +980,18 @@ pub struct AsyncFlowAnalysis<'cfg> {
     events: Vec<AsyncEvent>,
     event_sync: PooledData<AsyncId>,
     event_values: PooledData<MirValue>,
+    is_function_async: bool,
 }
 
 impl<'cfg> AsyncFlowAnalysis<'cfg> {
-    pub fn new(conn: &'cfg AsyncConnectome) -> Self {
+    pub fn new(conn: &'cfg AsyncConnectome, is_function_async: bool) -> Self {
         AsyncFlowAnalysis {
             conn,
             block_exit_states: vec![],
             events: vec![],
             event_sync: PooledData::default(),
             event_values: PooledData::default(),
+            is_function_async,
         }
     }
 
@@ -1267,7 +1269,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     }
 
     fn sync_event_on_exit(&self, ev: EventId) -> bool {
-        self.event_sync[ev.0]
+        !self.is_function_async || self.event_sync[ev.0]
             .iter()
             .any(|id| self.sync_src_on_exit(id))
     }
@@ -1275,8 +1277,15 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// Synchronize every source, except async sources that are tied only to an async parameter
     /// passed to the function.
     /// In that case, the caller is responsible for insuring synchronization on that parameter.
+    /// If the function that this analysis is performed on is itself *not* declared as async, then
+    /// this method will always return true, no matter how the parameter is declared.
     fn sync_src_on_exit(&self, id: &AsyncId) -> bool {
-        !matches!(self.conn.id_to_source[id.0 as usize], AsyncSource::AsyncParam(_))
+        !self.is_function_async
+            || !matches!(self.conn.id_to_source[id.0 as usize], AsyncSource::AsyncParam(_))
+    }
+
+    pub fn async_enabled(mir_types: &MirTypeRegistry) -> bool {
+        mir_types.event_type().is_some()
     }
 
     /// Inserts record statements into the CFG.
