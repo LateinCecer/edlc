@@ -50,7 +50,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hasher;
 use std::ops::{Deref, Range};
-use log::debug;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
@@ -274,6 +273,7 @@ pub struct MirFlowGraph {
     /// that can lead to that block.
     /// Note that this list is only build **after** the graph is sealed.
     backlinks: Vec<Vec<MirBlockRef>>,
+    pub headless_id_counter: HeadlessIdGen,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -381,10 +381,37 @@ pub struct DebugSymbols {
     pub pos: SrcPos,
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct HeadlessId(usize);
+
+impl HeadlessId {
+    pub fn ordinal(&self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct HeadlessIdGen {
+    counter: usize,
+}
+
+impl HeadlessIdGen {
+    fn new() -> Self {
+        Self { counter: 0 }
+    }
+
+    pub fn create(&mut self) -> HeadlessId {
+        let id = HeadlessId(self.counter);
+        self.counter += 1;
+        id
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct AutoImplDetails {
     pub func_id: MirFuncId,
     pub ctx: CallContext,
+    pub headless_id: HeadlessId,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -1799,6 +1826,7 @@ impl MirFlowGraph {
             temp_vars: vec![],
             backlinks: vec![],
             var_scopes: ValueScopeList::default(),
+            headless_id_counter: HeadlessIdGen::new(),
         };
         let scope = out.new_scope();
         let parameters: Vec<MirValue> = parameters

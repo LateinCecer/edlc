@@ -4,11 +4,12 @@ use crate::layout::SSARepr;
 use cranelift_codegen::ir;
 use cranelift_codegen::ir::{InstBuilder, JumpTableData, TrapCode};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::{Block, BlockCall, MirBlockRef, MirExprContainer, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, Seal, Statement};
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::{BlockCall, MirBlockRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, Seal, Statement};
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
 use std::ops::Index;
-use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_funcs::CallSrc;
 
 /// Maps MIR blocks to Cranelift blocks.
 struct BlockMapper {
@@ -269,24 +270,33 @@ fn statement_codegen<Runtime>(
             );
             Ok(())
         }
-        Statement::Drop { value, implementation: Some(details), .. } => {
-            let call = MirCall::drop_impl(details.func_id, *value, details.ctx, &phase.types);
-            call.compile_headless(builder, phase, cfg, None)
+        Statement::Drop { implementation: Some(details), .. } => {
+            let call = builder.layout.headless_call(&details.headless_id)
+                .expect("headless call for drop implementation not registered")
+                .clone();
+            // let call = MirCall::drop_impl(details.func_id, *value, details.ctx, &phase.types);
+            call.compile_headless(builder, phase, cfg, None, &details.headless_id)
         }
         Statement::Drop { .. } => {
             Ok(())
         }
-        Statement::Sync { event, implementation: Some(details), .. } => {
-            let call = MirCall::sync_impl(details.func_id, event.internal_value, details.ctx, &phase.types);
-            call.compile_headless(builder, phase, cfg, None)
+        Statement::Sync { implementation: Some(details), .. } => {
+            let call = builder.layout.headless_call(&details.headless_id)
+                .expect("headless call for drop implementation not registered")
+                .clone();
+            // let call = MirCall::sync_impl(details.func_id, event.internal_value, details.ctx, &phase.types);
+            call.compile_headless(builder, phase, cfg, None, &details.headless_id)
         }
         Statement::Sync { .. } => {
             Ok(())
         }
         Statement::Record { event, implementation: Some(details), .. } => {
-            let event_ty = cfg.get_var_type(&event.internal_value);
-            let call = MirCall::record_impl(details.func_id, details.ctx, *event_ty);
-            call.compile_headless(builder, phase, cfg, Some(&event.internal_value))
+            let call = builder.layout.headless_call(&details.headless_id)
+                .expect("headless call for drop implementation not registered")
+                .clone();
+            // let event_ty = cfg.get_var_type(&event.internal_value);
+            // let call = MirCall::record_impl(details.func_id, details.ctx, *event_ty);
+            call.compile_headless(builder, phase, cfg, Some(&event.internal_value), &details.headless_id)
         }
         Statement::Record { .. } => {
             Ok(())

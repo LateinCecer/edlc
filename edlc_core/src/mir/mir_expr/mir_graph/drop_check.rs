@@ -680,6 +680,7 @@ impl MirFlowGraph {
                 match statement {
                     Statement::VarCopy { value, debug, implementation, .. } => {
                         let ty = self.temp_vars[value.0].ty;
+                        let headless_id = self.headless_id_counter.create();
                         *implementation = func_reg.auto_impl(
                             ty,
                             SpecialFunction::Copy,
@@ -701,11 +702,12 @@ impl MirFlowGraph {
                             let ty = mir_phase.types
                                 .mir_id(&ty, &hir_phase.types)
                                 .unwrap();
-                            (AutoImplDetails { func_id: func, ctx }, ty)
+                            (AutoImplDetails { func_id: func, ctx, headless_id }, ty)
                         });
                     }
                     Statement::Drop { value, debug, implementation, .. } => {
                         let ty = self.temp_vars[value.0].ty;
+                        let headless_id = self.headless_id_counter.create();
                         *implementation = func_reg.auto_impl(
                             ty,
                             SpecialFunction::Drop,
@@ -717,10 +719,11 @@ impl MirFlowGraph {
                                 scope_id: block.scope,
                             }
                         )?
-                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx, headless_id });
                     }
                     Statement::Sync { event, debug, implementation, .. } => {
                         let ty = self.temp_vars[event.internal_value.0].ty;
+                        let headless_id = self.headless_id_counter.create();
                         *implementation = func_reg.auto_impl(
                             ty,
                             SpecialFunction::Sync,
@@ -732,10 +735,11 @@ impl MirFlowGraph {
                                 scope_id: block.scope,
                             }
                         )?
-                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx, headless_id });
                     }
                     Statement::Record { event, debug, implementation, .. } => {
                         let ty = self.temp_vars[event.internal_value.0].ty;
+                        let headless_id = self.headless_id_counter.create();
                         *implementation = func_reg.auto_impl(
                             ty,
                             SpecialFunction::Record,
@@ -747,7 +751,7 @@ impl MirFlowGraph {
                                 scope_id: block.scope,
                             }
                         )?
-                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx });
+                            .map(|(func_id, ctx)| AutoImplDetails { func_id, ctx, headless_id });
                     }
                     _ => {
                         continue;

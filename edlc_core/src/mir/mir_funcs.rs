@@ -16,8 +16,13 @@
 mod comptime_value;
 
 use crate::core::edl_error::EdlError;
+use crate::core::edl_fn::FnArgumentConstraints;
+use crate::core::edl_impl::{CallResolver, GenericTypeHints};
+use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::index_map::IndexMap;
+use crate::core::type_analysis::{InferProvider, InferState};
 use crate::core::{edl_trait, EdlVarId};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
@@ -27,31 +32,31 @@ use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{ExecutionError, MirExprId, MirFlowGraph, MirLoc, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
+use crate::mir::mir_expr::{ExecutionError, HeadlessId, MirExprId, MirFlowGraph, MirLoc, MirValue, StackFrameLayout};
 pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
-use crate::mir::mir_let::MirLet;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
-use crate::mir::{DebugInformation, MirError, MirFnId, MirPhase, MirUid};
+use crate::mir::{DebugInformation, MirError, MirPhase, MirUid};
+use crate::prelude::edl_type::EdlMaybeType;
+use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
 use crate::resolver::ScopeId;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::{mem, ops};
 use std::path::PathBuf;
-use crate::core::edl_fn::FnArgumentConstraints;
-use crate::core::edl_impl::{CallResolver, GenericTypeHints};
-use crate::core::edl_param_env::EdlParameterDef;
-use crate::core::edl_value::EdlConstValue;
-use crate::core::type_analysis::{InferProvider, InferState};
-use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
-use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
-use crate::prelude::edl_type::EdlMaybeType;
+use std::ops;
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
 pub const INTR_SUB_USIZE: &str = "sub_usize";
 pub const INTR_MUL_USIZE: &str = "mul_usize";
 pub const INTR_DIV_USIZE: &str = "div_usize";
 
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum CallSrc {
+    Expr(MirExprId),
+    Headless(HeadlessId),
+}
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct MirFuncId(usize);
@@ -769,7 +774,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         cfg: &MirFlowGraph,
         mir_call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: Option<&MirExprId>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<B>> {
         let code_gen = &mut self.generators.get_mut(id.0)
             .expect("Invalid MIR function id").code_gen;
@@ -779,7 +784,7 @@ impl<B: Backend> MirFuncRegistry<B> {
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
-                .code_gen(backend, type_reg, cfg, mir_call, target, expr_id),
+                .code_gen(backend, type_reg, cfg, mir_call, target, call_src),
         }
     }
 

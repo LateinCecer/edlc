@@ -19,15 +19,15 @@
 //! now, this may change in the near future in order to support communication with more ABIs and
 //! calling conventions, than SystemV.
 
-use cranelift_codegen::ir::SourceLoc;
 use crate::codegen::FunctionTranslator;
 use crate::compiler::{RuntimeId, JIT};
+use crate::layout::stack_frame::native_calling_conv;
 use cranelift_module::Linkage;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirExprVariant, MirFlowGraph, MirLoc, MirValue};
+use edlc_core::prelude::mir_expr::{MirFlowGraph, MirLoc, MirValue};
+use edlc_core::prelude::mir_funcs::CallSrc;
 use edlc_core::prelude::{DebugInformation, MirError, MirPhase};
-use crate::layout::stack_frame::native_calling_conv;
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
 /// is passed to the callee from the global context.
@@ -72,21 +72,25 @@ impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
         cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: Option<&MirExprId>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<JIT<Runtime>>> {
-        if let Some(expr_id) = expr_id {
-            assert!(target.is_some());
-            let call_layout = backend.layout.call_layout(expr_id).clone();
-            let sig = call_layout.compile(backend, phase).unwrap();
-            sig.generate(backend, phase, self)
-        } else {
-            use crate::layout::stack_frame::CallingConv;
-            let call_conv = native_calling_conv();
-            let call_layout = call_conv
-                .make_call_layout::<JIT<Runtime>>(cfg, call, target.cloned(), &phase.types, None)
-                .expect("calling convention layout should always be valid");
-            let sig = call_layout.compile(backend, phase).unwrap();
-            sig.generate(backend, phase, self)
+        match call_src {
+            CallSrc::Expr(expr_id) => {
+                assert!(target.is_some());
+                let call_layout = backend.layout.call_layout(expr_id).clone();
+                let sig = call_layout.compile(backend, phase).unwrap();
+                sig.generate(backend, phase, self)
+            }
+            CallSrc::Headless(id) => {
+                // use crate::layout::stack_frame::CallingConv;
+                // let call_conv = native_calling_conv();
+                // let call_layout = call_conv
+                //     .make_call_layout::<JIT<Runtime>>(cfg, call, target.cloned(), &phase.types, None)
+                //     .expect("calling convention layout should always be valid");
+                let call_layout = backend.layout.headless_layout(id).clone();
+                let sig = call_layout.compile(backend, phase).unwrap();
+                sig.generate(backend, phase, self)
+            }
         }
     }
 

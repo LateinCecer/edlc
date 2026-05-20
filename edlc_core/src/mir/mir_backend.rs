@@ -26,7 +26,7 @@ use crate::mir::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
 use crate::mir::{MirError, MirPhase};
 use crate::mir::debug::DebugInformation;
 use crate::mir::mir_expr::mir_call::MirCall;
-use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
+use crate::mir::mir_funcs::{CallSrc, MirFuncId, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeRegistry};
 use crate::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, TypeError};
 
@@ -121,7 +121,7 @@ where B: Backend {
         cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        expr_id: Option<&MirExprId>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<B>>;
 
     /// Attaches the debug information about this MIR function call to the output buffer.

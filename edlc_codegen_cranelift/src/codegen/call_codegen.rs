@@ -16,8 +16,9 @@
 use crate::codegen::{Compilable, FunctionTranslator, HeadlessCompilable};
 use crate::compiler::JIT;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
+use edlc_core::prelude::mir_expr::{HeadlessId, MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::{MirError, MirPhase};
+use edlc_core::prelude::mir_funcs::CallSrc;
 
 impl<Runtime> Compilable<Runtime> for MirCall {
     fn compile(
@@ -32,7 +33,7 @@ impl<Runtime> Compilable<Runtime> for MirCall {
         backend.func_reg
             .clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase, cfg, self, Some(target), Some(expr_id))?;
+            .generate_call_code(self.func, backend, phase, cfg, self, Some(target), &CallSrc::Expr(*expr_id))?;
         Ok(())
     }
 }
@@ -44,11 +45,12 @@ impl<Runtime> HeadlessCompilable<Runtime> for MirCall {
         phase: &mut MirPhase,
         cfg: &MirFlowGraph,
         target: Option<&MirValue>,
+        id: &HeadlessId,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         backend.func_reg
             .clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase, cfg, self, target, None)?;
+            .generate_call_code(self.func, backend, phase, cfg, self, target, &CallSrc::Headless(id.clone()))?;
         Ok(())
     }
 }

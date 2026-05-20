@@ -21,6 +21,7 @@ use edlc_core::inline_code;
 use edlc_core::prelude::mir_backend::CodeGen;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirLoc, MirValue};
+use edlc_core::prelude::mir_funcs::CallSrc;
 use crate::codegen::FunctionTranslator;
 use crate::compiler::integer_math::*;
 use crate::compiler::JIT;
@@ -76,7 +77,7 @@ impl<Runtime> CodeGen<JIT<Runtime>> for AssertCodegen {
         _cfg: &MirFlowGraph,
         call: &MirCall,
         _target: Option<&MirValue>,
-        _expr_id: Option<&MirExprId>,
+        _call_src: &CallSrc,
     ) -> Result<(), MirError<JIT<Runtime>>> {
         assert_eq!(call.args.len(), 1);
         let input = backend

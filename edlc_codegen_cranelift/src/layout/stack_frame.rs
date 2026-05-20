@@ -26,10 +26,10 @@ use cranelift_module::Module;
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::mir_expr::{BorrowGraph, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
+use edlc_core::prelude::mir_expr::{BorrowGraph, HeadlessId, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
 use edlc_core::prelude::mir_type::abi::{AbiConfig, AbiLayout, ByteLayout};
 use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_core::prelude::{AmorphusData, MirError, MirPhase};
+use edlc_core::prelude::{AmorphusData, MirError, MirLayout, MirPhase};
 use std::ops::Range;
 use std::sync::Arc;
 use cranelift_jit::JITModule;
@@ -44,6 +44,7 @@ enum Mapping {
 pub(crate) struct StackFrameMapping {
     mapping: IndexMap<Mapping>,
     call_layouts: IndexMap<CallLayout>,
+    headless_call_layouts: IndexMap<(CallLayout, MirCall)>,
     stack_spill_size: usize,
     stack_spill_alignment: usize,
     stack_spill_offset: usize,
@@ -67,18 +68,13 @@ impl StackFrameMapping {
     ) -> Result<StackFrameMapping, C::Error> {
         let mut mapping: IndexMap<Mapping> = IndexMap::default();
         let mut call_layouts: IndexMap<CallLayout> = IndexMap::default();
+        let mut headless_call_layouts: IndexMap<(CallLayout, MirCall)> = IndexMap::default();
 
         let mut stack_spill_size: usize = 0;
         let mut stack_spill_alignment: usize = 1;
-        for statement in cfg.iter_statements() {
-            let Statement::VarDef { var, value, .. } = statement else {
-                continue;
-            };
-            if value.ty != MirExprVariant::Call {
-                continue;
-            }
-            let call = cfg.expressions.get_call(*value);
-            let call_layout = conv.make_call_layout(cfg, call, Some(*var), reg, Some(backend))?;
+
+        let mut make_layout = |call: &MirCall, target: Option<MirValue>| -> Result<CallLayout, C::Error> {
+            let call_layout = conv.make_call_layout(cfg, call, target, reg, Some(backend))?;
             stack_spill_size = usize::max(stack_spill_size, call_layout.spill_size());
             stack_spill_alignment = usize::max(stack_spill_alignment, call_layout.spill_alignment());
 
@@ -89,7 +85,43 @@ impl StackFrameMapping {
                     _ => (),
                 }
             });
-            call_layouts.view_mut(value.ordinal()).set(call_layout);
+            Ok(call_layout)
+        };
+
+        for statement in cfg.iter_statements() {
+            match statement {
+                Statement::VarDef { var, value, .. } => {
+                    if value.ty != MirExprVariant::Call {
+                        continue;
+                    }
+                    let call = cfg.expressions.get_call(*value);
+                    let call_layout = make_layout(call, Some(*var))?;
+                    call_layouts.view_mut(value.ordinal()).set(call_layout);
+                }
+                Statement::Sync { event, implementation: Some(details), .. } => {
+                    let call = MirCall::sync_impl(details.func_id, event.internal_value, details.ctx, reg);
+                    let call_layout = make_layout(&call, None)?;
+                    headless_call_layouts
+                        .view_mut(details.headless_id.ordinal())
+                        .set((call_layout, call));
+                }
+                Statement::Record { event, uid, implementation: Some(details), .. } => {
+                    let event_ty = cfg.get_var_type(&event.internal_value);
+                    let call = MirCall::record_impl(details.func_id, details.ctx, *event_ty);
+                    let call_layout = make_layout(&call, Some(event.internal_value))?;
+                    headless_call_layouts
+                        .view_mut(details.headless_id.ordinal())
+                        .set((call_layout, call));
+                }
+                Statement::Drop { value, uid, implementation: Some(details), .. } => {
+                    let call = MirCall::drop_impl(details.func_id, *value, details.ctx, reg);
+                    let call_layout = make_layout(&call, None)?;
+                    headless_call_layouts
+                        .view_mut(details.headless_id.ordinal())
+                        .set((call_layout, call));
+                }
+                _ => ()
+            }
         }
 
         for var in cfg.iter_vars() {
@@ -113,12 +145,21 @@ impl StackFrameMapping {
         let stack_spill_offset = layout.size.div_ceil(stack_spill_alignment) * stack_spill_alignment - layout.size;
         Ok(StackFrameMapping {
             call_layouts,
+            headless_call_layouts,
             mapping,
             stack_spill_size,
             stack_spill_alignment,
             stack_spill_offset,
             layout,
         })
+    }
+
+    pub fn headless_call(&self, headless_id: &HeadlessId) -> Option<&MirCall> {
+        self.headless_call_layouts.get(headless_id.ordinal()).map(|(_, call)| call)
+    }
+
+    pub fn headless_layout(&self, headless_id: &HeadlessId) -> &CallLayout {
+        &self.headless_call_layouts[headless_id.ordinal()].0
     }
 
     pub fn call_layout(&self, mir_expr_id: &MirExprId) -> &CallLayout {
