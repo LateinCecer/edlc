@@ -1039,7 +1039,7 @@ impl SpecialFunction {
             SpecialFunction::Sync => {
                 let env_id = hir_phase
                     .types
-                    .get_trait(edl_trait::EDL_SYNC_TRAIT)
+                    .get_trait(edl_trait::EDL_EVENT_TRAIT)
                     .unwrap()
                     .env;
                 let env = hir_phase
@@ -1047,7 +1047,7 @@ impl SpecialFunction {
                     .get_env(env_id)
                     .unwrap();
                 let trait_instance = EdlTraitInstance {
-                    trait_id: edl_trait::EDL_SYNC_TRAIT,
+                    trait_id: edl_trait::EDL_EVENT_TRAIT,
                     param: EdlParameterDef::new(env, env_id),
                 };
 
@@ -1065,7 +1065,7 @@ impl SpecialFunction {
                     args: vec![val],
                     ret,
                 };
-                let mut resolver = CallResolver::associate_function(val, "sync".to_string(), args, scope);
+                let mut resolver = CallResolver::associate_function(val, "synchronize".to_string(), args, scope);
                 resolver.with_trait(trait_instance);
                 resolver
                     .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
@@ -1081,7 +1081,7 @@ impl SpecialFunction {
             SpecialFunction::Record => {
                 let env_id = hir_phase
                     .types
-                    .get_trait(edl_trait::EDL_SYNC_TRAIT)
+                    .get_trait(edl_trait::EDL_EVENT_TRAIT)
                     .unwrap()
                     .env;
                 let env = hir_phase
@@ -1089,7 +1089,7 @@ impl SpecialFunction {
                     .get_env(env_id)
                     .unwrap();
                 let trait_instance = EdlTraitInstance {
-                    trait_id: edl_trait::EDL_SYNC_TRAIT,
+                    trait_id: edl_trait::EDL_EVENT_TRAIT,
                     param: EdlParameterDef::new(env, env_id),
                 };
 

@@ -1547,12 +1547,79 @@ fn test_async() -> Result<(), anyhow::Error> {
     let mut comp = TestCompiler::new();
     comp.init()?;
 
-    let event_ty = comp.compiler.parse_type(inline_code!("isize"))?
-        .unwrap();
-    comp.compiler.phase.types.register_event_type(event_ty);
-    comp.compiler.mir_phase.types.register_event_type::<isize>(&comp.compiler.phase.types)?;
+    #[derive(Copy, Clone, Debug)]
+    struct CuEvent(isize);
+
+    impl MirLayout for CuEvent {
+        fn layout(types: &MirTypeRegistry) -> Layout {
+            let mut builder = OffsetStructLayoutBuilder::default();
+            builder.add_type::<isize>("0".to_string(), types, mem::offset_of!(Self, 0));
+            builder.make::<Self>(types)
+        }
+    }
 
     comp.compiler.prepare_module(&vec!["std"].into())?;
+    comp.compiler.define_type(inline_code!(r#"
+type CuEvent = struct(isize);
+    "#), LayoutOptions {
+        can_init: false,
+        repr: EdlRepresentation::Rust,
+    })?;
+    let event_ty = comp.compiler.parse_type(inline_code!("CuEvent"))?
+        .unwrap();
+    comp.compiler.phase.types.register_event_type(event_ty);
+    comp.compiler.mir_phase.types.register_event_type::<CuEvent>(&comp.compiler.phase.types)?;
+
+    let [record, sync] = comp.compiler.parse_impl(
+        inline_code!("<>"),
+        inline_code!("CuEvent"),
+        [
+            inline_code!(r#"
+            fn record() -> Self"#),
+            inline_code!(r#"
+            fn synchronize(ev: Self)"#),
+        ],
+        Some((inline_code!("core::Event"), inline_code!("<CuEvent>")))
+    )?;
+
+    let record_instance = comp.compiler.get_func_instance(
+        record, inline_code!("<>"), Some(inline_code!("CuEvent")),
+    )?;
+    let synchronize_instance = comp.compiler.get_func_instance(
+        sync, inline_code!("<>"), Some(inline_code!("CuEvent")),
+    )?;
+
+    let record_id = comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            record_instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "record_ev",
+        )?;
+    let sync_id = comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            synchronize_instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "sync_ev",
+        )?;
+
+    extern "C" fn record_impl() -> CuEvent {
+        println!("recording an event");
+        CuEvent(42)
+    }
+    extern "C" fn sync_impl(ev: CuEvent) {
+        println!("synchronizing on {:?}", ev);
+    }
+    comp.backend.intrinsics.insert(record_id, FunctionBinding::from_function(record_impl as extern "C" fn() -> CuEvent));
+    comp.backend.intrinsics.insert(sync_id, FunctionBinding::from_function(sync_impl as extern "C" fn(CuEvent)));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
     let input_fs = comp.compiler.parse_fn_signature(
         inline_code!("fn input() -> i32"),
     )?;
@@ -1654,6 +1721,7 @@ fn test_async() -> Result<(), anyhow::Error> {
         let binding = comp.backend.func_reg();
         *binding.get_intrinsic("print_f32").unwrap()
     };
+
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
 type Field = struct {

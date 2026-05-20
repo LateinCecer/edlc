@@ -2160,20 +2160,6 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &compiler.phase.vars,
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.generate_auto_implementations(
-        &mut compiler.mir_phase,
-        &mut compiler.phase,
-        &mut backend.func_reg_mut(),
-    )
-        .map_err(|err| OptimizationError::AutoImpl(err))?;
-    process_comptime_functions(vm, compiler, backend)?;
-
-    #[cfg(feature = "debug_printouts")] {
-        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
-        let mut writer = AsciPrinter::new(&mut out);
-        writer.print(body).unwrap();
-        out.flush().unwrap();
-    }
 
     // create connectome
     let connectome = body.async_connectome(
@@ -2196,6 +2182,22 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     async_analysis.insert_merge_syncs(&body);
     #[cfg(debug_assertions)]
     async_analysis.debug_print(&body);
+    async_analysis.canonize(body);
+
+    body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    process_comptime_functions(vm, compiler, backend)?;
+
+    #[cfg(feature = "debug_printouts")] {
+        let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
+        let mut writer = AsciPrinter::new(&mut out);
+        writer.print(body).unwrap();
+        out.flush().unwrap();
+    }
 
     // create stack frame
     let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
