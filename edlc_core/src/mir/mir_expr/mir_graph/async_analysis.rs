@@ -1607,7 +1607,13 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 None
             }) {
 
-            assert_eq!(exit_state.event_states[event_id], EventState::Invalid);
+            // note that the state may also be synchronized when an event is recorded; this can
+            // legally happen in loops where the same event is synchronized in the loop and then
+            // recorded again for the output state.
+            assert!(matches!(
+                exit_state.event_states[event_id],
+                EventState::Invalid | EventState::Synchronized,
+            ));
             for source_id in self.event_sync[event_id.0].iter() {
                 exit_state.source_states[*source_id] = FlowState::Floating;
             }

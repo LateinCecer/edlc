@@ -1752,6 +1752,14 @@ async fn calc_laplace(async src: DevicePointer, async dst: DevicePointer) {}
         if grad.pointer == 1 {
             calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
         }
+
+        let mut index: usize = 0;
+        loop {
+            if index == 10 { break }
+            calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
+            index += 1;
+        }
+
         calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
     }
     "#))?;
