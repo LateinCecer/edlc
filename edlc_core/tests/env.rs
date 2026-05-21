@@ -21,7 +21,7 @@ use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, IntrinsicExecutionError, StaticData};
 use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, AsyncFlowAnalysis, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
-use edlc_core::prelude::mir_funcs::{FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
+use edlc_core::prelude::mir_funcs::{CallSrc, FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirLayout, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
 use edlc_core::prelude::ast_type_def::LayoutOptions;
@@ -323,7 +323,7 @@ impl CodeGen<TestBackend> for TestCodegen {
         cfg: &MirFlowGraph,
         call: &MirCall,
         target: Option<&MirValue>,
-        exor_id: Option<&MirExprId>,
+        exor_id: &CallSrc,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
@@ -341,7 +341,7 @@ impl CodeGen<TestBackend> for TestCallGen {
         cfg: &MirFlowGraph,
         mir_call: &MirCall,
         target: Option<&MirValue>,
-        exor_id: Option<&MirExprId>,
+        exor_id: &CallSrc,
     ) -> Result<(), MirError<TestBackend>> {
         Ok(())
     }
@@ -1749,13 +1749,9 @@ async fn calc_laplace(async src: DevicePointer, async dst: DevicePointer) {}
         let laplace = Field { pointer: 2 };
 
         calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
-
-
-
-        calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
-
-
-
+        if grad.pointer == 1 {
+            calc_gradient(p.as_device_ptr(), grad.as_device_ptr());
+        }
         calc_laplace(grad.as_device_ptr(), laplace.as_device_ptr());
     }
     "#))?;

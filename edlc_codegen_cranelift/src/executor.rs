@@ -1863,7 +1863,7 @@ impl Data<f32> {
 impl core::Drop for Data<f32> {
     fn drop(self: Data<f32>) {
         print("dropping data: ");
-        self.print();
+        // self.print();
         print("!\n");
     }
 }
@@ -1875,10 +1875,10 @@ fn test() {
     foo(rc);
 
     // create some data
-    let data = Data { data: 2.73 };
-    print("created data buffer: ");
-    data.print();
-    print("\n");
+    // let data = Data { data: 2.73_f32 };
+    // print("created data buffer: ");
+    // data.print();
+    // print("\n");
 }
 
 fn foo(rc: Rc<f32>) {

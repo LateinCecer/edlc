@@ -1,4 +1,3 @@
-use std::arch::x86_64::_blcfill_u64;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::index_map::IndexMap;
 use crate::core::EdlVarId;
@@ -625,6 +624,18 @@ enum EventState {
     Synchronized,
 }
 
+impl EventState {
+    fn upper(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else {
+            // if Invalid is combined with any other state, we must insert a sync.
+            // if Synchronized is combined with Recorded, we must also insert a sync.
+            EventState::Synchronized
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct EventId(usize);
 
@@ -690,6 +701,10 @@ impl AsyncEventState {
             self.event_states.push(default);
         }
     }
+
+    fn len(&self) -> usize {
+        self.event_states.len()
+    }
 }
 
 struct EventStateMerge {
@@ -706,37 +721,39 @@ impl EventStateMerge {
         }
         &mut self.syncs[block_ref.0]
     }
-
-    fn sync<I: IntoIterator<Item=EventId>>(&mut self, block_ref: &MirBlockRef, events: I) {
-        for event in events {
-            if self.state.event_states[event.0] == EventState::Recorded {
-                self.state.event_states[event.0] = EventState::Synchronized;
-                self.get_syncs_mut(block_ref).insert(event);
-            }
-        }
-    }
 }
 
 impl AsyncEventState {
-    fn merge<'a, I: IntoIterator<Item=(MirBlockRef, &'a Self), IntoIter=Iter>, Iter: Iterator<Item=(MirBlockRef, &'a Self)>>(iter: I) -> Option<EventStateMerge> {
-        let mut iterator = iter.into_iter();
-        let mut already_synced = Vec::new();
-        let mut state = if let Some((block, item)) = iterator.next() {
-            already_synced.push(block);
+    fn merge<'a, I: IntoIterator<
+        Item=(MirBlockRef, &'a Self), IntoIter=Iter>,
+        Iter: Iterator<Item=(MirBlockRef, &'a Self)>
+    >(iter: I) -> Option<EventStateMerge> {
+        let items: Vec<_> = iter.into_iter().collect();
+        let mut state = if let Some((_, item)) = items.first() {
             EventStateMerge {
-                state: item.clone(),
+                state: (*item).clone(),
                 syncs: vec![],
             }
         } else {
             return None;
         };
 
-        while let Some((block, item)) = iterator.next() {
-            let comp = state.state.compare(item);
-            state.sync(&block, comp.iter().cloned());
-            for prev in already_synced.iter() {
-                state.sync(prev, comp.iter().cloned());
+        for event_id in 0..state.state.len() {
+            let event_id = EventId(event_id);
+            let mut iter = items.iter();
+            let mut joined_state = iter.next().unwrap().1[event_id];
+            for (_, item) in iter {
+                joined_state = EventState::upper(joined_state, item[event_id]);
             }
+            // now that the final state is found, insert syncs where necessary
+            if joined_state == EventState::Synchronized {
+                for (block_ref, item) in items.iter() {
+                    if item[event_id] == EventState::Recorded {
+                        state.get_syncs_mut(block_ref).insert(event_id);
+                    }
+                }
+            }
+            state.state[event_id] = joined_state;
         }
         Some(state)
     }
@@ -974,6 +991,11 @@ impl<V> IndexMut<usize> for PooledData<V> {
     }
 }
 
+enum BlockUpdateResult {
+    Update(BlockExitState),
+    ParentUpdated(Vec<MirBlockRef>),
+}
+
 pub struct AsyncFlowAnalysis<'cfg> {
     conn: &'cfg AsyncConnectome,
     block_exit_states: Vec<BlockExitState>,
@@ -1003,16 +1025,34 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             .iter_blocks()
             .filter(|block| !cfg.is_block_unreachable(block))
             .collect::<VecDeque<_>>();
+        fn push_worklist_items(
+            worklist: &mut VecDeque<MirBlockRef>,
+            cfg: &MirFlowGraph,
+            block: &MirBlockRef,
+        ) {
+            let block = cfg.get_block(&block).unwrap();
+            for child in block.seal.links().map(|call| call.target) {
+                if !worklist.contains(&child) {
+                    worklist.push_back(child);
+                }
+            }
+        }
+
         while let Some(next) = worklist.pop_front() {
             assert!(!cfg.is_block_unreachable(&next));
-            let exit_state = self.update_block(cfg, &next, None)?;
 
-            // if the state changed, add children to the worklist
-            if self.block_exit_states[next.0].set(exit_state) {
-                let block = cfg.get_block(&next).unwrap();
-                for child in block.seal.links().map(|call| call.target) {
-                    if !worklist.contains(&child) {
-                        worklist.push_back(child);
+            match self.update_block(cfg, &next, None)? {
+                BlockUpdateResult::ParentUpdated(updated_parents) => {
+                    // this blocks parents changed.
+                    // resubmit this block and all siblings as any number of them might have changed.
+                    for parent in updated_parents.into_iter() {
+                        push_worklist_items(&mut worklist, cfg, &parent);
+                    }
+                }
+                BlockUpdateResult::Update(exit) => {
+                    // if the state changed, add children to the worklist
+                    if self.block_exit_states[next.0].set(exit) {
+                        push_worklist_items(&mut worklist, cfg, &next);
                     }
                 }
             }
@@ -1033,7 +1073,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         until: Option<&BlockLocalStatementUid>,
         // mir_funcs: &MirFuncRegistry<B>,
         // edl_types: &EdlTypeRegistry,
-    ) -> Result<BlockExitState, AsyncConnConflict> {
+    ) -> Result<BlockUpdateResult, AsyncConnConflict> {
         dbg!(block_ref);
         let block = cfg.get_block(block_ref).unwrap();
         // assemble entry state
@@ -1047,8 +1087,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
 
         let EventStateMerge {
-            mut state,
-            ..
+            state,
+            syncs,
         } = AsyncEventState::merge(cfg.backlinks[block_ref.0]
             .iter()
             .map(|block_ref| {
@@ -1061,6 +1101,31 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     syncs: Vec::new(),
                 }
             });
+        // make sure newly inserted syncs are reflected in the merged states source states.
+        let mut changed_parents = Vec::new();
+        for (parent_idx, events) in syncs.into_iter().enumerate() {
+            let parent_state = &mut self.block_exit_states[parent_idx];
+            if !events.is_empty() {
+                changed_parents.push(MirBlockRef(parent_idx));
+                for event_id in events {
+                    Self::sync_event__(
+                        &self.event_sync,
+                        event_id,
+                        &mut parent_state.event_states,
+                        &mut parent_state.source_states,
+                        &mut parent_state.sync_positions,
+                        &MirLoc::Seal(MirBlockRef(parent_idx)),
+                    );
+                }
+            }
+        }
+        if !changed_parents.is_empty() {
+            // if the parent changed, then the async source state is not consistent anymore.
+            // additionally, siblings may also be affected.
+            // abort here and just retry later.
+            return Ok(BlockUpdateResult::ParentUpdated(changed_parents));
+        }
+
         let mut exit_state = BlockExitState {
             sync_positions: SyncPositions::new(),
             event_states: state,
@@ -1105,7 +1170,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 }
             }
         }
-        Ok(exit_state)
+        Ok(BlockUpdateResult::Update(exit_state))
     }
 
     /// Collects all positions at which the compiler inserts synchronization events.
