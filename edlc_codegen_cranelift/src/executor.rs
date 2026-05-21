@@ -1913,13 +1913,13 @@ fn foo(rc: Rc<f32>) {
                 self.event_counter = self.event_counter.wrapping_add(1);
                 let ev = Event(id);
                 self.queue.push(ev);
-                println!("inserted event {ev} into work queue");
+                println!("recorded event {ev} into work queue");
                 ev
             }
 
             fn sync_event(&mut self, ev: Event) {
                 if let Some(idx) = self.queue.iter().position(|s| s == &ev) {
-                    println!("removed event {ev} from work queue");
+                    println!("synchronized event {ev} from work queue");
                     self.queue.remove(idx);
                 } else {
                     jit_panic!("tried to sync on event that does not exit");

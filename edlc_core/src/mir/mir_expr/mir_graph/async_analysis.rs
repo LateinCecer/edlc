@@ -1446,6 +1446,12 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
         self.event_sync = event_pool_builder.build();
         self.event_values = event_values_builder.build();
+        // if an event does not sync anything, we can kill it right away
+        for (event_id, event) in self.events.iter_mut().enumerate() {
+            if self.event_sync[event_id].is_empty() {
+                event.alive = false;
+            }
+        }
         self.init_exit_states(cfg);
     }
 
@@ -1508,7 +1514,9 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             let block_ref = MirBlockRef(block);
             for (loc, events) in state.sync_positions.map.iter() {
                 for event in events.iter() {
-                    let data = data_map[event.0];
+                    let Some(data) = data_map.get(event.0) else {
+                        continue;
+                    };
                     let sync_value = *router.route_to(&data, loc.clone(), cfg);
 
                     // insert statement into graph
@@ -1533,8 +1541,18 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     match loc {
                         MirLoc::GraphLoc(MirGraphLoc(block_ref_, uid)) => {
                             assert_eq!(&block_ref, block_ref_);
-                            let idx = block.find_current_index(uid)
+                            let mut idx = block.find_current_index(uid)
                                 .expect("failed to find referring statement for sync");
+                            // walk backwards if the prev statement is a record statement as we want
+                            // to insert before the records on the current function
+                            while idx > 0 {
+                                let prev_id = idx - 1;
+                                if let Statement::Record { .. } = &block.statements[prev_id] {
+                                    idx -= 1;
+                                } else {
+                                    break;
+                                }
+                            }
                             block.statements.insert(idx, sync);
                         },
                         MirLoc::Seal(block_ref_) => {
@@ -1733,7 +1751,6 @@ trait TransferAsyncState {
         state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
-        // ctx: &TransferCtx<'_, B>,
     ) -> Result<(), AsyncConnConflict>;
 }
 
