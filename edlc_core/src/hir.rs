@@ -1328,10 +1328,7 @@ impl Display for HirErrorType {
                 `HirErrorType::FunctionName`")
             },
             HirErrorType::FunctionCallArg => {
-                write!(f, "The return value of a function call my only be passed on as a function parameter for \
-                another function call, if the return type is either `None` or passed by `Value`. \
-                `Resource` and `Reference` return types cannot be passed, as they require a named resource target to \
-                stick to.")
+                write!(f, "function call argument error.")
             },
             HirErrorType::Resolver(res) => {
                 write!(f, "{res}")

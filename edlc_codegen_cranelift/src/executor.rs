@@ -2009,7 +2009,7 @@ impl BoundaryField {
         DevicePointer { ptr: 0 }
     }
 
-    fn field_as_ptr(async self: Self) -> async DevicePointer<Self> {
+    fn field_as_ptr(async self: Self) -> async DevicePointer<Field> {
         DevicePointer { ptr: 0 }
     }
 }
@@ -2017,24 +2017,35 @@ impl BoundaryField {
 // -- mock device stubs; these would be implemented as callbacks usually
 async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
 async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
+async fn init_field(field: DevicePointer<Field>) {}
 
 // -- simplified higher-level functions
 impl BoundaryField {
-    fn gradient(self: Self, async dst: Field) {
+    async fn gradient(self: Self, async dst: Field) {
         gradient(self.as_device_ptr(), dst.as_device_ptr());
     }
 
-    fn laplace(self: Self, async dst: Field) {
+    async fn laplace(self: Self, async dst: Field) {
         laplace(self.as_device_ptr(), dst.as_device_ptr());
     }
 }
 
 // -- create global fields
-let p = Field::new();
+let p = BoundaryField::new();
+let u = BoundaryField::new();
+let grad_p = BoundaryField::new();
+let scalar_field = Field::new();
 
 fn test() {
     print("starting synchronization tests...\n");
+    gradient(p.as_device_ptr(), grad_p.field_as_ptr());
+    print("gradient calculation dispatched\n");
+    init_field(u.field_as_ptr());
+    print("velocity field init dispatched\n");
 
+    // since we use the pressure gradient here, there should be a sync event
+    grad_p.laplace(scalar_field);
+    print("laplace calculation dispatched\n");
 }
         "#))?;
 
