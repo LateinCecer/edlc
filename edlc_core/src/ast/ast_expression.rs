@@ -309,7 +309,7 @@ impl AstExpr {
                     let pos = *parser.pos();
                     let scope = *parser.env.current_scope().wrap(pos)?;
 
-                    match AstBlockOrInit::parse(parser)? {
+                    match AstBlockOrInit::parse_init(parser, pos)? {
                         AstBlockOrInit::Init(expr, ..) => {
                             TypeInitExpr::from_list_named(expr, name?, pos, scope, parser.module_src.clone())
                                 .map(|e| e.into())

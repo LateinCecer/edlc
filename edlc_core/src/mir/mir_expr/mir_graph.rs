@@ -50,6 +50,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::hash::Hasher;
 use std::ops::{Deref, Range};
+use log::warn;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
@@ -579,6 +580,7 @@ impl Statement {
                         ))
                     )
                 } else {
+                    // for the copy operator we can just copy the memory as a fallback
                     let dst = stack_frame.get_offset(var, vm).unwrap();
                     let src = stack_frame.get_offset(value, vm).unwrap();
                     vm.memcpy(&dst, &src);
@@ -609,6 +611,8 @@ impl Statement {
                             &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
                         )
                 } else {
+                    // if the drop implementation is missing, there is no explicit drop for this
+                    // item. In that case, do nothing.
                     Ok(())
                 }
             }
@@ -625,6 +629,7 @@ impl Statement {
                             &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
                         )
                 } else {
+                    warn!("missing `core::Event` implementation for event type");
                     Ok(())
                 }
             }
@@ -640,6 +645,7 @@ impl Statement {
                             &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid))
                         )
                 } else {
+                    warn!("missing `core::Event` implementation for event type");
                     Ok(())
                 }
             }

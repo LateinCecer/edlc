@@ -1117,6 +1117,16 @@ edl init --bin
         Ok(())
     }
 
+    pub fn register_event_type<T: MirLayout + 'static>(
+        &mut self,
+        ty: ModuleSrc,
+    ) -> Result<(), CompilerError> {
+        let event_type_id = self.parse_type(ty)?.unwrap();
+        self.phase.types.register_event_type(event_type_id);
+        self.mir_phase.types.register_event_type::<T>(&self.phase.types)?;
+        Ok(())
+    }
+
     pub fn get_func_instance(
         &mut self,
         func_id: EdlTypeId,

@@ -41,6 +41,7 @@ pub struct AstBlock {
 pub enum InitReason {
     Comma(SrcPos, String),
     NamedParameter(SrcPos, String),
+    Forced(SrcPos),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,7 @@ impl InitReason {
         match self {
             InitReason::Comma(pos, _) => pos,
             InitReason::NamedParameter(pos, _) => pos,
+            InitReason::Forced(pos) => pos,
         }
     }
 }
@@ -70,6 +72,10 @@ impl Display for InitReason {
             InitReason::NamedParameter(pos, name) => {
                 write!(f, "colon at {pos} indicates that `{name}` should be the name of a member,\
                 with the value expression following the colon")
+            }
+            InitReason::Forced(pos) => {
+                write!(f, "type identifier at {pos} implies that the block following it must be a \
+                type init list")
             }
         }
     }
@@ -121,18 +127,19 @@ impl AstBlockOrInit {
     }
 
     fn continue_parse_block_init(
-        first_member: AstStructMemberInit,
+        mut members: Vec<AstStructMemberInit>,
         reason: InitReason,
         parser: &mut Parser,
     ) -> Result<Self, ParseError> {
-        let mut members = vec![first_member];
         loop {
             if let Ok(local!(Token::Punct(Punct::BraceClose))) = parser.peak() {
                 parser.next_token()?;
                 break;
             }
-            expect_token!(parser; (Token::Punct(Punct::Comma))
-                expected "`,` or struct init block close `}`")?;
+            if !members.is_empty() {
+                expect_token!(parser; (Token::Punct(Punct::Comma))
+                    expected "`,` or struct init block close `}`")?;
+            }
             if let Ok(local!(Token::Punct(Punct::BraceClose))) = parser.peak() {
                 parser.next_token()?;
                 break;
@@ -141,6 +148,13 @@ impl AstBlockOrInit {
             members.push(AstStructMemberInit::parse(parser)?);
         }
         Ok(Self::Init(members, reason))
+    }
+
+    pub fn parse_init(parser: &mut Parser, name_position: SrcPos) -> Result<AstBlockOrInit, ParseError> {
+        let _pos = expect_token!(parser; (Token::Punct(Punct::BraceOpen)),
+            pos => pos expected "type init starting with `{`")?;
+        parser.env.push_block();
+        Self::continue_parse_block_init(vec![], InitReason::Forced(name_position), parser)
     }
 }
 
@@ -209,7 +223,7 @@ impl Parsable for AstBlockOrInit {
                         let value = AstExpr::parse(parser)?;
                         let m = AstStructMemberInit::from_value(name.clone(), pos, value);
                         // continue with block init
-                        return Self::continue_parse_block_init(m, InitReason::NamedParameter(reason_pos, name), parser);
+                        return Self::continue_parse_block_init(vec![m], InitReason::NamedParameter(reason_pos, name), parser);
                     }
 
                     if let Ok(SrcToken { pos: reason_pos, token: Token::Punct(Punct::Comma)} ) = parser.peak() {
@@ -225,7 +239,7 @@ impl Parsable for AstBlockOrInit {
 
                         let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src);
                         // continue with block init
-                        return Self::continue_parse_block_init(m, InitReason::Comma(reason_pos, name), parser);
+                        return Self::continue_parse_block_init(vec![m], InitReason::Comma(reason_pos, name), parser);
                     }
                 }
             }

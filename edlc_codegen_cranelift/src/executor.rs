@@ -991,6 +991,8 @@ impl<Runtime: 'static> JitCompiler for CraneliftJIT<Runtime> {
 mod test {
     use std::{any, slice};
     use std::collections::HashMap;
+    use std::fmt::{Display, Formatter};
+    use std::marker::PhantomData;
     use std::path::Path;
     use std::time::SystemTime;
     use edlc_core::inline_code;
@@ -1004,6 +1006,7 @@ mod test {
     use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
     use edlc_core::prelude::mir_expr::Context;
     use edlc_core::resolver::QualifierName;
+    use edlc_layout::MirLayout;
     use crate::compiler::{TypedProgram};
     use crate::executor::{CatchUnwind, CraneliftJIT, FunctionContainer, JITBencher};
     use crate::{jit_func, jit_panic, setup_logger};
@@ -1758,10 +1761,19 @@ fn test_other() {
     /// Test for non-trivial drop and copy implementations.
     #[test]
     fn test_drop_copy() -> Result<(), anyhow::Error> {
+        /// Rest runtime
+        struct Rt {
+            rc_data: Vec<(usize, f32)>,
+        }
+
         let _ = setup_logger();
-        let mut compiler = CraneliftJIT::<()>::default();
+        let mut compiler = CraneliftJIT::<Rt>::default();
         compiler.init()?;
         setup_print(&mut compiler)?;
+
+        compiler.backend.insert_runtime(0, "default", Rt {
+            rc_data: vec![],
+        })?;
 
         compiler.compiler.prepare_module(&vec!["std"].into())?;
         compiler.compiler.define_type(inline_code!(r#"
@@ -1773,15 +1785,15 @@ fn test_other() {
 
         #[derive(Debug)]
         struct MockRc<T> {
-            counter: usize,
-            data: T,
+            index: usize,
+            _t: PhantomData<T>,
         }
 
         impl<T: MirLayout + 'static> MirLayout for MockRc<T> {
             fn layout(types: &MirTypeRegistry) -> Layout {
                 let mut builder = OffsetStructLayoutBuilder::default();
-                builder.add_type::<usize>("counter".to_string(), types, std::mem::offset_of!(Self, counter));
-                builder.add_type::<T>("data".to_string(), types, std::mem::offset_of!(Self, data));
+                builder.add_type::<usize>("counter".to_string(), types, std::mem::offset_of!(Self, index));
+                builder.add_type::<PhantomData<T>>("data".to_string(), types, std::mem::offset_of!(Self, _t));
                 builder.make::<Self>(types)
             }
         }
@@ -1818,29 +1830,44 @@ fn test_other() {
                 Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
             )?;
 
-        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(new_rc),
-            fn new_rc_<>(val: f32) -> MockRc<f32> where; {
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(new_rc), 0,
+            fn new_rc_<>(runtime: Rt, val: f32) -> MockRc<f32> where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
+                let index = runtime.rc_data.len();
+                runtime.rc_data.push((1, val));
                 MockRc {
-                    counter: 0,
-                    data: val,
+                    index,
+                    _t: PhantomData,
                 }
             }
         );
-        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(copy_rc),
-            fn copy_rc_<>(val: *const MockRc<f32>) -> MockRc<f32> where; {
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(copy_rc), 0,
+            fn copy_rc_<>(runtime: Rt, val: *const MockRc<f32>) -> MockRc<f32> where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
                 let rc = unsafe { &*val };
-                let out = MockRc {
-                    counter: rc.counter + 1,
-                    data: rc.data,
-                };
-                println!("copied rc: {:?} -> {:?}", rc, out);
-                out
+                let index = rc.index;
+                let old_num = runtime.rc_data[index].0;
+                runtime.rc_data[index].0 += 1;
+                println!("copied rc: {}", old_num);
+                MockRc {
+                    index,
+                    _t: PhantomData,
+                }
             }
         );
-        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(drop_rc),
-            fn drop_rc_<>(val: MockRc<f32>) -> () where; {
-                println!("dropping rc: {:?}", val);
-                std::mem::drop(val);
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(drop_rc), 0,
+            fn drop_rc_<>(runtime: Rt, val: MockRc<f32>) -> () where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
+                let index = val.index;
+                runtime.rc_data[index].0 -= 1;
+                let instances = runtime.rc_data[index].0;
+                println!("dropping rc: {:?} -> there are {} left", index, instances);
+                if instances == 0 {
+                    println!("rc is dropped for good!");
+                }
             }
         );
 
@@ -1848,41 +1875,166 @@ fn test_other() {
 use std::io::print;
 use std::Rc;
 
-type Data<T> = struct {
-    data: T,
-};
-
-impl Data<f32> {
-    fn print(self: Self) {
-        print("Data { data: ");
-        print(self.data);
-        print(" }");
-    }
-}
-
-impl core::Drop for Data<f32> {
-    fn drop(self: Data<f32>) {
-        print("dropping data: ");
-        // self.print();
-        print("!\n");
-    }
-}
-
 fn test() {
     let rc: Rc<f32> = Rc::new(3.14);
     foo(rc);
     print("hello, world!\n");
     foo(rc);
-
-    // create some data
-    // let data = Data { data: 2.73_f32 };
-    // print("created data buffer: ");
-    // data.print();
-    // print("\n");
 }
 
 fn foo(rc: Rc<f32>) {
     print("hello from foo!\n");
+}
+        "#))?;
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, ()).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_logic() -> Result<(), anyhow::Error> {
+        /// Rest runtime
+        struct Rt {
+            queue: Vec<Event>,
+            event_counter: usize,
+        }
+
+        impl Rt {
+            fn new() -> Self {
+                Rt {
+                    queue: vec![],
+                    event_counter: 0,
+                }
+            }
+
+            fn record_event(&mut self) -> Event {
+                let id = self.event_counter;
+                self.event_counter = self.event_counter.wrapping_add(1);
+                let ev = Event(id);
+                self.queue.push(ev);
+                println!("inserted event {ev} into work queue");
+                ev
+            }
+
+            fn sync_event(&mut self, ev: Event) {
+                if let Some(idx) = self.queue.iter().position(|s| s == &ev) {
+                    println!("removed event {ev} from work queue");
+                    self.queue.remove(idx);
+                } else {
+                    jit_panic!("tried to sync on event that does not exit");
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, MirLayout)]
+        struct Event(usize);
+
+        impl Display for Event {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Event({:x})", self.0)
+            }
+        }
+
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<Rt>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.backend.insert_runtime(0, "default", Rt::new())?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        compiler.compiler.define_type(inline_code!(r#"
+type Event = struct;
+        "#), LayoutOptions {
+            can_init: false,
+            repr: EdlRepresentation::Rust,
+        })?;
+        compiler.compiler.register_event_type::<Event>(inline_code!("Event"))?;
+
+        let [record, sync] = compiler.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!("Event"),
+            [
+                inline_code!(r#"
+                fn record() -> Self"#),
+                inline_code!(r#"
+                fn synchronize(ev: Self)
+                "#),
+            ],
+            Some((inline_code!("core::Event"), inline_code!("<Event>"))),
+        )?;
+        jit_func!(for ("Event") impl compiler, fn(record), 0,
+            fn record_ev_<>(
+                runtime: Rt,
+            ) -> Event where; {
+                let mut runtime = unsafe { &*runtime }.as_ref().unwrap().write().unwrap();
+                runtime.record_event()
+            }
+        );
+        jit_func!(for ("Event") impl compiler, fn(sync), 0,
+            fn synchronize_ev_<>(
+                runtime: Rt,
+                ev: Event
+            ) -> () where; {
+                let mut runtime = unsafe { &*runtime }.as_ref().unwrap().write().unwrap();
+                runtime.sync_event(ev);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+
+// create dummy field
+type Field = struct {};
+type BoundaryField = struct {};
+type DevicePointer<T> = struct { ptr: usize };
+
+impl Field {
+    comptime fn new() -> Self {
+        Field {}
+    }
+
+    fn as_device_ptr(async self: Self) -> async DevicePointer<Self> {
+        DevicePointer { ptr: 0 }
+    }
+}
+
+impl BoundaryField {
+    comptime fn new() -> Self {
+        BoundaryField {}
+    }
+
+    fn as_device_ptr(async self: Self) -> async DevicePointer<Self> {
+        DevicePointer { ptr: 0 }
+    }
+
+    fn field_as_ptr(async self: Self) -> async DevicePointer<Self> {
+        DevicePointer { ptr: 0 }
+    }
+}
+
+// -- mock device stubs; these would be implemented as callbacks usually
+async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
+async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
+
+// -- simplified higher-level functions
+impl BoundaryField {
+    fn gradient(self: Self, async dst: Field) {
+        gradient(self.as_device_ptr(), dst.as_device_ptr());
+    }
+
+    fn laplace(self: Self, async dst: Field) {
+        laplace(self.as_device_ptr(), dst.as_device_ptr());
+    }
+}
+
+// -- create global fields
+let p = Field::new();
+
+fn test() {
+    print("starting synchronization tests...\n");
+
 }
         "#))?;
 
