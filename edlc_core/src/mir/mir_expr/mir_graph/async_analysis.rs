@@ -1074,7 +1074,6 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         // mir_funcs: &MirFuncRegistry<B>,
         // edl_types: &EdlTypeRegistry,
     ) -> Result<BlockUpdateResult, AsyncConnConflict> {
-        dbg!(block_ref);
         let block = cfg.get_block(block_ref).unwrap();
         // assemble entry state
         let mut source_state: AsyncSourceState<FlowState> = AsyncSourceState::new(
@@ -1688,7 +1687,6 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
-        dbg!("syncing value ", value);
         self.conn[*value]
             .iter()
             .for_each(|val| {
@@ -1745,12 +1743,10 @@ impl MirCall {
         exit_state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
-        // is_async: bool,
     ) -> Result<(), AsyncConnConflict> {
         let state = flow_analysis
             .conn
             .get_state(param, FlowState::upper, &exit_state.source_states);
-        dbg!(&flow_analysis.conn[*param]);
         if matches!(state, Some(FlowState::Floating)) {
             flow_analysis.sync_value(
                 param,
@@ -1766,8 +1762,6 @@ impl MirCall {
                 matches!(state, Some(FlowState::Fixed)),
                 "MIR value async flow-state did not change after synchronizing",
             );
-        } else {
-            dbg!(&exit_state.source_states);
         }
         Ok(())
     }

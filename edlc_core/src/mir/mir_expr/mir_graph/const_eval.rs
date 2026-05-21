@@ -1925,12 +1925,12 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
             &compiler.mir_phase.types,
             &compiler.phase.types,
         );
-        #[cfg(debug_assertions)]
+        #[cfg(feature="debug_printouts")]
         async_analysis.debug_print(&body.body);
 
         async_analysis.update(&body.body).unwrap();
         async_analysis.insert_merge_syncs(&body.body);
-        #[cfg(debug_assertions)]
+        #[cfg(feature="debug_printouts")]
         async_analysis.debug_print(&body.body);
         async_analysis.canonize(&mut body.body);
         // -- async analysis end here
@@ -2204,12 +2204,12 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
             &compiler.mir_phase.types,
             &compiler.phase.types,
         );
-        #[cfg(debug_assertions)]
+        #[cfg(feature="debug_printouts")]
         async_analysis.debug_print(&body);
 
         async_analysis.update(&body).unwrap();
         async_analysis.insert_merge_syncs(&body);
-        #[cfg(debug_assertions)]
+        #[cfg(feature="debug_printouts")]
         async_analysis.debug_print(&body);
         async_analysis.canonize(body);
         // -- async analysis end here
