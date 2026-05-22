@@ -41,6 +41,8 @@ use std::hash::DefaultHasher;
 use log::warn;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::prelude::report_infer_error;
 
@@ -1903,14 +1905,34 @@ impl MakeGraph for HirFunctionCall {
             ComptimeParams::empty()
         };
 
+        // we can assume that call resolution was successful if we've reached this point
+        let resolver_data = info.resolver.res.as_ref()
+            .expect("failed to get resolver success data after successful function call resolution");
+
         // write parameters
         let mut parameter_values = vec![];
         let mut comptime_parameter_values = vec![];
+        for (i, ((param, param_def), auto_ref)) in self.params
+            .iter()
+            .zip(edl_sig.params.iter())
+            .zip(resolver_data.auto_ref.iter())
+            .enumerate() {
 
-        for (i, (param, param_def)) in self.params.iter().zip(edl_sig.params.iter()).enumerate() {
             let param_ty = param.mir_deref_type(graph)?;
             let param_value = graph.graph.create_temp_variable(param_ty);
-            param.write_to_graph(graph, param_value)?;
+            match auto_ref {
+                AutoReference::None => {
+                    param.write_to_graph(graph, param_value)?;
+                }
+                AutoReference::Reference => {
+                    let pos = param.pos();
+                    HirRef::write_ref_to_graph(param, graph, param_value, pos)?;
+                }
+                AutoReference::Dereference => {
+                    let pos = param.pos();
+                    HirDeref::write_deref_to_graph(param, graph, param_value, pos)?;
+                }
+            }
             if graph.is_current_sealed() {
                 return Ok(()); // early exit in the eval of the parameter value
             }

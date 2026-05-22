@@ -447,21 +447,24 @@ impl EdlFnArgument for HirRef {
     }
 }
 
-impl MakeGraph for HirRef {
-    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
-    where
-        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
-    {
+impl HirRef {
+    pub fn write_ref_to_graph<B: Backend>(
+        value: &HirExpression,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+        pos: SrcPos,
+    ) -> Result<(), HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         let target_ty = *graph.graph.get_var_type(&target);
-        let value_type = self.value.mir_type(graph)?;
-        if value_type != self.value.mir_deref_type(graph)? {
+        let value_type = value.mir_type(graph)?;
+        if value_type != value.mir_deref_type(graph)? {
             // LHS compiles to an internal reference.
             // In this case, we just need to check for a downcast
             if graph.mir_phase.types.is_ref_mutable(&value_type)
                 && !graph.mir_phase.types.is_ref_mutable(&target_ty) {
                 // insert downcast from original
                 let ori_ref_value = graph.graph.create_temp_variable(value_type);
-                self.value.write_to_graph(graph, ori_ref_value)?;
+                value.write_to_graph(graph, ori_ref_value)?;
                 let downcast = graph.graph.expressions.insert_downcast(MirDowncastRef::new(
                     ori_ref_value,
                     target_ty,
@@ -473,38 +476,47 @@ impl MakeGraph for HirRef {
                     target,
                     downcast,
                     &graph.mir_phase.types,
-                    DebugSymbols { pos: self.pos },
+                    DebugSymbols { pos },
                 );
                 return Ok(());
             }
 
             assert_eq!(value_type, target_ty);
-            self.value.write_to_graph(graph, target)?;
+            value.write_to_graph(graph, target)?;
             return Ok(());
         }
 
         // LHS does not compile to an internal reference.
         // in this case, we need to actually create the reference to a temporary value in MIR
-        let value = graph.graph.create_temp_variable(value_type);
-        self.value.write_to_graph(graph, value)?;
+        let out_value = graph.graph.create_temp_variable(value_type);
+        value.write_to_graph(graph, out_value)?;
         if graph.mir_phase.types.is_ref_mutable(&target_ty) {
             graph.graph.def_mut_ref(
                 graph.current_block,
-                value,
+                out_value,
                 target,
                 &graph.mir_phase.types,
-                DebugSymbols { pos: self.pos },
+                DebugSymbols { pos },
             );
         } else {
             graph.graph.def_ref(
                 graph.current_block,
-                value,
+                out_value,
                 target,
                 &graph.mir_phase.types,
-                DebugSymbols { pos: self.pos },
+                DebugSymbols { pos },
             );
         }
         Ok(())
+    }
+}
+
+impl MakeGraph for HirRef {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        Self::write_ref_to_graph(&self.value, graph, target, self.pos)
     }
 
     fn mir_type<B: Backend>(

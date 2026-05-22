@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::error::Error;
 pub use constraints::EnvConstraint;
 pub use constraints::EnvConstraintStack;
-pub use fn_constraint::SigConstraint;
+pub use fn_constraint::{SigConstraint, AutoRefState, AutoReference};
 
 use crate::core::edl_error::EdlError;
 use crate::core::edl_param_env::{EdlGenericParamValue, EdlGenericParamVariant, EdlParameterDef};

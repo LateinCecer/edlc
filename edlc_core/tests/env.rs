@@ -1765,3 +1765,127 @@ async fn calc_laplace(async src: DevicePointer, async dst: DevicePointer) {}
     "#))?;
     Ok(())
 }
+
+
+#[test]
+fn test_references() -> Result<(), anyhow::Error> {
+    let mut comp = TestCompiler::new();
+    comp.init()?;
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let input_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn input() -> i32"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        input_fs, inline_code!("<>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "input_func_i32",
+        )?;
+
+    extern "C" fn input_binding() -> i32 {
+        10
+    }
+
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("input_func_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(input_binding as extern "C" fn() -> i32));
+
+
+    comp.compiler.change_current_module(&vec!["std"].into());
+    let print_fs = comp.compiler.parse_fn_signature(
+        inline_code!("fn print<T>(val: T)"),
+    )?;
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<i32>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_i32",
+        )?;
+    extern "C" fn print_i32(val: i32) {
+        print!("{}", val);
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_i32").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_i32 as extern "C" fn(i32) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<str>"), None,
+    )?;
+
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_str",
+        )?;
+    extern "C" fn print_str(val: FatPtr) {
+        print!("{}", unsafe {
+            std::str::from_utf8_unchecked(
+                std::slice::from_raw_parts(val.ptr.0, val.size)
+            )
+        });
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_str").unwrap()
+    };
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_str as extern "C" fn(FatPtr) -> ()));
+
+
+    let instance = comp.compiler.get_func_instance(
+        print_fs, inline_code!("<f32>"), None,
+    )?;
+    comp.backend.funcs.borrow_mut()
+        .register_intrinsic(
+            instance,
+            TestCodegen,
+            false,
+            &comp.compiler.mir_phase.types,
+            &comp.compiler.phase.types,
+            "print_f32",
+        )?;
+    extern "C" fn print_f32(val: f32) {
+        print!("{val}");
+    }
+    let func = {
+        let binding = comp.backend.func_reg();
+        *binding.get_intrinsic("print_f32").unwrap()
+    };
+
+    comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
+    comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
+fn foo(x: &i32) {
+    let y: i32 = x;
+}
+    "#))?;
+    comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
+    {
+        std::print("hello, world!\n");
+    }
+    "#))?;
+    Ok(())
+}
+

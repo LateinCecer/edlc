@@ -13,7 +13,7 @@
  *    See the License for the specific language governing permissions and
  *    limitations under the License.
  */
-
+use std::ops::{Index, IndexMut};
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlFnSignature;
 use crate::core::edl_impl::FnConstraintError;
@@ -22,6 +22,45 @@ use crate::core::edl_type;
 use crate::core::edl_type::{EdlEnvId, EdlMaybeType};
 use crate::core::type_analysis::constraints::{EnvConstraint, EnvConstraintStack};
 use crate::core::type_analysis::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoReference {
+    Reference,
+    Dereference,
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoRefState {
+    params: Vec<AutoReference>,
+}
+
+impl AutoRefState {
+    fn new(num_params: usize) -> Self {
+        Self {
+            params: vec![AutoReference::None; num_params],
+        }
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<AutoReference> {
+        self.params.iter()
+    }
+}
+
+impl Index<usize> for AutoRefState {
+    type Output = AutoReference;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.params[index]
+    }
+}
+
+impl IndexMut<usize> for AutoRefState {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.params[index]
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
@@ -94,9 +133,7 @@ impl SigConstraint {
         infer: &mut Infer<'_, '_>,
         node_id: NodeId
     ) -> Result<(), InferError> {
-        if hints.env_id != self.own_env {
-            panic!();
-        }
+        assert_eq!(hints.env_id, self.own_env);
         let env = self.env.get_env(self.own_env).unwrap();
         for (index, param) in hints.params.iter().enumerate() {
             match param {
@@ -121,7 +158,7 @@ impl SigConstraint {
         args: &[TypeUid],
         ret: &TypeUid,
         infer: &mut Infer<'_, '_>
-    ) -> Result<(), FnConstraintError> {
+    ) -> Result<AutoRefState, FnConstraintError> {
         if args.len() != self.param_types.len() {
             return Err(FnConstraintError::EdlError(self.fn_id, EdlError::E040 {
                 got: args.len(),
@@ -140,7 +177,11 @@ impl SigConstraint {
         // println!("[DEBUG]: return exp: {ret_exp:?}");
         // println!("[DEBUG]: return got: {ret_got:?}");
 
-        for (param, param_value) in self.param_types.iter().zip(args.iter()) {
+        let mut ref_state = AutoRefState::new(self.param_types.len());
+        for ((param, param_value), ref_state) in self.param_types
+            .iter()
+            .zip(args.iter())
+            .zip(ref_state.params.iter_mut()) {
             // future me: check for auto-referencing
             // if !infer.at_env(node, &self.env).try_eq(&param.ty, param_value) {}
 
@@ -153,6 +194,7 @@ impl SigConstraint {
                     .at_env(node, &self.env)
                     .eq(&param.ty, param_value)
                     .map_err(|err| FnConstraintError::ConstraintMismatch(self.fn_id, err))?;
+                *ref_state = AutoReference::None;
             } else if value_is_ref {
                 // dereference value
                 let el_ty = infer.get_generic_type(*param_value, 0).unwrap();
@@ -160,6 +202,7 @@ impl SigConstraint {
                     .at_env(node, &self.env)
                     .eq(&param.ty, &el_ty.uid)
                     .map_err(|err| FnConstraintError::ConstraintMismatch(self.fn_id, err))?;
+                *ref_state = AutoReference::Dereference;
             } else {
                 // reference values
                 let el_ty = infer.get_generic_type(param.ty, 0).unwrap();
@@ -167,8 +210,9 @@ impl SigConstraint {
                     .at_env(node, &self.env)
                     .eq(param_value, &el_ty.uid)
                     .map_err(|err| FnConstraintError::ConstraintMismatch(self.fn_id, err))?;
+                *ref_state = AutoReference::Reference;
             }
         }
-        Ok(())
+        Ok(ref_state)
     }
 }

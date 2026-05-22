@@ -338,6 +338,39 @@ impl EdlFnArgument for HirDeref {
     }
 }
 
+impl HirDeref {
+    pub fn write_deref_to_graph<B: Backend>(
+        value: &HirExpression,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+        pos: SrcPos,
+    ) -> Result<(), HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+        let target_ty = *graph.graph.get_var_type(&target);
+        if target_ty == value.mir_type(graph)? {
+            // just write the base value, as a language level reference is turned into an internal
+            // reference
+            value.write_to_graph(graph, target)
+        } else {
+            let ref_ty = value.mir_deref_type(graph)?;
+            let ref_value = graph.graph.create_temp_variable(ref_ty);
+            value.write_to_graph(graph, ref_value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // lhs results in early exit
+            }
+
+            graph.graph.def_deref(
+                graph.current_block,
+                ref_value,
+                target,
+                &graph.mir_phase.types,
+                DebugSymbols { pos },
+            );
+            Ok(())
+        }
+    }
+}
+
 impl MakeGraph for HirDeref {
     fn write_to_graph<B: Backend>(
         &self,
@@ -348,29 +381,10 @@ impl MakeGraph for HirDeref {
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
         let target_ty = *graph.graph.get_var_type(&target);
-        if target_ty == self.mir_type(graph)? {
-            // just write the base value, as a language level reference is turned into an internal
-            // reference
-            assert_eq!(self.value.mir_deref_type(graph)?, target_ty);
-            self.value.write_to_graph(graph, target)
-        } else {
+        if target_ty != self.mir_type(graph)? {
             assert_eq!(target_ty, self.mir_deref_type(graph)?);
-            let ref_ty = self.value.mir_deref_type(graph)?;
-            let ref_value = graph.graph.create_temp_variable(ref_ty);
-            self.value.write_to_graph(graph, ref_value)?;
-            if graph.is_current_sealed() {
-                return Ok(()); // lhs results in early exit
-            }
-
-            graph.graph.def_deref(
-                graph.current_block,
-                ref_value,
-                target,
-                &graph.mir_phase.types,
-                DebugSymbols { pos: self.pos },
-            );
-            Ok(())
         }
+        Self::write_deref_to_graph(&self.value, graph, target, self.pos)
     }
 
     fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
