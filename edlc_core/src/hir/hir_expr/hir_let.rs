@@ -26,7 +26,7 @@ use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, Mir
 use crate::hir::translation::{HirTranslationError};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
-use crate::issue::{SrcError, TypeArguments};
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
@@ -35,6 +35,7 @@ use crate::mir::MirPhase;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
 use crate::core::binop::BinaryOp::Mul;
+use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_type::MirTypeId;
 
@@ -351,7 +352,8 @@ impl HirLet {
         let tmp = [
             format_args!("type of let expression").into()
         ];
-        let ty = self.infer_info.as_ref().unwrap().finalized_var_uid.clone();
+        let info = self.infer_info.as_ref().unwrap();
+        let ty = info.finalized_var_uid.clone();
         let self_ty = TypeSource {
             ty: ty.clone(),
             pos: self.pos.into(),
@@ -359,14 +361,37 @@ impl HirLet {
             remark: TypeArguments::new(&tmp),
         };
         // dbg!(&ty, &self.ty_hint);
-        phase.check_report_type_expr(
-            format_args!("The initial type of a let expression must match its designated type"),
-            self_ty,
-            &self.value,
-            issue::format_type_args!(
-                format_args!("initial value of let expression")
-            )
-        )?;
+        if info.dereference {
+            let mut inferer = phase.infer_from(infer_state);
+            let value_ty = self.value.get_type_uid(&mut inferer);
+            let generic = inferer.get_generic_type(value_ty, 0)
+                .expect("tried to auto-dereference expression that does not return a reference type");
+            let value_ty = inferer.find_type(generic.uid);
+
+            let tmp = [
+                format_args!("rhs value of let expression").into(),
+            ];
+            let got = TypeSource {
+                ty: value_ty,
+                pos: self.value.pos().into(),
+                src: self.value.src(),
+                remark: TypeArguments::new(&tmp),
+            };
+            phase.check_report_type(
+                format_args!("RHS value does not dereference to the type hint provided by the let expression"),
+                self_ty,
+                got,
+            )?;
+        } else {
+            phase.check_report_type_expr(
+                format_args!("The initial type of a let expression must match its designated type"),
+                self_ty,
+                &self.value,
+                issue::format_type_args!(
+                    format_args!("initial value of let expression")
+                )
+            )?;
+        }
 
         // check that the return value is not `!`
         let EdlMaybeType::Fixed(ty) = ty else { panic!() };
@@ -470,7 +495,16 @@ impl MakeGraph for HirLet {
             var_ty,
             &mut graph.graph,
         );
-        self.value.write_to_graph(graph, target_value)?;
+        if self.infer_info.as_ref().unwrap().dereference {
+            HirDeref::write_deref_to_graph(
+                &self.value,
+                graph,
+                target_value,
+                self.pos,
+            )?;
+        } else {
+            self.value.write_to_graph(graph, target_value)?;
+        }
 
         if graph.is_current_sealed() {
             return Ok(()); // value encountered early exit

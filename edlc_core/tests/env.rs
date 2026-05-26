@@ -1878,12 +1878,16 @@ fn test_references() -> Result<(), anyhow::Error> {
     comp.backend.intrinsics.insert(func, FunctionBinding::from_function(print_f32 as extern "C" fn(f32) -> ()));
     comp.compile_module(&vec!["test"].into(), &inline_code!(r#"
 fn foo(x: &i32) {
-    let y: i32 = x;
+    std::print("the de-referenced value is ");
+    std::print(x);
+    std::print("!\n");
 }
     "#))?;
     comp.compile_expr(&vec!["test"].into(), &inline_code!(r#"
     {
         std::print("hello, world!\n");
+        let y = 42;
+        foo(y);
     }
     "#))?;
     Ok(())

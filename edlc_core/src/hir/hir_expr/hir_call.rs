@@ -53,6 +53,7 @@ struct FinalizedTypeInfo {
     stack: EdlParamStack,
     associated_type: Option<EdlMaybeType>,
     ret_ty: EdlMaybeType,
+    params: Vec<EdlMaybeType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1745,13 +1746,14 @@ impl ResolveTypes for HirFunctionCall {
 
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.info.as_mut().unwrap();
-        if let Some((fn_id, stack, associated_type)) = info.resolver.finalize_types(inferer) {
+        if let Some((fn_id, stack, associated_type, params)) = info.resolver.finalize_types(inferer) {
             let ret_ty = inferer.find_type(info.resolver.args.ret);
             info.finalized_type_info = Some(FinalizedTypeInfo {
                 fn_id,
                 stack,
                 associated_type,
                 ret_ty,
+                params,
             });
         } else {
             warn!("function failed to resolve without error. Lets hope this will be captured during verification...");
@@ -1912,13 +1914,18 @@ impl MakeGraph for HirFunctionCall {
         // write parameters
         let mut parameter_values = vec![];
         let mut comptime_parameter_values = vec![];
-        for (i, ((param, param_def), auto_ref)) in self.params
+        for (i, ((param, param_def), (auto_ref, param_ty))) in self.params
             .iter()
             .zip(edl_sig.params.iter())
-            .zip(resolver_data.auto_ref.iter())
+            .zip(resolver_data.auto_ref
+                .iter()
+                .zip(type_info.params.iter()))
             .enumerate() {
 
-            let param_ty = param.mir_deref_type(graph)?;
+            let EdlMaybeType::Fixed(param_ty) = param_ty else {
+                unreachable!()
+            };
+            let param_ty = graph.mir_phase.types.mir_id(param_ty, &graph.hir_phase.types)?;
             let param_value = graph.graph.create_temp_variable(param_ty);
             match auto_ref {
                 AutoReference::None => {

@@ -1124,7 +1124,7 @@ impl SpecialFunction {
         };
 
         let mut inferer = hir_phase.infer_from(&mut infer_state);
-        let (func_id, stack, base) = resolver.finalize_types(&mut inferer)?;
+        let (func_id, stack, base, _params) = resolver.finalize_types(&mut inferer)?;
         let fn_instance = EdlFnInstance {
             func: func_id,
             param: stack,

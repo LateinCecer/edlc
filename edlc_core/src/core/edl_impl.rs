@@ -912,7 +912,7 @@ impl CallResolver {
     pub fn finalize_types(
         &mut self,
         infer: &mut Infer<'_, '_>
-    ) -> Option<(EdlTypeId, EdlParamStack, Option<EdlMaybeType>)> {
+    ) -> Option<(EdlTypeId, EdlParamStack, Option<EdlMaybeType>, Vec<EdlMaybeType>)> {
         let Some(res) = self.res.as_ref() else {
             return None;
         };
@@ -932,6 +932,13 @@ impl CallResolver {
         } else {
             None
         };
-        Some((res.fn_id, stack, base))
+
+        // format parameters
+        let params = res.sig.param_types
+            .iter()
+            .map(|param| infer.find_type(param.ty))
+            .collect();
+
+        Some((res.fn_id, stack, base, params))
     }
 }
