@@ -158,8 +158,8 @@ impl AstBlockOrInit {
     }
 }
 
-impl Parsable for AstBlockOrInit {
-    fn parse(parser: &mut Parser) -> Result<AstBlockOrInit, ParseError> {
+impl AstBlockOrInit {
+    pub fn parse(parser: &mut Parser, allow_init: bool) -> Result<AstBlockOrInit, ParseError> {
         let pos = expect_token!(parser; (Token::Punct(Punct::BraceOpen)), pos => pos
             expected "block starting with `{`")?;
 
@@ -207,7 +207,7 @@ impl Parsable for AstBlockOrInit {
 
             // parse expression
             let expr = AstExpr::parse(parser)?;
-            if content.is_empty() {
+            if content.is_empty() && allow_init {
                 // check if the expr is a simple name
                 if matches!(&expr, AstExpr::Name(name) if name.path.len() == 1 && name.path[0].params.is_empty()) {
                     if let Ok(local!(Token::Punct(Punct::Colon))) = parser.peak() {
@@ -261,7 +261,7 @@ impl Parsable for AstBlockOrInit {
 
 impl Parsable for AstBlock {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
-        AstBlockOrInit::parse(parser).and_then(|block| block.unwrap_block())
+        AstBlockOrInit::parse(parser, false).and_then(|block| block.unwrap_block())
     }
 }
 

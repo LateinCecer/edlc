@@ -187,3 +187,20 @@ For the funding statement, please refer to [FUNDING.md](FUNDING.md#academic-fund
 
 EDL is primarily distributed under the terms of the AGPLv3 license.
 See [LICENSE](LICENSE), and [COPYRIGHT](COPYRIGHT) for details.
+
+## Use of AI in this Project
+
+This project does not contain any code written by an LLM; all code is human written and I intend to keep it this way.
+PRs composed by an LLM or containing code written by an LLM will not be merged into the EDL compiler.
+That being said, I have used, and likely will continue to use LLM tooling to find bugs in the codebase, as well as for
+research purposes.
+
+As much as LLMs are extremely fascinating and powerful tools, they are, in essence, still just statistical algorithms
+and I have found AI contributions to be of much lower quality than what a good human developer can deliver through 
+the board.
+I will continue to try LLM-based tooling to see if these tools reach a point where they are sufficiently advanced for my
+liking, but if you're reading this disclaimer, I do not think that moment has come yet.
+
+This project is ultimately a passion project of mine and, as such, a labor of love.
+I intend to keep it that way.
+If I do decide to include AI written code in this project, the affected parts will be marked clearly.

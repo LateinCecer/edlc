@@ -1278,7 +1278,7 @@ impl<'a> Lexer<'a> {
             s if s == KEY_TRAIT => Ok(Token::Key(KeyWord::Trait).localize(pos, KEY_TRAIT.len())),
             s if s == KEY_IN => Ok(Token::Key(KeyWord::In).localize(pos, KEY_IN.len())),
             s if s == KEY_SELF_TYPE => Ok(Token::Key(KeyWord::SelfType).localize(pos, KEY_SELF_TYPE.len())),
-            // s if s == KEY_SELF_PARAMETER => Ok(Token::Key(KeyWord::SelfParameter).localize(pos, KEY_SELF_PARAMETER.len())),   todo stabilize
+            s if s == KEY_SELF_PARAMETER => Ok(Token::Key(KeyWord::SelfParameter).localize(pos, KEY_SELF_PARAMETER.len())),  // todo stabilize
             s if s == KEY_SYNC => Ok(Token::Key(KeyWord::Sync).localize(pos, KEY_SYNC.len())),
             s if s == KEY_ASYNC => Ok(Token::Key(KeyWord::Async).localize(pos, KEY_ASYNC.len())),
             s => {
@@ -1336,6 +1336,8 @@ mod test {
         assert_eq!(Lexer::new("mut").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Mut)));
         assert_eq!(Lexer::new("where").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Where)));
         assert_eq!(Lexer::new("use").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Use)));
+        assert_eq!(Lexer::new("Self").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::SelfType)));
+        assert_eq!(Lexer::new("self").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::SelfParameter)));
 
         assert_eq!(Lexer::new("+").next_token().map(|t| t.token), Ok(Token::Punct(Punct::Plus)));
         assert_eq!(Lexer::new("-").next_token().map(|t| t.token), Ok(Token::Punct(Punct::Minus)));

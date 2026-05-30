@@ -321,7 +321,7 @@ impl HirFnParam {
             ty,
             pos: self.pos,
             id: mir_phase.new_id(),
-            var_id: self.info.clone().unwrap(),
+            var_id: self.info.unwrap(),
             comptime: self.comptime,
             mutable: self.mutable,
             async_: self.async_,

@@ -34,11 +34,11 @@ type MyData<T> = struct {
 impl core::Add<MyData<f32>, f32> for MyData<f32> {
     type Output = MyData<f32>;
 
-    fn add(lhs: Self, rhs: f32) -> Self::Output {
+    fn add(self, rhs: f32) -> Self::Output {
         MyData {
-            name: lhs.name,
-            id: lhs.id,
-            buffer: lhs.buffer + rhs
+            name: self.name,
+            id: self.id,
+            buffer: self.buffer + rhs
         }
     }
 }
@@ -54,7 +54,7 @@ type SVector<T, const N: usize> = struct {
 };
 
 impl<const N: usize> SVector<f32, N> {
-    fn norm(self: Self) -> f32 {
+    fn norm(self) -> f32 {
         let mut out = 0.0;
         let mut i = 0usize;
         loop {
@@ -67,7 +67,7 @@ impl<const N: usize> SVector<f32, N> {
 }
 
 impl<T, const N: usize> SVector<T, N> {
-    fn print(self: Self) {
+    fn print(self) {
         std::io::print("(");
         let mut i = 0usize;
         loop {
@@ -194,4 +194,25 @@ fn benchmark() {
         i += 1;
     }
     println(out);
+}
+
+
+// -- testing reference related stuff
+impl<T, const N: usize> SVector<T, N> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        core::assert(index < N);
+        ret self.data[index]
+    }
+
+    fn index(&self, index: usize) -> &T {
+        core::assert(index < N);
+        ret self.data[index];
+    }
+}
+
+#[test]
+fn test_vec_mut_access() {
+    let vec = SVector::new(2.1_f64, 1.0_f64);
+    core::assert(vec.index(0) == 2.1);
+    core::assert(vec.index(1) == 1.0);
 }

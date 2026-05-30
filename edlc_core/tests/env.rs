@@ -1198,13 +1198,13 @@ type Data<T> = struct {
 };
 
 impl<T> Data<T> {
-    fn get_value(self: Self) -> T {
+    fn get_value(self) -> T {
         self.data
     }
 }
 
 impl Data<f32> {
-    fn print(self: Self) {
+    fn print(self) {
         std::print("Data: ");
         std::print(self.data);
         std::print("\n");
@@ -1212,7 +1212,7 @@ impl Data<f32> {
 }
 
 impl Data<i32> {
-    fn print(self: Self) {
+    fn print(self) {
         std::print("Data i32: ");
         std::print(self.data);
         std::print("\n");
@@ -1396,7 +1396,7 @@ fn test_auto() -> Result<(), anyhow::Error> {
         inline_code!("<T>"),
         inline_code!("std::Rc<T>"),
         [
-            inline_code!("fn new(val: T) -> std::Rc<T>")
+            inline_code!("fn new(val: T) -> Self")
         ],
         None,
     )?;
@@ -1426,7 +1426,7 @@ fn test_auto() -> Result<(), anyhow::Error> {
         inline_code!("<T>"),
         inline_code!("Rc<T>"),
         [
-            inline_code!("fn copy(val: &Rc<T>) -> Rc<T>")
+            inline_code!("fn copy(&self) -> Self")
         ],
         Some((inline_code!("core::Copy"), inline_code!("<Rc<T>>"))),
     )?;
@@ -1459,7 +1459,7 @@ fn test_auto() -> Result<(), anyhow::Error> {
         inline_code!("<T>"),
         inline_code!("Rc<T>"),
         [
-            inline_code!("fn drop(val: Rc<T>)")
+            inline_code!("fn drop(self)")
         ],
         Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
     )?;
@@ -1490,17 +1490,17 @@ type Data<T> = struct {
 };
 
 impl<T> Data<T> {
-    fn get_value(self: Self) -> T {
+    fn get_value(self) -> T {
         self.data
     }
 }
 
 impl Data<f32> {
-    fn modify(self: Self) -> Self {
+    fn modify(self) -> Self {
         self
     }
 
-    fn print(self: Data<f32>) {
+    fn print(self) {
         std::print("Data: ");
         std::print(self.data);
         std::print("\n");
@@ -1508,7 +1508,7 @@ impl Data<f32> {
 }
 
 impl Data<i32> {
-    fn print(self: Self) {
+    fn print(self) {
         std::print("Data i32: ");
         std::print(self.data);
         std::print("\n");
@@ -1577,7 +1577,7 @@ type CuEvent = struct(isize);
             inline_code!(r#"
             fn record() -> Self"#),
             inline_code!(r#"
-            fn synchronize(ev: Self)"#),
+            fn synchronize(self)"#),
         ],
         Some((inline_code!("core::Event"), inline_code!("<CuEvent>")))
     )?;
@@ -1733,7 +1733,7 @@ type DevicePointer = struct {
 };
 
 impl Field {
-    fn as_device_ptr(async self: Self) -> async DevicePointer {
+    fn as_device_ptr(async self) -> async DevicePointer {
         DevicePointer { ptr: self.pointer }
     }
 }

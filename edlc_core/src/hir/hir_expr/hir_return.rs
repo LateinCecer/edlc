@@ -32,7 +32,7 @@ use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, ResolveTypes};
 use crate::resolver::ScopeId;
 use std::error::Error;
-
+use crate::hir::hir_expr::hir_ref::HirRef;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -157,6 +157,10 @@ impl ResolveTypes for HirReturn {
         // insert constraints
         let ret_ty = self.info.as_ref().unwrap().return_uid;
         if let Some(val) = self.value.as_mut() {
+            // try auto-ref
+            HirRef::auto(val, phase, infer_state, ret_ty)?;
+            infer = phase.infer_from(infer_state);
+
             let val_ty = val.get_type_uid(&mut infer);
             if let Err(err) = infer.at(node).eq(&val_ty, &ret_ty) {
                 return Err(report_infer_error(err, infer_state, phase));

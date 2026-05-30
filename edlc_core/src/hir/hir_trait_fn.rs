@@ -14,9 +14,11 @@
  *    limitations under the License.
  */
 use crate::ast::ItemDoc;
+use crate::core::edl_fn::{EdlFnParam, EdlFnSignature};
 use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlEnvId, EdlExtendedType, EdlTypeInstance};
 use crate::file::ModuleSrc;
+use crate::hir::{HirError, HirPhase, IntoEdl};
 use crate::lexer::SrcPos;
 use crate::resolver::{QualifierName, ScopeId};
 
@@ -70,4 +72,20 @@ pub struct HirTrait {
     pub sig: Vec<HirTraitFnSignature>,
     pub types: Vec<HirTraitType>,
     pub consts: Vec<HirTraitConst>,
+}
+
+impl IntoEdl for HirTraitFnParam {
+    type EdlRepr = EdlFnParam;
+
+    fn edl_repr(&mut self, phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
+        todo!()
+    }
+}
+
+impl IntoEdl for HirTraitFnSignature {
+    type EdlRepr = EdlFnSignature;
+
+    fn edl_repr(&mut self, phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
+        todo!()
+    }
 }

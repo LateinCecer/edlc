@@ -217,9 +217,8 @@ macro_rules! impl_binop(
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(lhs: {ty}, rhs: {ty}) -> {ty}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self, rhs: Self) -> Self",
                     func=std::stringify!($func),
-                    ty=std::stringify!($T)
                 )),
             ],
             Some((edlc_core::inline_code!($Trait), edlc_core::inline_code!(&format!("<{ty}, {ty}>", ty=std::stringify!($T)))))
@@ -244,13 +243,13 @@ macro_rules! impl_binop(
 
     ($jit:expr, $comp:expr, $(
 impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
-    $(fn $func:ident($builder:ident, $a:ident: $A:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
+    $(fn $func:ident($builder:ident, $a:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
 }
     )+) => ($(
         let params = format_enum!($(std::stringify!($arg)),*);
         $(
         let value = UnopGen {
-            input_ty: $comp.mir_phase.types.$A(),
+            input_ty: $comp.mir_phase.types.$T(),
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
             op: |$builder, $a| { $($content)* },
@@ -260,9 +259,8 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(a: {a}) -> {ret}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self) -> {ret}",
                     func=std::stringify!($func),
-                    a=std::stringify!($A),
                     ret=std::stringify!($Ret),
                 )),
             ],
@@ -278,22 +276,22 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             &$comp.phase.types,
             &intr,
         )?;
-        extern "C" fn $func($a: $A) -> $Ret {
+        extern "C" fn $func($a: $T) -> $Ret {
             $native
         }
-        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($A) -> $Ret);
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T) -> $Ret);
         $jit.insert_function(intr, &func, binding);
     )+)+);
 
     ($jit:expr, $comp:expr, $(
 impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
-    $(fn $func:ident($builder:ident, $a:ident: $A:ident, $b:ident: $B:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
+    $(fn $func:ident($builder:ident, $a:ident, $b:ident: $B:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
 }
     )+) => ($(
         let params = format_enum!($(std::stringify!($arg)),*);
         $(
         let value = BinopGen {
-            rhs_ty: $comp.mir_phase.types.$A(),
+            rhs_ty: $comp.mir_phase.types.$T(),
             lhs_ty: $comp.mir_phase.types.$B(),
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
@@ -304,9 +302,8 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(a: {a}, b: {b}) -> {ret}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self, b: {b}) -> {ret}",
                     func=std::stringify!($func),
-                    a=std::stringify!($A),
                     b=std::stringify!($B),
                     ret=std::stringify!($Ret),
                 )),
@@ -323,10 +320,10 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             &$comp.phase.types,
             &intr,
         )?;
-        extern "C" fn $func($a: $A, $b: $B) -> $Ret {
+        extern "C" fn $func($a: $T, $b: $B) -> $Ret {
             $native
         }
-        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($A, $B) -> $Ret);
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T, $B) -> $Ret);
         $jit.insert_function(intr, &func, binding);
     )+)+);
 
@@ -338,7 +335,7 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
         let params = format_enum!($(std::stringify!($arg)),*);
         $(
         let value = TriopGen {
-            a: $comp.mir_phase.types.$A(),
+            a: $comp.mir_phase.types.$T(),
             b: $comp.mir_phase.types.$B(),
             c: $comp.mir_phase.types.$C(),
             ret_ty: $comp.mir_phase.types.$Ret(),
@@ -350,9 +347,8 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(a: {a}, b: {b}, c: {c}) -> {ret}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self, b: {b}, c: {c}) -> {ret}",
                     func=std::stringify!($func),
-                    a=std::stringify!($A),
                     b=std::stringify!($B),
                     c=std::stringify!($C),
                     ret=std::stringify!($Ret),
@@ -370,10 +366,53 @@ impl [$Trait:expr]<$($arg:ident),*> for $T:ident {
             &$comp.phase.types,
             &intr,
         )?;
-        extern "C" fn $func($a: $A, $b: $B, $c: $C) -> $Ret {
+        extern "C" fn $func($a: $T, $b: $B, $c: $C) -> $Ret {
             $native
         }
-        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($A, $B, $C) -> $Ret);
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T, $B, $C) -> $Ret);
+        $jit.insert_function(intr, &func, binding);
+    )+)+);
+
+
+
+        ($jit:expr, $comp:expr, $(
+impl $T:ident {
+    $(fn $func:ident($builder:ident, $a:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
+}
+    )+) => ($(
+        $(
+        let value = UnopGen {
+            input_ty: $comp.mir_phase.types.$T(),
+            ret_ty: $comp.mir_phase.types.$Ret(),
+             #[allow(unused_braces)]
+            op: |$builder, $a| {$($content)* },
+            fault_code: Some(edlc_core::prelude::TrapInfo::DivideByZero),
+        };
+        let [f] = $comp.parse_impl(
+            edlc_core::inline_code!("<>"),
+            edlc_core::inline_code!(std::stringify!($T)),
+            [
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self) -> {ret}",
+                    func=std::stringify!($func),
+                    ret=std::stringify!($Ret),
+                )),
+            ],
+            None,
+        )?;
+
+        let intr = format!("{}_{}", std::stringify!($func), std::stringify!($T));
+        let func = $jit.func_reg.borrow_mut().register_intrinsic(
+            $comp.get_func_instance(f, edlc_core::inline_code!("<>"), Some(edlc_core::inline_code!(std::stringify!($T))))?,
+            value,
+            true,
+            &$comp.mir_phase.types,
+            &$comp.phase.types,
+            &intr,
+        )?;
+        extern "C" fn $func($a: $T) -> $Ret {
+            $native
+        }
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T) -> $Ret);
         $jit.insert_function(intr, &func, binding);
     )+)+);
 
@@ -424,12 +463,12 @@ impl $T:ident {
 
         ($jit:expr, $comp:expr, $(
 impl $T:ident {
-    $(fn $func:ident($builder:ident, $a:ident: $A:ident, $b:ident: $B:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
+    $(fn $func:ident($builder:ident, $a:ident, $b:ident: $B:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
 }
     )+) => ($(
         $(
         let value = BinopGen {
-            rhs_ty: $comp.mir_phase.types.$A(),
+            rhs_ty: $comp.mir_phase.types.$T(),
             lhs_ty: $comp.mir_phase.types.$B(),
             ret_ty: $comp.mir_phase.types.$Ret(),
             #[allow(unused_braces)]
@@ -440,9 +479,8 @@ impl $T:ident {
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(a: {a}, b: {b}) -> {ret}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self, b: {b}) -> {ret}",
                     func=std::stringify!($func),
-                    a=std::stringify!($A),
                     b=std::stringify!($B),
                     ret=std::stringify!($Ret),
                 )),
@@ -459,21 +497,21 @@ impl $T:ident {
             &$comp.phase.types,
             &intr,
         )?;
-        extern "C" fn $func($a: $A, $b: $B) -> $Ret {
+        extern "C" fn $func($a: $T, $b: $B) -> $Ret {
             $native
         }
-        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($A, $B) -> $Ret);
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T, $B) -> $Ret);
         $jit.insert_function(intr, &func, binding);
     )+)+);
 
         ($jit:expr, $comp:expr, $(
 impl $T:ident {
-    $(fn $func:ident($builder:ident, $a:ident: $A:ident, $b:ident: $B:ident, $c:ident: $C:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
+    $(fn $func:ident($builder:ident, $a:ident, $b:ident: $B:ident, $c:ident: $C:ident) -> $Ret:ident { $($content:tt)* }; { $native:tt })+
 }
     )+) => ($(
         $(
         let value = TriopGen {
-            a: $comp.mir_phase.types.$A(),
+            a: $comp.mir_phase.types.$T(),
             b: $comp.mir_phase.types.$B(),
             c: $comp.mir_phase.types.$C(),
             ret_ty: $comp.mir_phase.types.$Ret(),
@@ -485,9 +523,8 @@ impl $T:ident {
             edlc_core::inline_code!("<>"),
             edlc_core::inline_code!(std::stringify!($T)),
             [
-                edlc_core::inline_code!(&format!("?comptime fn {func}(a: {a}, b: {b}, c: {c}) -> {ret}",
+                edlc_core::inline_code!(&format!("?comptime fn {func}(self, b: {b}, c: {c}) -> {ret}",
                     func=std::stringify!($func),
-                    a=std::stringify!($A),
                     b=std::stringify!($B),
                     c=std::stringify!($C),
                     ret=std::stringify!($Ret),
@@ -505,10 +542,10 @@ impl $T:ident {
             &$comp.phase.types,
             &intr,
         )?;
-        extern "C" fn $func($a: $A, $b: $B, $c: $C) -> $Ret {
+        extern "C" fn $func($a: $T, $b: $B, $c: $C) -> $Ret {
             $native
         }
-        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($A, $B, $C) -> $Ret);
+        let binding = edlc_core::prelude::FunctionBinding::from_function($func as extern "C" fn($T, $B, $C) -> $Ret);
         $jit.insert_function(intr, &func, binding);
     )+)+);
 );
@@ -564,47 +601,47 @@ impl<Runtime> JIT<Runtime> {
         );
         impl_binop!(self, compiler,
             impl ["core::ShiftLeft"]<$T> for $T {
-                fn shift_left(builder, val: $T, shift: usize) -> $T {
+                fn shift_left(builder, val, shift: usize) -> $T {
                     { builder.ishl(val, shift) }
                 }; { (val << shift) }
             }
             impl ["core::ShiftRight"]<$T> for $T {
-                fn shift_right(builder, val: $T, shift: usize) -> $T {
+                fn shift_right(builder, val, shift: usize) -> $T {
                     { builder.ushr(val, shift) }
                 }; { (val >> shift) }
             }
             impl ["core::ShiftLAssign"]<$T, usize> for $T {
-                fn shift_left_assign(builder, val: $T, shift: usize) -> $T {
+                fn shift_left_assign(builder, val, shift: usize) -> $T {
                     { builder.ishl(val, shift) }
                 }; { (val << shift) }
             }
             impl ["core::ShiftRAssign"]<$T, usize> for $T {
-                fn shift_right_assign(builder, val: $T, shift: usize) -> $T {
+                fn shift_right_assign(builder, val, shift: usize) -> $T {
                     { builder.ushr(val, shift) }
                 }; { (val >> shift) }
             }
             impl ["core::PartialEq"]<$T, $T> for $T {
-                fn partial_eq(builder, lhs: $T, rhs: $T) -> bool {
+                fn partial_eq(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
             impl ["core::Eq"]<$T, $T> for $T {
-                fn eq(builder, lhs: $T, rhs: $T) -> bool {
+                fn eq(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<$T, $T> for $T {
-                fn lesser_than(builder, lhs: $T, rhs: $T) -> bool {
+                fn lesser_than(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::UnsignedLessThan, lhs, rhs) }
                 }; { (lhs < rhs) }
-                fn greater_than(builder, lhs: $T, rhs: $T) -> bool {
+                fn greater_than(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::UnsignedGreaterThan, lhs, rhs) }
                 }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
             impl ["core::Not"]<$T> for $T {
-                fn not(builder, val: $T) -> $T {
+                fn not(builder, val) -> $T {
                     { builder.bnot(val) }
                 }; { (!val) }
             }
@@ -612,54 +649,54 @@ impl<Runtime> JIT<Runtime> {
 
         impl_binop!(self, compiler,
         impl $T {
-            fn add_overflow(builder, x: $T, y: $T) -> $T {
+            fn add_overflow(builder, x, y: $T) -> $T {
                 { builder.uadd_overflow(x, y).0 }
             }; { (x.wrapping_add(y)) }
 
-            fn sub_overflow(builder, x: $T, y: $T) -> $T {
+            fn sub_overflow(builder, x, y: $T) -> $T {
                 { builder.usub_overflow(x, y).0 }
             }; { (x.wrapping_sub(y)) }
 
-            fn mul_overflow(builder, x: $T, y: $T) -> $T {
+            fn mul_overflow(builder, x, y: $T) -> $T {
                 { builder.umul_overflow(x, y).0 }
             }; { (x.wrapping_mul(y)) }
 
-            fn rotl(builder, x: $T, y: u32) -> $T {
+            fn rotl(builder, x, y: u32) -> $T {
                 { builder.rotl(x, y) }
             }; { (x.rotate_left(y)) }
 
-            fn rotr(builder, x: $T, y: u32) -> $T {
+            fn rotr(builder, x, y: u32) -> $T {
                 { builder.rotr(x, y) }
             }; { (x.rotate_right(y)) }
 
-            fn max(builder, x: $T, y: $T) -> $T {
+            fn max(builder, x, y: $T) -> $T {
                 { builder.umax(x, y) }
             }; { ($T::max(x, y)) }
 
-            fn min(builder, x: $T, y: $T) -> $T {
+            fn min(builder, x, y: $T) -> $T {
                 { builder.umin(x, y) }
             }; { ($T::min(x, y)) }
         });
 
         impl_binop!(self, compiler,
         impl $T {
-            fn rev_bits(builder, x: $T) -> $T {
+            fn rev_bits(builder, x) -> $T {
                 { builder.bitrev(x) }
             }; { ($T::reverse_bits(x)) }
 
-            fn leading_zeros(builder, x: $T) -> u32 {
+            fn leading_zeros(builder, x) -> u32 {
                 { builder.clz(x) }
             }; { ($T::leading_zeros(x)) }
 
-            fn trailing_zeros(builder, x: $T) -> u32 {
+            fn trailing_zeros(builder, x) -> u32 {
                 { builder.ctz(x) }
             }; { ($T::trailing_zeros(x)) }
 
-            fn rev_endian(builder, x: $T) -> $T {
+            fn rev_endian(builder, x) -> $T {
                 { builder.bswap(x) }
             }; { ($T::from_le_bytes($T::to_be_bytes(x))) }
 
-            fn one_bits(builder, x: $T) -> u32 {
+            fn one_bits(builder, x) -> u32 {
                 { builder.popcnt(x) }
             }; { ($T::count_ones(x)) }
         });
@@ -696,52 +733,52 @@ impl<Runtime> JIT<Runtime> {
         );
         impl_binop!(self, compiler,
             impl ["core::ShiftLeft"]<$T> for $T {
-                fn shift_left(builder, val: $T, shift: usize) -> $T {
+                fn shift_left(builder, val, shift: usize) -> $T {
                     { builder.ishl(val, shift) }
                 }; { (val << shift) }
             }
             impl ["core::ShiftRight"]<$T> for $T {
-                fn shift_right(builder, val: $T, shift: usize) -> $T {
+                fn shift_right(builder, val, shift: usize) -> $T {
                     { builder.sshr(val, shift) }
                 }; { (val >> shift) }
             }
             impl ["core::ShiftLAssign"]<$T, usize> for $T {
-                fn shift_left_assign(builder, val: $T, shift: usize) -> $T {
+                fn shift_left_assign(builder, val, shift: usize) -> $T {
                     { builder.ishl(val, shift) }
                 }; { (val << shift) }
             }
             impl ["core::ShiftRAssign"]<$T, usize> for $T {
-                fn shift_right_assign(builder, val: $T, shift: usize) -> $T {
+                fn shift_right_assign(builder, val, shift: usize) -> $T {
                     { builder.sshr(val, shift) }
                 }; { (val >> shift) }
             }
             impl ["core::PartialEq"]<$T, $T> for $T {
-                fn partial_eq(builder, lhs: $T, rhs: $T) -> bool {
+                fn partial_eq(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
             impl ["core::Eq"]<$T, $T> for $T {
-                fn eq(builder, lhs: $T, rhs: $T) -> bool {
+                fn eq(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<$T, $T> for $T {
-                fn lesser_than(builder, lhs: $T, rhs: $T) -> bool {
+                fn lesser_than(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::SignedLessThan, lhs, rhs) }
                 }; { (lhs < rhs) }
-                fn greater_than(builder, lhs: $T, rhs: $T) -> bool {
+                fn greater_than(builder, lhs, rhs: $T) -> bool {
                     { builder.icmp(IntCC::SignedGreaterThan, lhs, rhs) }
                 }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
             impl ["core::Not"]<$T> for $T {
-                fn not(builder, val: $T) -> $T {
+                fn not(builder, val) -> $T {
                     { builder.bnot(val) }
                 }; { (!val) }
             }
             impl ["core::Unary"]<$T> for $T {
-                fn unary(builder, val: $T) -> $T {
+                fn unary(builder, val) -> $T {
                     { builder.ineg(val) }
                 }; { (-val) }
             }
@@ -749,62 +786,62 @@ impl<Runtime> JIT<Runtime> {
 
         impl_binop!(self, compiler,
         impl $T {
-            fn add_overflow(builder, x: $T, y: $T) -> $T {
+            fn add_overflow(builder, x, y: $T) -> $T {
                 { builder.sadd_overflow(x, y).0 }
             }; { (x.wrapping_add(y)) }
 
-            fn sub_overflow(builder, x: $T, y: $T) -> $T {
+            fn sub_overflow(builder, x, y: $T) -> $T {
                 { builder.ssub_overflow(x, y).0 }
             }; { (x.wrapping_sub(y)) }
 
-            fn mul_overflow(builder, x: $T, y: $T) -> $T {
+            fn mul_overflow(builder, x, y: $T) -> $T {
                 { builder.smul_overflow(x, y).0 }
             }; { (x.wrapping_mul(y)) }
 
-            fn rotl(builder, x: $T, y: u32) -> $T {
+            fn rotl(builder, x, y: u32) -> $T {
                 { builder.rotl(x, y) }
             }; { (x.rotate_left(y)) }
 
-            fn rotr(builder, x: $T, y: u32) -> $T {
+            fn rotr(builder, x, y: u32) -> $T {
                 { builder.rotr(x, y) }
             }; { (x.rotate_right(y)) }
 
-            fn max(builder, x: $T, y: $T) -> $T {
+            fn max(builder, x, y: $T) -> $T {
                 { builder.smax(x, y) }
             }; { ($T::max(x, y)) }
 
-            fn min(builder, x: $T, y: $T) -> $T {
+            fn min(builder, x, y: $T) -> $T {
                 { builder.smin(x, y) }
             }; { ($T::min(x, y)) }
         });
 
         impl_binop!(self, compiler,
         impl $T {
-            fn rev_bits(builder, x: $T) -> $T {
+            fn rev_bits(builder, x) -> $T {
                 { builder.bitrev(x) }
             }; { ($T::reverse_bits(x)) }
 
-            fn leading_zeros(builder, x: $T) -> u32 {
+            fn leading_zeros(builder, x) -> u32 {
                 { builder.clz(x) }
             }; { ($T::leading_zeros(x)) }
 
-            fn sign_bits(builder, x: $T) -> u32 {
+            fn sign_bits(builder, x) -> u32 {
                 { builder.cls(x) }
             }; { ($T::leading_ones(x)) }
 
-            fn trailing_zeros(builder, x: $T) -> u32 {
+            fn trailing_zeros(builder, x) -> u32 {
                 { builder.ctz(x) }
             }; { ($T::trailing_zeros(x)) }
 
-            fn rev_endian(builder, x: $T) -> $T {
+            fn rev_endian(builder, x) -> $T {
                 { builder.bswap(x) }
             }; { ($T::from_le_bytes($T::to_be_bytes(x))) }
 
-            fn one_bits(builder, x: $T) -> u32 {
+            fn one_bits(builder, x) -> u32 {
                 { builder.popcnt(x) }
             }; { ($T::count_ones(x)) }
 
-            fn abs(builder, x: $T) -> $T {
+            fn abs(builder, x) -> $T {
                 { builder.iabs(x) }
             }; { ($T::abs(x)) }
         });

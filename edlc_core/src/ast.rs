@@ -91,6 +91,7 @@ impl ItemDoc {
         let mut doc_pos = SrcPos::default();
         let mut doc = String::new();
 
+        let mut has_content = false;
         while let Ok(local!(Token::Doc(s, DocType::Plane))) = parser.peak() {
             let pos = parser.next_token()?.pos;
             if !doc.is_empty() {
@@ -99,12 +100,17 @@ impl ItemDoc {
                 doc_pos = pos;
             }
             doc.push_str(&s);
+            has_content = true;
         }
 
-        Ok(Some(ItemDoc {
-            pos: doc_pos,
-            doc,
-        }))
+        if has_content {
+            Ok(Some(ItemDoc {
+                pos: doc_pos,
+                doc,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn append(&mut self, other: &Self) {

@@ -40,12 +40,12 @@ impl<Runtime> JIT<Runtime> {
 
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<bool, bool> for bool {
-                fn partial_eq(builder, lhs: bool, rhs: bool) -> bool {
+                fn partial_eq(builder, lhs, rhs: bool) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
             impl ["core::Eq"]<bool, bool> for bool {
-                fn eq(builder, lhs: bool, rhs: bool) -> bool {
+                fn eq(builder, lhs, rhs: bool) -> bool {
                     { builder.icmp(IntCC::Equal, lhs, rhs) }
                 }; { (lhs == rhs) }
             }
@@ -53,7 +53,7 @@ impl<Runtime> JIT<Runtime> {
 
         impl_binop!(self, compiler,
             impl ["core::Not"]<bool> for bool {
-                fn not(builder, val: bool) -> bool {
+                fn not(builder, val) -> bool {
                     { 
                         builder.icmp_imm(IntCC::Equal, val, 0)
                     }

@@ -142,6 +142,29 @@ impl<'a> IntoIterator for AstTypeNameIntoIter<'a> {
 }
 
 impl AstTypeName {
+    /// Parses the `self` parameter variable identifier in method bodies.
+    /// Please note that this is different from the `Self` (upper case) type.
+    pub fn parse_self_param(
+        parser: &mut Parser,
+    ) -> Result<Self, ParseError> {
+        let pos = expect_token!(parser; (Token::Key(KeyWord::SelfParameter)), pos => pos
+            expected "`self` parameter identifier")?;
+        let src = parser.module_src.clone();
+        let scope = *parser.env.current_scope().wrap(pos)?;
+        Ok(Self {
+            path: vec![
+                AstTypeNameEntry {
+                    pos,
+                    name: "self".to_string(),
+                    params: AstPreParams::empty(pos, src.clone()),
+                    src,
+                    scope,
+                    colon: false,
+                }
+            ]
+        })
+    }
+
     pub fn iter(&self) -> AstTypeNameIntoIter<'_> {
         AstTypeNameIntoIter(self)
     }

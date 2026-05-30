@@ -1220,49 +1220,11 @@ fn test() -> i32 {
                 inline_code!(r#"
                 /// Creates a new [MyData] instance.
                 ?comptime fn new(key: f64, repeat: f64) -> MyData"#),
-                inline_code!("?comptime fn get_buf(self: MyData) -> f64"),
-                inline_code!("?comptime fn get_key(self: MyData) -> f64"),
+                inline_code!("?comptime fn get_buf(self) -> f64"),
+                inline_code!("?comptime fn get_key(self) -> f64"),
             ],
             None
         )?;
-
-        // fn foo<Data: Copy + 'static>(compiler: &mut CraneliftJIT<()>, new: EdlTypeId) -> Result<(), anyhow::Error> {
-        //     jit_func!(for (&format!("MyData<{}>", any::type_name::<Data>())) impl compiler, fn(new),
-        //         const fn new_data<(T = Data),>(key: T, repeat: T) -> MyData<T>
-        //         where T: Copy,
-        //             T: 'static; {
-        //             MyData(key, repeat)
-        //         }
-        //     );
-        //     Ok(())
-        // }
-        //
-        // foo::<f32>(&mut compiler, new)?;
-        // foo::<f64>(&mut compiler, new)?;
-        // foo::<i32>(&mut compiler, new)?;
-
-        // jit_func!(for ("MyData<f32>") impl compiler, fn(get_buf),
-        //     fn data_get_buf<>(this: MyData<f32>) -> f32 where; {
-        //         this.1
-        //     }
-        // );
-        // jit_func!(for ("MyData<f32>") impl compiler, fn(get_key),
-        //     fn data_get_key<>(this: MyData<f32>) -> f32 where; {
-        //         this.0
-        //     }
-        // );
-        //
-        // jit_func!(for ("MyData<i32>") impl compiler, fn(get_buf),
-        //     fn data_get_buf<>(this: MyData<i32>) -> i32 where; {
-        //         this.1
-        //     }
-        // );
-        // jit_func!(for ("MyData<i32>") impl compiler, fn(get_key),
-        //     fn data_get_key<>(this: MyData<i32>) -> i32 where; {
-        //         this.0
-        //     }
-        // );
-        //
 
         jit_func!(for ("MyData") impl compiler, fn(new),
             const fn new_data<>(key: f64, repeat: f64) -> MyData where; {
@@ -1631,24 +1593,6 @@ fn test() -> i32 {
         Ok(())
     }
 
-    #[test]
-    fn test_regex() {
-        let input = "test";
-        // let re = Regex::new(r"^test(?:\((\s*[a-zA-Z_]\w*\s*=\s*[^,)\s]+(?:\s*,\s*[a-zA-Z_]\w*\s*=\s*[^,)\s]+)*\s*)\))?$").unwrap();
-        let re = Regex::new(r"test(?:\(((?:\s*([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)\s*,?\s*)*)\))?").unwrap();
-
-        if re.is_match(input) {
-            println!("Matched!");
-            let caps = re.captures(input).unwrap();
-            if let Some(params) = caps.get(1) {
-                let param_re = Regex::new(r"([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)").unwrap();
-                for cap in param_re.captures_iter(params.as_str()) {
-                    println!("Key: {}, Value: {}", &cap[1], &cap[2]);
-                }
-            }
-        }
-    }
-
     fn setup_print<Runtime>(compiler: &mut CraneliftJIT<Runtime>) -> Result<(), anyhow::Error> {
         compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
         let print_fs = compiler.compiler.parse_fn_signature(
@@ -1816,7 +1760,7 @@ fn test_other() {
                 inline_code!("<T>"),
                 inline_code!("std::Rc<T>"),
                 [
-                    inline_code!("fn copy(val: &Rc<T>) -> Rc<T>"),
+                    inline_code!("fn copy(&self) -> Self"),
                 ],
                 Some((inline_code!("core::Copy"), inline_code!("<Rc<T>>"))),
             )?;
@@ -1825,7 +1769,7 @@ fn test_other() {
                 inline_code!("<T>"),
                 inline_code!("std::Rc<T>"),
                 [
-                    inline_code!("fn drop(val: Rc<T>)")
+                    inline_code!("fn drop(self)")
                 ],
                 Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
             )?;
@@ -1959,7 +1903,7 @@ type Event = struct;
                 inline_code!(r#"
                 fn record() -> Self"#),
                 inline_code!(r#"
-                fn synchronize(ev: Self)
+                fn synchronize(self)
                 "#),
             ],
             Some((inline_code!("core::Event"), inline_code!("<Event>"))),
@@ -1995,7 +1939,7 @@ impl Field {
         Field {}
     }
 
-    fn as_device_ptr(async self: Self) -> async DevicePointer<Self> {
+    fn as_device_ptr(async self) -> async DevicePointer<Self> {
         DevicePointer { ptr: 0 }
     }
 }
@@ -2005,11 +1949,11 @@ impl BoundaryField {
         BoundaryField {}
     }
 
-    fn as_device_ptr(async self: Self) -> async DevicePointer<Self> {
+    fn as_device_ptr(async self) -> async DevicePointer<Self> {
         DevicePointer { ptr: 0 }
     }
 
-    fn field_as_ptr(async self: Self) -> async DevicePointer<Field> {
+    fn field_as_ptr(async self) -> async DevicePointer<Field> {
         DevicePointer { ptr: 0 }
     }
 }
@@ -2021,11 +1965,11 @@ async fn init_field(field: DevicePointer<Field>) {}
 
 // -- simplified higher-level functions
 impl BoundaryField {
-    async fn gradient(self: Self, async dst: Field) {
+    async fn gradient(self, async dst: Field) {
         gradient(self.as_device_ptr(), dst.as_device_ptr());
     }
 
-    async fn laplace(self: Self, async dst: Field) {
+    async fn laplace(self, async dst: Field) {
         laplace(self.as_device_ptr(), dst.as_device_ptr());
     }
 }

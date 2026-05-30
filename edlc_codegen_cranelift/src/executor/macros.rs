@@ -671,8 +671,8 @@ fn test() -> i32 {
             inline_code!("MyData<T>"),
             [
                 inline_code!("?comptime fn new(key: i32, repeat: T) -> MyData<T>"),
-                inline_code!("fn get_buf(self: MyData<T>) -> [T; 16]"),
-                inline_code!("fn get_key(self: MyData<T>) -> i32"),
+                inline_code!("fn get_buf(self) -> [T; 16]"),
+                inline_code!("fn get_key(self) -> i32"),
             ],
             None
         )?;
@@ -794,13 +794,13 @@ fn test() -> i32 {
             inline_code!("<>"),
             inline_code!("MyData"),
             [
-                inline_code!("fn new() -> MyData"),
+                inline_code!("fn new() -> Self"),
                 inline_code!(r#"
-                fn test(this: MyData, domain: usize, msg1: str, msg2: str);
+                fn test(self, domain: usize, msg1: str, msg2: str);
                 "#),
 
                 inline_code!(r#"
-                fn test2(this: MyData, domain: usize, msg1: str, msg2: str, test: i32);
+                fn test2(self, domain: usize, msg1: str, msg2: str, test: i32);
                 "#),
 
                 inline_code!(r#"
@@ -968,8 +968,8 @@ fn test() -> i32 {
             inline_code!("<>"),
             inline_code!("Resource"),
             [
-                inline_code!("comptime fn new(val: str) -> Resource"),
-                inline_code!("fn print(self: Resource)")
+                inline_code!("comptime fn new(val: str) -> Self"),
+                inline_code!("fn print(self)")
             ],
             None,
         )?;
@@ -1585,7 +1585,7 @@ type BoundaryCondition<T, const N: usize, const DIM: usize> = struct {
 };
 
 impl<T, const N: usize, const DIM: usize> BoundaryField<T, N, DIM> {
-    fn set_bc(self: Self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
+    fn set_bc(self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
         print("setting boundary for BoundaryField<");
         print(N);
         print(", ");
@@ -1608,7 +1608,7 @@ impl<T, const N: usize, const DIM: usize> BoundaryCondition<T, N, DIM> {
 
 
 impl MyData {
-    fn print(self: Self) {
+    fn print(self) {
         println(self.a);
         println(self.b);
     }
@@ -1619,7 +1619,7 @@ impl<T> PhyNum<T> {
         PhyNum { val, unit }
     }
 
-    fn print(self: Self) {
+    fn print(self) {
         print(self.val);
         print(" ");
         println(self.unit);
@@ -1650,7 +1650,7 @@ type PrintArray<T, const N: usize> = struct {
 };
 
 impl<T, const N: usize> PrintArray<T, N> {
-    fn print(self: Self) {
+    fn print(self) {
         print_array(self.data)
     }
 }
@@ -1935,7 +1935,7 @@ type BoundaryCondition<T, const N: usize, const DIM: usize> = struct {
 };
 
 impl<T, const N: usize, const DIM: usize> BoundaryField<T, N, DIM> {
-    fn set_bc(self: Self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
+    fn set_bc(self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
         print("setting boundary for BoundaryField<");
         print(N);
         print(", ");
@@ -1958,7 +1958,7 @@ impl<T, const N: usize, const DIM: usize> BoundaryCondition<T, N, DIM> {
 
 
 impl MyData {
-    fn print(self: Self) {
+    fn print(self) {
         println(self.a);
         println(self.b);
     }
@@ -1969,7 +1969,7 @@ impl<T> PhyNum<T> {
         PhyNum { val, unit }
     }
 
-    fn print(self: Self) {
+    fn print(self) {
         print(self.val);
         print(" ");
         println(self.unit);
@@ -2000,7 +2000,7 @@ type PrintArray<T, const N: usize> = struct {
 };
 
 impl<T, const N: usize> PrintArray<T, N> {
-    fn print(self: Self) {
+    fn print(self) {
         print_array(self.data)
     }
 }
@@ -2289,7 +2289,7 @@ impl<T> PhyNum<T> {
         PhyNum { val, unit }
     }
 
-    fn print(self: Self) {
+    fn print(self) {
         let value: T = self.val;
         print(self.val);
         print(" ");
@@ -2298,8 +2298,8 @@ impl<T> PhyNum<T> {
 }
 
 impl core::Add<PhyNum<f64>, PhyNum<f64>> for PhyNum<f64> {
-    fn add(lhs: Self, rhs: Self) -> Self {
-        PhyNum { val: lhs.val + rhs.val, unit: lhs.unit }
+    fn add(self, rhs: Self) -> Self {
+        PhyNum { val: self.val + rhs.val, unit: self.unit }
     }
 }
 

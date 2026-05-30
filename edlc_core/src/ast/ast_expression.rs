@@ -267,7 +267,7 @@ impl AstExpr {
                 => AstInitExpr::parse(parser).map(|e| e.into()),
 
             Ok(local!(Token::Punct(Punct::BraceOpen))) => {
-                match AstBlockOrInit::parse(parser)? {
+                match AstBlockOrInit::parse(parser, true)? {
                     AstBlockOrInit::Init(expr, reason) => {
                         let pos = *reason.src();
                         let scope = *parser.env.current_scope().wrap(pos)?;
@@ -299,6 +299,9 @@ impl AstExpr {
             Ok(local!(Token::Key(KeyWord::If))) => AstIf::parse(parser).map(|e| e.into()),
             Ok(local!(Token::Key(KeyWord::Use))) => AstUseExpr::parse(parser).map(|e| e.into()),
             Ok(local!(Token::Key(KeyWord::Comptime))) => AstComptime::parse(parser).map(|e| e.into()),
+            Ok(local!(Token::Key(KeyWord::SelfParameter))) => {
+                AstTypeName::parse_self_param(parser).map(|e| e.into())
+            }
             Ok(local!(Token::Ident(ident))) if ident == "false" || ident == "true"
                 => AstBoolExpr::parse(parser).map(|e| e.into()),
             Ok(local!(Token::Ident(ident))) if ident == "_" => Ok(AstExpr::Elicit(parser.next_token()?.pos)),
@@ -309,14 +312,19 @@ impl AstExpr {
                     let pos = *parser.pos();
                     let scope = *parser.env.current_scope().wrap(pos)?;
 
-                    match AstBlockOrInit::parse_init(parser, pos)? {
-                        AstBlockOrInit::Init(expr, ..) => {
+                    match AstBlockOrInit::parse_init(parser, pos) {
+                        Ok(AstBlockOrInit::Init(expr, ..)) => {
                             TypeInitExpr::from_list_named(expr, name?, pos, scope, parser.module_src.clone())
                                 .map(|e| e.into())
                         }
-                        AstBlockOrInit::Block(..) => {
+                        Ok(AstBlockOrInit::Block(..)) => {
                             parser.reset_until(&pos)
-                                .map_err(|err| ParseError::LexError(err))?;
+                                .map_err(ParseError::LexError)?;
+                            name.map(|e| e.into())
+                        }
+                        Err(_) => {
+                            parser.reset_until(&pos)
+                                .map_err(ParseError::LexError)?;
                             name.map(|e| e.into())
                         }
                     }
@@ -331,14 +339,19 @@ impl AstExpr {
                     let pos = *parser.pos();
                     let scope = *parser.env.current_scope().wrap(pos)?;
 
-                    match AstBlockOrInit::parse(parser)? {
-                        AstBlockOrInit::Init(expr, ..) => {
+                    match AstBlockOrInit::parse_init(parser, pos) {
+                        Ok(AstBlockOrInit::Init(expr, ..)) => {
                             TypeInitExpr::from_list(expr, pos, scope, parser.module_src.clone())
                                 .map(|e| e.into())
                         }
-                        AstBlockOrInit::Block(..) => {
+                        Ok(AstBlockOrInit::Block(..)) => {
                             parser.reset_until(&pos)
-                                .map_err(|err| ParseError::LexError(err))?;
+                                .map_err(ParseError::LexError)?;
+                            name.map(|e| e.into())
+                        }
+                        Err(_) => {
+                            parser.reset_until(&pos)
+                                .map_err(ParseError::LexError)?;
                             name.map(|e| e.into())
                         }
                     }

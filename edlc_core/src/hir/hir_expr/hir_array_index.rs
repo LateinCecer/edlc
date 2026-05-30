@@ -572,7 +572,7 @@ impl MakeGraph for HirArrayIndex {
         &self,
         graph: &mut MirGraph<B>
     ) -> Result<MirTypeId, HirTranslationError> {
-        let ty = self.get_type(&mut graph.hir_phase)?;
+        let ty = self.get_type(graph.hir_phase)?;
         if !ty.is_fully_resolved() {
             return Err(HirTranslationError::TypeNotFullyResolved {
                 ty,
