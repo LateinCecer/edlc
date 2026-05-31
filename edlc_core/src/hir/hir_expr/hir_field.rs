@@ -920,31 +920,32 @@ impl MakeGraph for HirField {
             return Ok(()); // lhs exits early
         }
 
-        let target_ty = self.mir_type(graph)?;
-        let expr_id = if graph.mir_phase.types.is_ref(&target_ty) {
+        let self_ty = self.mir_type(graph)?;
+        assert!(graph.mir_phase.types.is_ref(&self_ty));
+
+        let expr_id = if !graph.mir_phase.types.is_ref_mutable(&self_ty) {
             // insert as a shared reference
             graph.graph.expressions
                 .insert_ref(MirRef::shared_field(
                     base_value,
                     &self.name,
-                    target_ty,
-                    &graph.graph,
+                    self_ty,
+                    graph.graph,
                     &graph.mir_phase.types,
                 ))
         } else {
-            assert!(graph.mir_phase.types.is_ref_mutable(&target_ty));
             graph.graph.expressions
                 .insert_ref(MirRef::mut_field(
                     base_value,
                     &self.name,
-                    target_ty,
-                    &graph.graph,
+                    self_ty,
+                    graph.graph,
                     &graph.mir_phase.types,
                 ))
         };
 
         // insert reference expression...
-        if *graph.graph.get_var_type(&target) == target_ty {
+        if *graph.graph.get_var_type(&target) == self_ty {
             // ... as an internal reference
             graph.graph.insert_def(
                 graph.current_block,
@@ -954,10 +955,10 @@ impl MakeGraph for HirField {
                 DebugSymbols { pos: self.pos },
             );
         } else {
-            let self_ty = self.mir_deref_type(graph)?;
-            assert_eq!(*graph.graph.get_var_type(&target), self_ty);
+            let self_deref_ty = self.mir_deref_type(graph)?;
+            assert_eq!(*graph.graph.get_var_type(&target), self_deref_ty);
             // ... as a dereferenced base value
-            let tmp = graph.graph.create_temp_variable(target_ty);
+            let tmp = graph.graph.create_temp_variable(self_ty);
             graph.graph.insert_def(
                 graph.current_block,
                 tmp,

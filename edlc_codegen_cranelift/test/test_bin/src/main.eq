@@ -51,6 +51,7 @@ fn make_tuple(args: { first: i32, second: f32 }) -> (i32, f32) {
 
 type SVector<T, const N: usize> = struct {
     data: [T; N],
+    test: T,
 };
 
 impl<const N: usize> SVector<f32, N> {
@@ -86,6 +87,7 @@ impl<T> SVector<T, 1> {
     fn new(x: T) -> Self {
         SVector {
             data: [x],
+            test: x,
         }
     }
 }
@@ -94,6 +96,7 @@ impl<T> SVector<T, 2> {
     fn new(x: T, y: T) -> Self {
         SVector {
             data: [x, y],
+            test: x,
         }
     }
 }
@@ -102,6 +105,7 @@ impl<T> SVector<T, 3> {
     fn new(x: T, y: T, z: T) -> Self {
         SVector {
             data: [x, y, z],
+            test: x,
         }
     }
 }
@@ -201,18 +205,36 @@ fn benchmark() {
 impl<T, const N: usize> SVector<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut T {
         core::assert(index < N);
-        ret self.data[index]
+        ret self.data[index];
     }
 
     fn index(&self, index: usize) -> &T {
         core::assert(index < N);
         ret self.data[index];
     }
+
+    fn set_index(&mut self, index: usize, value: T) {
+        self.data[index] = value;
+    }
+
+    fn print_test(&self) {
+        println(self.test);
+    }
 }
 
 #[test]
 fn test_vec_mut_access() {
-    let vec = SVector::new(2.1_f64, 1.0_f64);
+    let mut vec = SVector::new(2.1_f64, 1.0_f64);
+    vec.print_test();
     core::assert(vec.index(0) == 2.1);
     core::assert(vec.index(1) == 1.0);
+
+    vec.data[0] += 0.1;
+    core::assert(vec.index(0) == 2.2);
+
+    vec.set_index(0, 4.2);
+    core::assert(vec.index(0) == 4.2);
+
+    vec.index_mut(1) = 204.1;
+    core::assert(vec.index(1) == 204.1);
 }

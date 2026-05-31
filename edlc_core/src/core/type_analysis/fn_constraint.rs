@@ -25,7 +25,9 @@ use crate::core::type_analysis::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutoReference {
-    Reference,
+    Reference {
+        mutability: ExtConstUid,
+    },
     Dereference,
     #[default]
     None,
@@ -210,7 +212,11 @@ impl SigConstraint {
                     .at_env(node, &self.env)
                     .eq(param_value, &el_ty.uid)
                     .map_err(|err| FnConstraintError::ConstraintMismatch(self.fn_id, err))?;
-                *ref_state = AutoReference::Reference;
+
+                let mutable = infer.get_generic_const(param.ty, 1).unwrap().uid;
+                *ref_state = AutoReference::Reference {
+                    mutability: mutable,
+                };
             }
         }
         Ok(ref_state)

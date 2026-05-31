@@ -21,6 +21,7 @@ use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::AstTranslationError;
 use crate::core::edl_fn::EdlPreSignature;
 use crate::core::edl_type::{EdlExtendedType, EdlMaybeType};
+use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::{HirFn, HirFnParam, HirFnSignature};
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl};
@@ -216,11 +217,22 @@ impl IntoHir for AstSelfParameter {
         let SelfType::Type(hir_type) = parser.res.find_self_type().clone() else {
             panic!("`Self` type for implementation was not defined properly");
         };
+        let ty = match self.ty {
+            AstFnSelfParamType::Ref { mutable } => {
+                parser.types
+                    .new_ref(EdlMaybeType::Fixed(hir_type), Some(EdlConstValue::from_bool(mutable)))
+                    .map_err(|err| AstTranslationError::EdlError {
+                        pos: self.pos,
+                        err,
+                    })?
+            }
+            AstFnSelfParamType::Value => hir_type,
+        };
 
         Ok(HirFnParam {
             name: "self".to_string(),
             pos: self.pos,
-            ty: hir_type,
+            ty,
             mutable,
             comptime,
             async_: asy,
@@ -235,6 +247,7 @@ impl AstSelfParameter {
         let SelfType::Trait(hir_type) = parser.res.find_self_type().clone() else {
             panic!("`Self` type for trait definition was not defined properly");
         };
+        // todo: deal with reference types to self here
 
         Ok(HirTraitFnParam {
             name: "self".to_string(),

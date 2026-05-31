@@ -20,9 +20,9 @@ use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
 use crate::hir::translation::{HirTranslationError};
-use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
-use crate::issue::{format_type_args, SrcError};
+use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_assign::MirAssign;
@@ -159,17 +159,140 @@ impl HirAssign {
             })
         }
 
-        phase.check_report_expr(
-            format_args!("LHS and RHS of an assignment operation must have the same type"),
-            &self.lhs,
-            issue::format_type_args!(
+        let lhs_type = self.lhs.get_type(phase)?;
+        let rhs_type = self.rhs.get_type(phase)?;
+        let lhs_is_ref = matches!(&lhs_type, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF);
+        let rhs_is_ref = matches!(&rhs_type, EdlMaybeType::Fixed(instance) if instance.ty == edl_type::EDL_REF);
+        if lhs_is_ref && rhs_is_ref {
+            let lhs_type = lhs_type.unwrap();
+            let rhs_type = rhs_type.unwrap();
+
+            let base_type_lhs = lhs_type
+                .get_ref_type()
+                .map_err(|err| HirError::new_edl(self.pos, err))?;
+            let base_type_rhs = rhs_type
+                .get_ref_type()
+                .map_err(|err| HirError::new_edl(self.pos, err))?;
+
+            phase.check_report_type(
+                format_args!("LHS and RHS of assignment operation must have the same base type"),
+                TypeSource {
+                    ty: EdlMaybeType::Fixed(base_type_lhs.clone()),
+                    pos: self.lhs.pos().into(),
+                    src: self.lhs.src(),
+                    remark: TypeArguments::new(&[
+                        TypeArgument::new_display(&"LHS is a reference with type `"),
+                        TypeArgument::new_type(&lhs_type),
+                        TypeArgument::new_display(&"`"),
+                    ])
+                },
+                TypeSource {
+                    ty: EdlMaybeType::Fixed(base_type_rhs.clone()),
+                    pos: self.rhs.pos().into(),
+                    src: self.rhs.src(),
+                    remark: TypeArguments::new(&[
+                        TypeArgument::new_display(&"RHS is a reference with type `"),
+                        TypeArgument::new_type(&rhs_type),
+                        TypeArgument::new_display(&"`"),
+                    ])
+                },
+            )?;
+
+            let mutability = lhs_type.get_ref_mutability()
+                .map_err(|err| HirError::new_edl(self.pos, err))?;
+            let mutable = mutability.clone().unwrap_literal().unwrap_bool();
+            if !mutable {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"LHS of assignment operation must be mutable"),
+                    ]),
+                    &[
+                        SrcError::Double {
+                            src: self.src.clone(),
+                            first: self.pos.into(),
+                            second: self.lhs.pos().into(),
+                            error_first: TypeArguments::new(&[
+                                TypeArgument::new_display(&"assignment operation here")
+                            ]),
+                            error_second: TypeArguments::new(&[
+                                TypeArgument::new_display(&"LHS is a shared (i.e. immutable) reference")
+                            ]),
+                        }
+                    ],
+                    None,
+                );
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::NotMutable("LHS of assign expressions must be mutable".to_string()))
+                });
+            }
+        } else if lhs_is_ref {
+            let lhs_type = lhs_type.unwrap();
+            let base_type = lhs_type
+                .get_ref_type()
+                .map_err(|err| HirError::new_edl(self.pos, err))?;
+            phase.check_report_type_expr(
+                format_args!("LHS and RHS of assignment operation must have the same type"),
+                TypeSource {
+                    ty: EdlMaybeType::Fixed(base_type.clone()),
+                    pos: self.lhs.pos().into(),
+                    src: self.lhs.src(),
+                    remark: TypeArguments::new(&[
+                        TypeArgument::new_display(&"LHS is a reference with type `"),
+                        TypeArgument::new_type(&lhs_type),
+                        TypeArgument::new_display(&"`"),
+                    ])
+                },
+                &self.rhs,
+                TypeArguments::new(&[
+                    TypeArgument::new_display(&"RHS is an expression with plain type `"),
+                    TypeArgument::new_type(&rhs_type),
+                    TypeArgument::new_display(&"`"),
+                ])
+            )?;
+
+            let mutability = lhs_type.get_ref_mutability()
+                .map_err(|err| HirError::new_edl(self.pos, err))?;
+            let mutable = mutability.clone().unwrap_literal().unwrap_bool();
+            if !mutable {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"LHS of assignment operation must be mutable"),
+                    ]),
+                    &[
+                        SrcError::Double {
+                            src: self.src.clone(),
+                            first: self.pos.into(),
+                            second: self.lhs.pos().into(),
+                            error_first: TypeArguments::new(&[
+                                TypeArgument::new_display(&"assignment operation here")
+                            ]),
+                            error_second: TypeArguments::new(&[
+                                TypeArgument::new_display(&"LHS is a shared (i.e. immutable) reference")
+                            ]),
+                        }
+                    ],
+                    None,
+                );
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::NotMutable("LHS of assign expressions must be mutable".to_string()))
+                });
+            }
+        } else {
+            phase.check_report_expr(
+                format_args!("LHS and RHS of an assignment operation must have the same type"),
+                &self.lhs,
+                issue::format_type_args!(
                 format_args!("LHS (destination) of assignment operation")
             ),
-            &self.rhs,
-            issue::format_type_args!(
-                format_args!("RHS (source) of assignment operation")
-            )
-        )
+                &self.rhs,
+                issue::format_type_args!(
+                    format_args!("RHS (source) of assignment operation")
+                )
+            )?;
+        }
+        Ok(())
     }
 }
 

@@ -468,7 +468,7 @@ impl HirRef {
                 let downcast = graph.graph.expressions.insert_downcast(MirDowncastRef::new(
                     ori_ref_value,
                     target_ty,
-                    &graph.graph,
+                    graph.graph,
                     &graph.mir_phase.types,
                 ));
                 graph.graph.insert_def(

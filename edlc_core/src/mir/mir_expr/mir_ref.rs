@@ -167,6 +167,9 @@ impl MirRef {
     ) -> Self {
         let src_ty = *graph.get_var_type(&value);
         let base_type = reg.get_ref_type(&src_ty).unwrap_or(src_ty);
+
+        assert!(!reg.is_ref(&base_type), "reference of reference encountered. Something fucked up");
+
         let layout = reg.get_layout(base_type).unwrap();
         let offset = layout.member_offset(field, reg).unwrap();
 

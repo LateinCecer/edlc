@@ -696,6 +696,14 @@ impl MakeGraph for HirName {
             });
         }
 
+        // if the base expression is already a reference, we don't take the reference again here.
+        // there are no references of references in EDL.
+        if ty.as_ref().unwrap().ty == edl_type::EDL_REF {
+            return graph.mir_phase.types
+                .mir_id(&ty.unwrap(), &graph.hir_phase.types)
+                .map_err(HirTranslationError::EdlError);
+        }
+
         let ref_ty = graph.hir_phase.types
             .new_ref(ty, self.infer_info.as_ref().unwrap().finalized_mutable.clone().into())?;
         graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)

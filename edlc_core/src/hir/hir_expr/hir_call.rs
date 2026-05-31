@@ -1683,6 +1683,26 @@ impl ResolveTypes for HirFunctionCall {
                 | CallResolveError::TooManyMethods(_)
                 | CallResolveError::TooManyTraitMethods(_)) => (),
         }
+
+        if let Some(res) = self.info.as_ref().unwrap().resolver.res.as_ref() {
+            for (param, auto_ref_state) in self.params.iter_mut().zip(res.auto_ref.iter()) {
+                match auto_ref_state {
+                    AutoReference::Reference {
+                        mutability
+                    } => {
+                        let mut inferer = phase.infer_from(infer_state);
+                        let param_mutability = param.mutability(&mut inferer);
+                        if let Err(err) = inferer
+                            .at(node)
+                            .eq(mutability, &param_mutability) {
+                            return Err(report_infer_error(err, infer_state, phase));
+                        }
+                    }
+                    _ => ()
+                }
+            }
+        }
+
         // resolve types of arguments again, to resolve nested function calls correctly
         for param in self.params.iter_mut() {
             param.resolve_types(phase, infer_state)?;
@@ -1931,7 +1951,7 @@ impl MakeGraph for HirFunctionCall {
                 AutoReference::None => {
                     param.write_to_graph(graph, param_value)?;
                 }
-                AutoReference::Reference => {
+                AutoReference::Reference { .. } => {
                     let pos = param.pos();
                     HirRef::write_ref_to_graph(param, graph, param_value, pos)?;
                 }
