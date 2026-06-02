@@ -19,6 +19,7 @@ use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_fn::EdlPreSignature;
 use crate::core::edl_type::{EdlExtendedType, EdlMaybeType};
 use crate::core::edl_value::EdlConstValue;
@@ -90,6 +91,7 @@ pub struct AstFnSignature {
     env_id: Option<EdlEnvId>,
     modifiers: Vec<AstFnModifier>,
     pub(crate) doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -430,6 +432,8 @@ impl AstFnSignature {
             (None, None)
         };
 
+        let constraints = AstWhere::try_parse(parser)?;
+
         parser.env.pop();
         Ok(AstFnSignature {
             pos,
@@ -445,6 +449,7 @@ impl AstFnSignature {
             modifiers: fn_modifiers,
             self_parameter,
             doc: None,
+            type_constraints: constraints,
         })
     }
 }

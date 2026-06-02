@@ -24,6 +24,7 @@ use crate::ast::ast_type_def::{AliasResolver, AstTypeDef};
 use crate::ast::{AstModule, ItemDoc};
 use crate::ast::IntoHir;
 use crate::ast::ast_const::AstConst;
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlConst, EdlMaybeType, EdlType, EdlTypeInstance};
 use crate::hir::hir_impl::HirImpl;
@@ -47,6 +48,7 @@ pub struct AstImpl {
     /// Associated types
     types: Vec<AstTypeDef>,
     doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 impl AstImpl {
@@ -80,6 +82,8 @@ impl Parsable for AstImpl {
         } else {
             (var1, None)
         };
+
+        let constraints = AstWhere::try_parse(parser)?;
 
         // parse function bodies
         expect_token!(parser; (Token::Punct(Punct::BraceOpen))
@@ -224,6 +228,7 @@ impl Parsable for AstImpl {
             consts,
             types,
             doc,
+            type_constraints: constraints,
         })
     }
 }

@@ -84,7 +84,10 @@ impl<T, const N: usize> SVector<T, N> {
 }
 
 impl<T> SVector<T, 1> {
-    fn new(x: T) -> Self {
+    fn new(x: T) -> Self
+    // where T: f32, f64; N: 1
+    where T: f32 | f64,
+    {
         SVector {
             data: [x],
             test: x,

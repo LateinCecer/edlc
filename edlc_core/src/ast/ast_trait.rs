@@ -21,6 +21,7 @@ use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type_def::{AliasResolver};
 use crate::ast::{AstModule, IntoHir, ItemDoc};
 use crate::ast::ast_type::AstType;
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_param_env::{EdlGenericParamValue, EdlGenericParamVariant};
 use crate::core::edl_trait::EdlTrait;
@@ -63,6 +64,7 @@ pub struct AstTrait {
     consts: Vec<ConstDef>,
     types: Vec<TypeDef>,
     doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 impl AstTrait {
@@ -102,6 +104,8 @@ impl Parsable for AstTrait {
         let env = AstParamEnv::parse(parser)?;
         parser.env.push_block();
         let scope = *parser.env.current_scope().wrap(pos)?;
+
+        let constraints = AstWhere::try_parse(parser)?;
 
         // read body
         expect_token!(parser; (Token::Punct(Punct::BraceOpen))
@@ -252,6 +256,7 @@ impl Parsable for AstTrait {
             consts,
             types,
             doc,
+            type_constraints: constraints,
         })
     }
 }

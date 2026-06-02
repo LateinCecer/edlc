@@ -61,6 +61,7 @@ mod code_container;
 pub mod hir_trait_fn;
 mod hir_report;
 mod lifetime;
+pub mod hir_where;
 
 // export HIR context variables
 pub use context::HirContext;

@@ -31,6 +31,7 @@ pub mod edl_trait;
 pub mod edl_impl;
 pub mod edl_alias;
 pub mod type_analysis;
+pub mod edl_constraint;
 
 #[derive(Default, Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct EdlVarId(pub usize);

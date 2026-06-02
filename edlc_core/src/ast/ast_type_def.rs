@@ -59,6 +59,7 @@ mod alias_def;
 use crate::core::edl_param_env::EdlParameterEnv;
 use crate::prelude::edl_type::{EdlTypeId, EdlTypeRegistry};
 pub use struct_def::AstStructMember;
+use crate::ast::ast_where::AstWhere;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstTypeDef {
@@ -69,6 +70,7 @@ pub struct AstTypeDef {
     env: AstParamEnv,
     variant: AstTypeVariant,
     pub doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +114,7 @@ impl Parsable for AstTypeDef {
         };
         parser.env.pop();
 
+        let constraints = AstWhere::try_parse(parser)?;
         expect_token!(parser; (Token::Punct(Punct::Semicolon))
             expected "`;` at the of type definition")?;
         Ok(AstTypeDef {
@@ -122,6 +125,7 @@ impl Parsable for AstTypeDef {
             env: parameter_env,
             variant,
             doc: None,
+            type_constraints: constraints,
         })
     }
 }
