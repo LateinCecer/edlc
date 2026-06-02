@@ -298,6 +298,7 @@ impl HirExpression {
             self.src().clone(),
             DebugSymbols { pos: self.pos() },
             *self.scope(),
+            &compiler.mir_phase.types,
         );
         let ret_value = body.create_temp_variable(return_type);
 

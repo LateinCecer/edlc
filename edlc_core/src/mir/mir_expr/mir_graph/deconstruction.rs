@@ -266,7 +266,9 @@ impl PartialSsaDeconstruction {
     ) {
         let mut worklist = state
             .iter()
-            .map(|(key, _)| *key).collect::<VecDeque<_>>();
+            .map(|(key, _)| *key)
+            .filter(|key| !cfg.is_shadow_value(key))
+            .collect::<VecDeque<_>>();
         // init transition mapping with a neutral mapping -> each data source points to itself
         for source_index in 0..self.source_count {
             self.transition_mapping.view_mut(source_index).set(DataSource(source_index));

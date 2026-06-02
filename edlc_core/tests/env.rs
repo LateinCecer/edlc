@@ -253,6 +253,7 @@ impl TestCompiler {
             src.clone(),
             DebugSymbols { pos: SrcPos::default() },
             *hir.scope(),
+            &self.compiler.mir_phase.types,
         );
         let ret_value = body.create_temp_variable(return_type);
 

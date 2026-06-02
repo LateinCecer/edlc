@@ -400,9 +400,13 @@ impl BorrowTree {
         if scope == ValueScope::Local {
             scope = if let BorrowSource::Local(var) = source {
                 let def = owner_reverse[var.0];
-                let block_ref = cfg.find_block(&def)
-                    .expect("variable is not defined anywhere");
-                ValueScope::Block(cfg.get_block_scope(&block_ref))
+                if cfg.is_shadow_value(&def) {
+                    ValueScope::Function
+                } else {
+                    let block_ref = cfg.find_block(&def)
+                        .expect("variable is not defined anywhere");
+                    ValueScope::Block(cfg.get_block_scope(&block_ref))
+                }
             } else {
                 ValueScope::Global
             };
@@ -1337,7 +1341,38 @@ pub struct BorrowContext<'reg> {
 
 impl<'reg> BorrowContext<'reg> {
     pub fn new(reg: &'reg MirTypeRegistry, cfg: &'reg MirFlowGraph) -> Self {
-        Self { reg, cfg, owner_counter: 0, owner_references: IndexMap::default(), owner_reverse: IndexMap::default() }
+        Self {
+            reg,
+            cfg,
+            owner_counter: 0,
+            owner_references: IndexMap::default(),
+            owner_reverse: IndexMap::default(),
+        }
+    }
+
+    pub fn insert_func_parameters(&mut self, state: &mut HashNodeState<MirValue, BorrowState>) {
+        for (param, shadow) in self.cfg.get_root_parameters().iter()
+            .zip(self.cfg.get_caller_parameters().iter()) {
+
+            let mutable = self.is_mut_ref(param);
+            let shadow_owner = self.get_owner_data(shadow);
+            let shadow_state = BorrowState::raw_data(shadow_owner, mutable);
+            state.replace(shadow, shadow_state);
+
+            let param_owner = self.get_owner_data(param);
+            if self.is_ref(param) {
+                let shadow_src = BorrowSource::Local(shadow_owner);
+                state.replace(param, BorrowState::new(
+                    shadow_src,
+                    *shadow,
+                    param_owner,
+                    None,
+                    mutable,
+                ));
+            } else {
+                state.replace(param, BorrowState::raw_data(param_owner, true));
+            }
+        }
     }
 
     fn get_owner_data(&mut self, target: &MirValue) -> OwnerData {
