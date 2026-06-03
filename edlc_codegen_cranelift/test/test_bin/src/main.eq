@@ -49,7 +49,8 @@ fn make_tuple(args: { first: i32, second: f32 }) -> (i32, f32) {
 //    todo()
 }
 
-type SVector<T, const N: usize> = struct {
+type SVector<T, const N: usize>
+where T: f32 | f64 = struct {
     data: [T; N],
     test: T,
 };
@@ -67,7 +68,11 @@ impl<const N: usize> SVector<f32, N> {
     }
 }
 
-impl<T, const N: usize> SVector<T, N> {
+impl<T, const N: usize> SVector<T, N>
+where
+    T: f32 | f64,
+    const N: 1 | 2 | 3 | 4,
+{
     fn print(self) {
         std::io::print("(");
         let mut i = 0usize;
@@ -85,7 +90,6 @@ impl<T, const N: usize> SVector<T, N> {
 
 impl<T> SVector<T, 1> {
     fn new(x: T) -> Self
-    // where T: f32, f64; N: 1
     where T: f32 | f64,
     {
         SVector {
@@ -223,6 +227,18 @@ impl<T, const N: usize> SVector<T, N> {
     fn print_test(&self) {
         println(self.test);
     }
+}
+
+fn write_buffer(mut x: &mut i32) {
+    println(x);
+    x = 42;
+}
+
+#[test]
+fn test_write_buffer() {
+    let mut x: i32 = 0;
+    write_buffer(x);
+    core::assert(x == 42);
 }
 
 #[test]

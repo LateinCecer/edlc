@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
-use crate::ast::ast_expression::call_expr::AstCallExpr;
+use crate::ast::ast_expression::call_expr::{AstCallExpr, CallParamModifier};
 use crate::ast::ast_expression::field_expr::AstFieldExpr;
 use crate::ast::ast_type::{AstTypeNameEntry};
 use crate::ast::{AstElement, IntoHir};
@@ -33,6 +33,7 @@ pub struct AstMethodExpr {
     src: ModuleSrc,
     lhs: Box<AstExpr>,
     params: Vec<AstExpr>,
+    modifiers: Vec<CallParamModifier>,
     name: AstTypeNameEntry,
 }
 
@@ -114,7 +115,7 @@ impl AstMethodExpr {
         let name = AstTypeNameEntry::parse_from_name(
             name, name_pos, parser, true)?;
         expect_token!(parser; (Token::Punct(Punct::BracketOpen)) expected "method parameters `(`")?;
-        let params = AstCallExpr::parse_params(parser)?;
+        let (params, modifiers) = AstCallExpr::parse_params(parser)?;
 
         Ok(AstMethodExpr {
             lhs,
@@ -123,6 +124,7 @@ impl AstMethodExpr {
             src,
             name,
             params,
+            modifiers,
         })
     }
 }

@@ -91,6 +91,7 @@ impl Parsable for AstTypeDef {
         let scope = *parser.env.current_scope().wrap(pos)?;
         let src = parser.module_src.clone();
 
+        let constraints = AstWhere::try_parse(parser)?;
         expect_token!(parser; (Token::Punct(Punct::Assign))
             expected "`=` preceding RHS of type definition")?;
 
@@ -114,7 +115,6 @@ impl Parsable for AstTypeDef {
         };
         parser.env.pop();
 
-        let constraints = AstWhere::try_parse(parser)?;
         expect_token!(parser; (Token::Punct(Punct::Semicolon))
             expected "`;` at the of type definition")?;
         Ok(AstTypeDef {

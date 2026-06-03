@@ -33,12 +33,28 @@ use std::collections::HashSet;
 use std::error::Error;
 use crate::core::edl_type;
 use crate::core::type_analysis::*;
+use crate::hir::hir_expr::hir_as::HirAs;
+use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::hir_report::report_expect_mutable;
 use crate::mir::mir_expr::MirValue;
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_expr::DebugSymbols;
 use crate::prelude::report_infer_error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentMode {
+    /// Types match; lhs is an internal references.
+    Direct,
+    /// Lhs is a language level reference and rhs is a value.
+    ValueIntoRef,
+    /// Both lhs and rhs are references.
+    /// In this case, we dereference rhs and assign into the lhs ref.
+    RefIntoRef,
+    /// Rhs is a language level reference and lhs is an internal reference.
+    /// In this case we dereference rhs and assign into lhs.
+    RefIntoValue,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -51,6 +67,7 @@ struct CompilerInfo {
     /// empty value `()` created from scratch.
     /// We still need the constant for completeness.
     mutable: ExtConstUid,
+    mode: AssignmentMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -327,7 +344,7 @@ impl ResolveTypes for HirAssign {
         let lhs_is_ref = matches!(infer.find_type(lhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
         let rhs_is_ref = matches!(infer.find_type(rhs), EdlMaybeType::Fixed(fixed) if fixed.ty == edl_type::EDL_REF);
 
-        if lhs_is_ref && rhs_is_ref {
+        let assignment_mode = if lhs_is_ref && rhs_is_ref {
             // lhs must be a mutable reference
             let ref_mut = infer.type_reg
                 .new_ref(EdlMaybeType::Unknown, Some(EdlConstValue::from_bool(true)))
@@ -356,6 +373,7 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&lhs_base, &rhs_base) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            AssignmentMode::RefIntoRef
         } else if lhs_is_ref {
             // reference must be mutable
             let ref_mut = infer.type_reg
@@ -383,6 +401,7 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&el_type.uid, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            AssignmentMode::ValueIntoRef
         } else if rhs_is_ref {
             let lhs_mut = self.lhs.mutability(&mut infer);
             if let Err(err) = infer
@@ -406,6 +425,7 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&lhs, &el_type.uid) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            AssignmentMode::RefIntoValue
         } else {
             let lhs_mut = self.lhs.mutability(&mut infer);
             if let Err(err) = infer
@@ -428,8 +448,10 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&lhs, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
-        }
+            AssignmentMode::Direct
+        };
 
+        self.info.as_mut().unwrap().mode = assignment_mode;
         self.info.as_mut().unwrap().deref_lhs = lhs_is_ref;
         self.info.as_mut().unwrap().deref_rhs = rhs_is_ref;
         // resolve again with new constraints
@@ -457,6 +479,7 @@ impl ResolveTypes for HirAssign {
                 finalized_type: EdlMaybeType::Fixed(inferer.type_reg.empty()),
                 deref_rhs: false,
                 deref_lhs: false,
+                mode: AssignmentMode::Direct,
                 mutable,
             });
             own_uid
@@ -560,15 +583,12 @@ impl EdlFnArgument for HirAssign {
     }
 }
 
-impl MakeGraph for HirAssign {
-    fn write_to_graph<B: Backend>(
+impl HirAssign {
+    fn try_write_to_variable<B: Backend>(
         &self,
         graph: &mut MirGraph<B>,
         target: MirValue,
-    ) -> Result<(), HirTranslationError>
-    where
-        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
-    {
+    ) -> Result<bool, HirTranslationError> {
         if let HirExpression::Name(name) = &*self.lhs {
             // if we assign to a plane variable we can just overwrite the entire MIR value
             if let Some(var_id) = name.var_id() {
@@ -600,9 +620,51 @@ impl MakeGraph for HirAssign {
                     &graph.mir_phase.types,
                     DebugSymbols { pos: self.pos },
                 );
-                return Ok(());
+                return Ok(true);
             }
         }
+        Ok(false)
+    }
+}
+
+impl MakeGraph for HirAssign {
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        let mode = self.info.as_ref().unwrap().mode;
+
+        let lhs_value_ty = self.lhs.mir_type(graph)?;
+        let lhs_ty = if mode == AssignmentMode::Direct || mode == AssignmentMode::RefIntoValue {
+            if self.try_write_to_variable(graph, target)? {
+                return Ok(());
+            }
+            lhs_value_ty
+        } else {
+            let lhs_deref_ty = self.lhs.mir_deref_type(graph)?;
+            if lhs_value_ty == lhs_deref_ty {
+                lhs_value_ty
+            } else {
+                // this is an internal reference of a reference.
+                graph.mir_phase.types.get_ref_type(&lhs_value_ty).unwrap()
+            }
+        };
+
+        assert!(graph.mir_phase.types.is_ref(&lhs_ty), "LHS of assignment must be an internal reference");
+        let transfer_type = graph.mir_phase.types.get_ref_type(&lhs_ty).unwrap();
+
+        // deref rhs
+        let rhs_value = if mode == AssignmentMode::RefIntoRef || mode == AssignmentMode::RefIntoValue {
+            let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
+
+            HirDeref::write_deref_to_graph(&self.rhs, graph, )
+        } else {
+
+        };
 
         if self.lhs.can_be_assigned_to() != InternalMutability::Mutable {
             let lhs_ty = self.lhs.get_type(&mut graph.hir_phase)?.unwrap();

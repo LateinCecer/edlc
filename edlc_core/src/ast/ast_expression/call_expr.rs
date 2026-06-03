@@ -21,10 +21,16 @@ use crate::ast::ast_error::AstTranslationError;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_call::HirFunctionCall;
 use crate::hir::HirPhase;
-use crate::lexer::{Punct, SrcPos, Token};
+use crate::lexer::{KeyWord, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
 
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallParamModifier {
+    Mutable,
+    None,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstCallExpr {
@@ -33,6 +39,7 @@ pub struct AstCallExpr {
     src: ModuleSrc,
     lhs: Box<AstExpr>,
     params: Vec<AstExpr>,
+    modifiers: Vec<CallParamModifier>,
 }
 
 impl AstElement for AstCallExpr {
@@ -56,24 +63,35 @@ impl AstCallExpr {
         // parse arguments
         let scope = *parser.env.current_scope().wrap(pos)?;
         let src = parser.module_src.clone();
-        let args = Self::parse_params(parser)?;
+        let (params, modifiers) = Self::parse_params(parser)?;
         Ok(AstCallExpr {
             pos,
             scope,
             src,
             lhs,
-            params: args,
+            params,
+            modifiers,
         })
     }
 
-    pub fn parse_params(parser: &mut Parser) -> Result<Vec<AstExpr>, ParseError> {
+    pub fn parse_params(parser: &mut Parser) -> Result<(Vec<AstExpr>, Vec<CallParamModifier>), ParseError> {
         let mut args = Vec::new();
+        let mut modifiers = Vec::new();
         loop {
-            if let Ok(local!(Token::Punct(Punct::BracketClose))) = parser.peak() {
-                parser.next_token()?;
-                break;
-            }
+            let param_mod = match parser.peak() {
+                Ok(local!(Token::Punct(Punct::BracketClose))) => {
+                    parser.next_token()?;
+                    break;
+                }
+                Ok(local!(Token::Key(KeyWord::Mut))) => {
+                    parser.next_token()?;
+                    CallParamModifier::Mutable
+                }
+                _ => CallParamModifier::None,
+            };
+
             args.push(AstExpr::parse(parser)?);
+            modifiers.push(param_mod);
 
             if let Ok(local!(Token::Punct(Punct::Comma))) = parser.peak() {
                 parser.next_token()?;
@@ -83,7 +101,7 @@ impl AstCallExpr {
                 break;
             }
         }
-        Ok(args)
+        Ok((args, modifiers))
     }
 }
 

@@ -14,7 +14,8 @@
  *    limitations under the License.
  */
 use crate::ast::ast_error::AstTranslationError;
-use crate::ast::ast_type::AstType;
+use crate::ast::ast_expression::AstExpr;
+use crate::ast::ast_type::{AstType, AstTypeName};
 use crate::ast::IntoHir;
 use crate::file::ModuleSrc;
 use crate::hir::hir_where::{HirWhere, HirWhereConstraint};
@@ -24,12 +25,18 @@ use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParse
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
-struct WhereConstraint {
+struct WhereTypeConstraint {
     pos: SrcPos,
     constrainee: AstType,
     constraints: Vec<AstType>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct WhereConstConstraint {
+    pos: SrcPos,
+    constrainee: AstTypeName,
+    constraints: Vec<AstExpr>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 /// AST `where` clause.
@@ -37,10 +44,38 @@ pub struct AstWhere {
     src: ModuleSrc,
     scope: ScopeId,
     pos: SrcPos,
-    constraints: Vec<WhereConstraint>,
+    constraints: Vec<WhereTypeConstraint>,
+    const_constraints: Vec<WhereConstConstraint>,
 }
 
-impl Parsable for WhereConstraint {
+impl Parsable for WhereConstConstraint {
+    fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
+        expect_token!(parser; (Token::Key(KeyWord::Const))
+            expected "const constraint starting with `const`")?;
+        let constrainee = AstTypeName::parse(parser)?;
+        let pos = expect_token!(parser; (Token::Punct(Punct::Colon)), pos => pos
+            expected "const constraints starting with `:`")?;
+
+        let mut constraints = Vec::new();
+        loop {
+            let constraint = AstExpr::parse_primary(parser)?;
+            constraints.push(constraint);
+            match parser.peak() {
+                Ok(local!(Token::Punct(Punct::Or))) => {
+                    parser.next_token()?;
+                }
+                _ => break,
+            }
+        }
+        Ok(WhereConstConstraint {
+            pos,
+            constrainee,
+            constraints,
+        })
+    }
+}
+
+impl Parsable for WhereTypeConstraint {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
         let constrainee = AstType::parse(parser)?;
         let pos = expect_token!(parser; (Token::Punct(Punct::Colon)), pos => pos
@@ -57,7 +92,7 @@ impl Parsable for WhereConstraint {
                 _ => break,
             }
         }
-        Ok(WhereConstraint {
+        Ok(WhereTypeConstraint {
             pos,
             constrainee,
             constraints,
@@ -72,7 +107,8 @@ impl Parsable for AstWhere {
         let src = parser.module_src.clone();
         let scope = *parser.env.current_scope().wrap(pos)?;
 
-        let mut constraints = Vec::new();
+        let mut const_constraints = Vec::new();
+        let mut type_constraints = Vec::new();
         loop {
             if let Ok(local!(Token::Punct(
                 Punct::BraceOpen | Punct::Semicolon
@@ -80,7 +116,14 @@ impl Parsable for AstWhere {
                 break
             }
 
-            constraints.push(WhereConstraint::parse(parser)?);
+            match parser.peak() {
+                Ok(local!(Token::Punct(Punct::BraceOpen | Punct::Semicolon | Punct::Assign))) => break,
+                Ok(local!(Token::Key(KeyWord::Const))) => {
+                    const_constraints.push(WhereConstConstraint::parse(parser)?);
+                }
+                _ => type_constraints.push(WhereTypeConstraint::parse(parser)?),
+            }
+
             if let Ok(local!(Token::Punct(Punct::Comma))) = parser.peak() {
                 parser.next_token()?;
             } else {
@@ -91,7 +134,8 @@ impl Parsable for AstWhere {
             pos,
             src,
             scope,
-            constraints,
+            const_constraints,
+            constraints: type_constraints,
         })
     }
 }
@@ -107,7 +151,7 @@ impl AstWhere {
 }
 
 
-impl IntoHir for WhereConstraint {
+impl IntoHir for WhereTypeConstraint {
     type Output = HirWhereConstraint;
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
