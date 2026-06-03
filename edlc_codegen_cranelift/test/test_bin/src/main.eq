@@ -229,15 +229,23 @@ impl<T, const N: usize> SVector<T, N> {
     }
 }
 
-fn write_buffer(mut x: &mut i32) {
+fn write_literal(x: &mut i32) {
     println(x);
     x = 42;
+}
+
+fn write_buffer(x: &mut i32, y: &i32) {
+    println(x);
+    x = y;
 }
 
 #[test]
 fn test_write_buffer() {
     let mut x: i32 = 0;
-    write_buffer(x);
+    write_buffer(x, 67);
+    core::assert(x == 67);
+
+    write_literal(x);
     core::assert(x == 42);
 }
 

@@ -61,6 +61,8 @@ struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    transfer_uid: TypeUid,
+    transfer_type: EdlMaybeType,
     deref_lhs: bool,
     deref_rhs: bool,
     /// The return value of the assign expression **must** always be immutable, since it is just an
@@ -297,6 +299,31 @@ impl HirAssign {
                 });
             }
         } else {
+            if self.lhs.can_be_assigned_to() != InternalMutability::Mutable {
+                let mut remarks = vec![];
+
+                let error_msg = [
+                    TypeArgument::new_display(&"cannot assign to immutable expression")
+                ];
+                remarks.push(SrcError::Single {
+                    pos: self.pos.into(),
+                    src: self.src.clone(),
+                    error: TypeArguments::new(&error_msg),
+                });
+
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"LHS of assign operation must be marked as mutable"),
+                    ]),
+                    &remarks,
+                    None,
+                );
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::NotMutable("LHS of assign expressions must be mutable".to_string()))
+                });
+            }
+
             phase.check_report_expr(
                 format_args!("LHS and RHS of an assignment operation must have the same type"),
                 &self.lhs,
@@ -335,6 +362,7 @@ impl ResolveTypes for HirAssign {
         let mut infer = phase.infer_from(infer_state);
         let lhs = self.lhs.get_type_uid(&mut infer);
         let rhs = self.rhs.get_type_uid(&mut infer);
+        let transfer_uid = self.info.as_ref().unwrap().transfer_uid;
 
         // resolve rhs & lhs first time for auto referencing
         self.rhs.resolve_types(phase, infer_state)?;
@@ -373,6 +401,9 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&lhs_base, &rhs_base) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            if let Err(err) = infer.at(node).eq(&lhs_base, &transfer_uid) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             AssignmentMode::RefIntoRef
         } else if lhs_is_ref {
             // reference must be mutable
@@ -401,6 +432,9 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&el_type.uid, &rhs) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            if let Err(err) = infer.at(node).eq(&el_type.uid, &transfer_uid) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             AssignmentMode::ValueIntoRef
         } else if rhs_is_ref {
             let lhs_mut = self.lhs.mutability(&mut infer);
@@ -425,6 +459,9 @@ impl ResolveTypes for HirAssign {
             if let Err(err) = infer.at(node).eq(&lhs, &el_type.uid) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
+            if let Err(err) = infer.at(node).eq(&lhs, &transfer_uid) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
             AssignmentMode::RefIntoValue
         } else {
             let lhs_mut = self.lhs.mutability(&mut infer);
@@ -446,6 +483,9 @@ impl ResolveTypes for HirAssign {
                 ]));
             }
             if let Err(err) = infer.at(node).eq(&lhs, &rhs) {
+                return Err(report_infer_error(err, infer_state, phase));
+            }
+            if let Err(err) = infer.at(node).eq(&lhs, &transfer_uid) {
                 return Err(report_infer_error(err, infer_state, phase));
             }
             AssignmentMode::Direct
@@ -473,10 +513,14 @@ impl ResolveTypes for HirAssign {
             let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
             inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
 
+            let transfer_uid = inferer.new_type(node);
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Fixed(inferer.type_reg.empty()),
+                transfer_uid,
+                transfer_type: EdlMaybeType::Unknown,
                 deref_rhs: false,
                 deref_lhs: false,
                 mode: AssignmentMode::Direct,
@@ -487,6 +531,10 @@ impl ResolveTypes for HirAssign {
     }
 
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
+        let info = self.info.as_mut().unwrap();
+        let transfer_type = inferer.find_type(info.transfer_uid);
+        info.transfer_type = transfer_type;
+
         self.lhs.finalize_types(inferer);
         self.rhs.finalize_types(inferer);
     }
@@ -588,7 +636,11 @@ impl HirAssign {
         &self,
         graph: &mut MirGraph<B>,
         target: MirValue,
-    ) -> Result<bool, HirTranslationError> {
+        transfer_type: MirTypeId,
+    ) -> Result<bool, HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
         if let HirExpression::Name(name) = &*self.lhs {
             // if we assign to a plane variable we can just overwrite the entire MIR value
             if let Some(var_id) = name.var_id() {
@@ -605,10 +657,22 @@ impl HirAssign {
                     });
                 }
 
-                let lhs_value = *graph.var_mapper.get(var_id).unwrap();
-                self.rhs.write_to_graph(graph, lhs_value)?;
+                // write RHS
+                let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
+                let rhs_value = *graph.var_mapper.get(var_id).unwrap();
+                assert_eq!(graph.graph.get_var_type(&rhs_value), &transfer_type);
+
+                if self.info.as_ref().unwrap().deref_rhs {
+                    let tmp_ty = graph.mir_phase.types
+                        .get_ref_type(&rhs_value_ty).unwrap();
+                    assert_eq!(tmp_ty, transfer_type);
+                    HirDeref::write_deref_to_graph(&self.rhs, graph, rhs_value, self.pos)?;
+                } else {
+                    assert_eq!(rhs_value_ty, transfer_type);
+                    self.rhs.write_to_graph(graph, rhs_value)?;
+                }
                 if graph.is_current_sealed() {
-                    return Ok(()); // early return in value
+                    return Ok(true);
                 }
 
                 let empty = graph.graph.expressions
@@ -636,69 +700,81 @@ impl MakeGraph for HirAssign {
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let mode = self.info.as_ref().unwrap().mode;
+        let info = self.info.as_ref().unwrap();
+        if !info.transfer_type.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: info.transfer_type.clone(),
+                pos: self.pos,
+            });
+        }
+        let EdlMaybeType::Fixed(transfer_type) = &info.transfer_type else {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: info.transfer_type.clone(),
+                pos: self.pos,
+            });
+        };
 
+        let target_ref_type = graph.hir_phase.types.new_ref(
+            EdlMaybeType::Fixed(transfer_type.clone()),
+            Some(EdlConstValue::from_bool(true)),
+        ).map_err(|err| HirError::new_edl(self.pos, err))?;
+        let transfer_type = graph.mir_phase.types
+            .mir_id(transfer_type, &graph.hir_phase.types)?;
+        let target_ty = graph.mir_phase.types
+            .mir_id(&target_ref_type, &graph.hir_phase.types)?;
+        assert!(
+            graph.mir_phase.types.is_ref(&target_ty),
+            "LHS of assignment must be an internal reference",
+        );
+
+        // fetch LHS
         let lhs_value_ty = self.lhs.mir_type(graph)?;
-        let lhs_ty = if mode == AssignmentMode::Direct || mode == AssignmentMode::RefIntoValue {
-            if self.try_write_to_variable(graph, target)? {
+        let lhs_value = graph.graph.create_temp_variable(target_ty);
+        if info.deref_lhs {
+            let lhs_deref = self.lhs.mir_deref_type(graph)?;
+            if lhs_value_ty == lhs_deref {
+                assert_eq!(lhs_value_ty, target_ty);
+                self.lhs.write_to_graph(graph, lhs_value)?;
+            } else {
+                let tmp_ty = graph.mir_phase.types
+                    .get_ref_type(&lhs_value_ty).unwrap();
+                assert_eq!(tmp_ty, target_ty);
+                HirDeref::write_deref_to_graph(&self.lhs, graph, lhs_value, self.pos)?;
+            }
+        } else {
+            if self.try_write_to_variable(graph, target, transfer_type)? {
                 return Ok(());
             }
-            lhs_value_ty
+            assert_eq!(lhs_value_ty, target_ty);
+            self.lhs.write_to_graph(graph, lhs_value)?;
+        }
+        if graph.is_current_sealed() {
+            return Ok(());
+        }
+
+        // fetch RHS
+        let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
+        let rhs_value = graph.graph.create_temp_variable(transfer_type);
+        if info.deref_rhs {
+            let tmp_ty = graph.mir_phase.types
+                .get_ref_type(&rhs_value_ty).unwrap();
+            assert_eq!(tmp_ty, transfer_type);
+            HirDeref::write_deref_to_graph(&self.rhs, graph, rhs_value, self.pos)?;
         } else {
-            let lhs_deref_ty = self.lhs.mir_deref_type(graph)?;
-            if lhs_value_ty == lhs_deref_ty {
-                lhs_value_ty
-            } else {
-                // this is an internal reference of a reference.
-                graph.mir_phase.types.get_ref_type(&lhs_value_ty).unwrap()
-            }
-        };
-
-        assert!(graph.mir_phase.types.is_ref(&lhs_ty), "LHS of assignment must be an internal reference");
-        let transfer_type = graph.mir_phase.types.get_ref_type(&lhs_ty).unwrap();
-
-        // deref rhs
-        let rhs_value = if mode == AssignmentMode::RefIntoRef || mode == AssignmentMode::RefIntoValue {
-            let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
-
-            HirDeref::write_deref_to_graph(&self.rhs, graph, )
-        } else {
-
-        };
-
-        if self.lhs.can_be_assigned_to() != InternalMutability::Mutable {
-            let lhs_ty = self.lhs.get_type(&mut graph.hir_phase)?.unwrap();
-            if lhs_ty.ty != edl_type::EDL_REF || !lhs_ty.get_ref_mutability()?.clone().unwrap_literal().unwrap_bool() {
-                // can assign to references, so check if this is not a reference
-                dbg!(&self.lhs);
-                return Err(HirTranslationError::CannotAssignToExpr {
-                    pos: self.pos,
-                    msg: "expression is not mutable".to_string(),
-                })
-            }
+            assert_eq!(rhs_value_ty, transfer_type);
+            self.rhs.write_to_graph(graph, rhs_value)?;
+        }
+        if graph.is_current_sealed() {
+            return Ok(());
         }
 
         // use the MIR assign expression to execute a partial assign
-        let lhs_value_ty = self.lhs.mir_type(graph)?;
-        let rhs_value_ty = self.rhs.mir_deref_type(graph)?;
-        let lhs_value = graph.graph.create_temp_variable(lhs_value_ty);
-        let rhs_value = graph.graph.create_temp_variable(rhs_value_ty);
-        self.lhs.write_to_graph(graph, lhs_value)?;
-        if graph.is_current_sealed() {
-            return Ok(()); // early return in lhs
-        }
-
-        self.rhs.write_to_graph(graph, rhs_value)?;
-        if graph.is_current_sealed() {
-            return Ok(()); // early return in rhs
-        }
-
         let assign = MirAssign {
             lhs: lhs_value,
             rhs: rhs_value,
             id: graph.mir_phase.new_id(),
         };
-        assign.assert_check(&graph.graph, &graph.mir_phase.types);
+        assign.assert_check(graph.graph, &graph.mir_phase.types);
         let assign = graph.graph.expressions.insert_assign(assign);
         graph.graph.insert_def(
             graph.current_block,
