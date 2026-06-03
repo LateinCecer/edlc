@@ -37,6 +37,7 @@ use crate::ast::ast_expression::method_expr::AstMethodExpr;
 use crate::ast::ast_expression::prefix_expr::{AstPrefixExpr, PrefixOperator};
 use crate::ast::ast_expression::return_expr::AstReturn;
 use crate::ast::ast_expression::type_init_expr::TypeInitExpr;
+use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::HirExpression;
 use crate::hir::HirPhase;
@@ -82,7 +83,7 @@ pub enum AstExpr {
     As(AstAsExpr),
     Use(AstUseExpr),
     Block(AstBlock),
-    Elicit(SrcPos),
+    Elicit(SrcPos, ModuleSrc),
     Prefix(AstPrefixExpr),
     If(AstIf),
     For(AstFor),
@@ -176,8 +177,8 @@ impl IntoHir for AstExpr {
             AstExpr::Block(block) => {
                 block.hir_repr(parser).map(|lit| lit.into())
             }
-            AstExpr::Elicit(pos) => {
-                Err(AstTranslationError::ElicitValue { pos })
+            AstExpr::Elicit(pos, src) => {
+                Err(AstTranslationError::ElicitValue { pos, src })
             }
             AstExpr::Prefix(val) => {
                 val.hir_repr(parser)
@@ -214,7 +215,7 @@ impl AstElement for AstExpr {
             AstExpr::As(x) => x.pos(),
             AstExpr::Use(x) => x.pos(),
             AstExpr::Block(x) => x.pos(),
-            AstExpr::Elicit(pos) => pos,
+            AstExpr::Elicit(pos, _) => pos,
             AstExpr::Method(val) => val.pos(),
             AstExpr::Prefix(val) => val.pos(),
             AstExpr::For(val) => val.pos(),
@@ -304,7 +305,7 @@ impl AstExpr {
             }
             Ok(local!(Token::Ident(ident))) if ident == "false" || ident == "true"
                 => AstBoolExpr::parse(parser).map(|e| e.into()),
-            Ok(local!(Token::Ident(ident))) if ident == "_" => Ok(AstExpr::Elicit(parser.next_token()?.pos)),
+            Ok(local!(Token::Ident(ident))) if ident == "_" => Ok(AstExpr::Elicit(parser.next_token()?.pos, parser.module_src.clone())),
             Ok(local!(Token::Ident(_))) => {
                 let name = AstTypeName::parse(parser);
                 // check for named struct init

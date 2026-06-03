@@ -172,6 +172,7 @@ impl AstTypeDef {
         ).map_err(|err| AstTranslationError::ResolveError {
             err,
             pos: self.pos,
+            src: self.src.clone(),
         })?;
 
         // go back into the parent scope to find the type id
@@ -234,7 +235,7 @@ impl AstTypeDef {
                     ItemSrc::Intrinsic("".to_string()),
                     ItemInit::Alias(env_id, self.src.clone(), self.pos),
                     &mut phase.types,
-                ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
                 let alias_id = phase.res
                     .find_top_level_alias(&vec![self.name.clone()].into())
@@ -262,7 +263,7 @@ impl AstTypeDef {
                 let env_id = phase.types.insert_parameter_env(edl_env);
                 phase.res.revert_to_scope(&self.scope);
                 phase.res.push_env(env_id, &mut phase.types)
-                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src })?;
 
                 base_name.push(self.name.clone());
                 let alias_id = phase.types.insert_alias_type(

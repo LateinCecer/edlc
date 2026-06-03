@@ -201,6 +201,7 @@ impl IntoHir for AstIf {
                 // this causing logic issues in the code is very high - thus we do not allow this.
                 return Err(AstTranslationError::UnreachableCode {
                     pos: *block.pos().unwrap(),
+                    src: self.src.clone(),
                     expl: format!("the `if` expression starting at {} is exhausted by the \
                     unconditional `else` block located at {}. All subsequent `else` and `else if` \
                     blocks are unreachable and likely the cause of logic bugs",

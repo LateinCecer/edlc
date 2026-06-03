@@ -30,7 +30,11 @@ use crate::core::edl_type::{EdlAliasId, EdlConstId, EdlEnvId, EdlTraitInstance, 
 use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
+use crate::parser::ReportError;
+use crate::report::ReportableError;
 use crate::resolver::namespace::Namespace;
 
 
@@ -183,6 +187,27 @@ impl Display for ResolveError {
 }
 
 impl std::error::Error for ResolveError {}
+
+impl ReportableError for ResolveError {
+    fn report_err(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc) {
+        // TODO implement this properly
+        phase.report_error(
+            TypeArguments::new(&[
+                TypeArgument::new_display(&"name resolver error"),
+            ]),
+            &[
+                SrcError::Single {
+                    src: src.clone(),
+                    pos: pos.clone().into(),
+                    error: TypeArguments::new(&[
+                        TypeArgument::new_display(&"error message not fully implemented yet"),
+                    ])
+                }
+            ],
+            None,
+        );
+    }
+}
 
 
 #[derive(Clone, Debug, Eq, PartialEq)]

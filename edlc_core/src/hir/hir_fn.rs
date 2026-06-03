@@ -120,10 +120,7 @@ impl HirFnSignature {
                 scope: self.scope,
             },
             &mut phase.types
-        ).map_err(|err| HirError {
-            pos: self.pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
-        })?;
+        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
 
         let func = phase.res.find_top_level_function(
             &vec![self.name.clone()].into(), &phase.types).unwrap();
@@ -173,7 +170,7 @@ impl ResolveNames for HirFn {
             });
             phase.res.revert_to_scope(&self.body.scope);
             phase.res.push_local_var(param.name.clone(), var_id)
-                .map_err(|err| HirError::new_res(param.pos, err))?;
+                .map_err(|err| HirError::new_res(param.pos, err, self.signature.src.clone()))?;
             param.info = Some(var_id);
         }
         // resolve names inside the functions' body

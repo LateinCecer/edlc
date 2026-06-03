@@ -127,6 +127,7 @@ impl IntoHir for AstCallExpr {
             _ => {
                 Err(AstTranslationError::Callable {
                     pos: self.pos,
+                    src: self.src,
                     expr: self.lhs.clone(),
                 })
             }

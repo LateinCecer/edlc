@@ -17,7 +17,7 @@
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::core::edl_type::EdlMaybeType;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_let::HirLet;
@@ -98,7 +98,7 @@ impl IntoHir for AstLetExpr {
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         let ty = if let Some(ty_hint) = self.type_hint {
-            ty_hint.hir_repr(parser)?.edl_repr(parser)?
+            ty_hint.hir_repr(parser)?.edl_repr(parser).wrap_ast(&self.src)?
         } else {
             EdlMaybeType::Unknown
         };

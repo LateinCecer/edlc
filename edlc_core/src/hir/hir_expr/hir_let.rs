@@ -432,7 +432,7 @@ impl HirLet {
     /// currently located in.
     fn register(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         let mut level_name = phase.res.current_level_name()
-            .map_err(|err| HirError::new_res(self.pos, err))?;
+            .map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         level_name.push(self.name.clone());
         let var_id = phase.vars.add_var(EdlVar {
             ty: self.ty_hint.clone(),
@@ -454,12 +454,12 @@ impl HirLet {
                     id: var_id,
                 },
                 &mut phase.types,
-            ).map_err(|e| HirError::new_res(self.pos, e))?;
+            ).map_err(|e| HirError::new_res(self.pos, e, self.src.clone()))?;
         } else {
             phase.res.push_local_var(
                 self.name.clone(),
                 var_id,
-            ).map_err(|e| HirError::new_res(self.pos, e))?;
+            ).map_err(|e| HirError::new_res(self.pos, e, self.src.clone()))?;
         }
 
         self.info = Some(CompilerInfo {

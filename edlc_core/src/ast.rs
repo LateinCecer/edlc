@@ -18,7 +18,7 @@ use std::mem;
 use std::sync::Arc;
 use log::{debug, warn};
 use crate::ast::ast_const::AstConst;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::ast_use::AstUseExpr;
 use crate::ast::ast_expression::let_expr::AstLetExpr;
 use crate::ast::ast_fn::{AstFn, AstFnModifier};
@@ -513,14 +513,14 @@ impl AstModule {
 
     pub fn push_constant_definition(c: &AstConst, phase: &mut HirPhase) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
-        let edl_ty = ty.edl_repr(phase)
-            .map_err(|e| AstTranslationError::HirError { err: e })?; // RustRover: false positive
+        let edl_ty = ty.edl_repr(phase).wrap_ast(&c.src)?; // RustRover: false positive
 
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E031,
             }),
         };
@@ -529,6 +529,7 @@ impl AstModule {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty),
             });
         }
@@ -539,6 +540,7 @@ impl AstModule {
             .map_err(|e| AstTranslationError::ResolveError {
                 pos: c.pos,
                 err: e,
+                src: c.src.clone(),
             })?;
         const_name.push(c.name.clone());
 
@@ -551,6 +553,7 @@ impl AstModule {
         ).map_err(|e| AstTranslationError::ResolveError {
             pos: c.pos,
             err: e,
+            src: c.src.clone(),
         })?;
         Ok(())
     }
@@ -611,7 +614,7 @@ impl AstModule {
                             }],
                             None,
                         );
-                        return Err(AstTranslationError::ResolveError { err, pos: u.pos });
+                        return Err(AstTranslationError::ResolveError { err, pos: u.pos, src: self.src.clone() });
                     }
                 },
                 AstItem::LoadedModule(module, _) => {
@@ -658,6 +661,7 @@ impl IntoHir for AstModule {
             }
         }
         Ok(HirModule {
+            src: self.src.clone(),
             items,
             scope: self.scope,
             full_name: self.name,

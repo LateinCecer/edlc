@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::AstExpr;
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::ast_type_def::{AstStructMember, StructDef};
@@ -330,15 +330,15 @@ impl AstTypeNameEntry {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AstType {
-    Base(SrcPos, AstTypeName),
-    Array(SrcPos, Box<AstType>, Box<AstExpr>),
-    Slice(SrcPos, Box<AstType>),
-    Elicit(SrcPos),
-    Empty(SrcPos),
-    Ref(SrcPos, Box<AstType>, bool),
-    Tuple(SrcPos, Vec<AstStructMember>),
-    Never(SrcPos),
-    Dict(SrcPos, Vec<AstStructMember>),
+    Base(SrcPos, ModuleSrc, AstTypeName),
+    Array(SrcPos, ModuleSrc, Box<AstType>, Box<AstExpr>),
+    Slice(SrcPos, ModuleSrc, Box<AstType>),
+    Elicit(SrcPos, ModuleSrc),
+    Empty(SrcPos, ModuleSrc),
+    Ref(SrcPos, ModuleSrc, Box<AstType>, bool),
+    Tuple(SrcPos, ModuleSrc, Vec<AstStructMember>),
+    Never(SrcPos, ModuleSrc),
+    Dict(SrcPos, ModuleSrc, Vec<AstStructMember>),
 }
 
 impl Parsable for AstType {
@@ -351,9 +351,9 @@ impl Parsable for AstType {
                 let ty = if let Ok(local!(Token::Punct(Punct::Semicolon))) = parser.peak() {
                     parser.next_token()?;
                     let size = AstExpr::parse(parser)?;
-                    Self::Array(pos, Box::new(base), Box::new(size))
+                    Self::Array(pos, parser.module_src.clone(), Box::new(base), Box::new(size))
                 } else {
-                    Self::Slice(pos, Box::new(base))
+                    Self::Slice(pos, parser.module_src.clone(), Box::new(base))
                 };
 
                 expect_token!(parser; (Token::Punct(Punct::SquareClose))
@@ -364,20 +364,20 @@ impl Parsable for AstType {
                 let (items, contains_comma) = StructDef::parse_tuple_members(parser)?;
                 if !contains_comma {
                     if items.is_empty() {
-                        Ok(Self::Empty(pos))
+                        Ok(Self::Empty(pos, parser.module_src.clone()))
                     } else {
                         Ok(items[0].ty.clone())
                     }
                 } else {
-                    Ok(Self::Tuple(pos, items))
+                    Ok(Self::Tuple(pos, parser.module_src.clone(), items))
                 }
             }
             Ok(SrcToken { token: Token::Punct(Punct::BraceOpen), pos }) => {
                 let members = StructDef::parse_dict_members(parser)?;
-                Ok(Self::Dict(pos, members))
+                Ok(Self::Dict(pos, parser.module_src.clone(), members))
             },
             Ok(SrcToken { token: Token::Punct(Punct::Not), pos }) => {
-                Ok(Self::Never(pos))
+                Ok(Self::Never(pos, parser.module_src.clone()))
             }
             Ok(SrcToken { token: Token::Punct(Punct::And), pos }) => {
                 // check for mutability
@@ -389,7 +389,7 @@ impl Parsable for AstType {
                 };
 
                 let base = AstType::parse(parser)?;
-                Ok(Self::Ref(pos, Box::new(base), mutable))
+                Ok(Self::Ref(pos, parser.module_src.clone(), Box::new(base), mutable))
             }
             Ok(SrcToken { token: Token::Punct(Punct::Lt), pos: _}) => {
                 let ty = Self::parse(parser)?;
@@ -401,13 +401,13 @@ impl Parsable for AstType {
                 Ok(ty)
             }
             Ok(SrcToken { token: Token::Ident(name), pos }) if name == "_" => {
-                Ok(AstType::Elicit(pos))
+                Ok(AstType::Elicit(pos, parser.module_src.clone()))
             }
             Ok(SrcToken { token: Token::Ident(name), pos }) => {
-                Ok(AstType::Base(pos, AstTypeName::parse_with_string(name, pos, parser, false)?))
+                Ok(AstType::Base(pos, parser.module_src.clone(), AstTypeName::parse_with_string(name, pos, parser, false)?))
             }
             Ok(SrcToken { token: Token::Key(KeyWord::SelfType), pos }) => {
-                Ok(AstType::Base(pos, AstTypeName::parse_with_self(pos, parser, false)?))
+                Ok(AstType::Base(pos, parser.module_src.clone(), AstTypeName::parse_with_self(pos, parser, false)?))
             }
             Ok(t) => Err(ParseError::UnexpectedToken(
                 Box::new(t),
@@ -423,15 +423,15 @@ impl Parsable for AstType {
 impl AstElement for AstType {
     fn pos(&self) -> &SrcPos {
         match self {
-            AstType::Base(pos, _) => pos,
-            AstType::Array(pos, _, _) => pos,
-            AstType::Slice(pos, _) => pos,
-            AstType::Elicit(pos) => pos,
-            AstType::Empty(pos) => pos,
-            AstType::Ref(pos, _, _) => pos,
-            AstType::Tuple(pos, _) => pos,
-            AstType::Never(pos) => pos,
-            AstType::Dict(pos, _) => pos,
+            AstType::Base(pos, _, _) => pos,
+            AstType::Array(pos, _, _, _) => pos,
+            AstType::Slice(pos, _, _) => pos,
+            AstType::Elicit(pos, _) => pos,
+            AstType::Empty(pos, _) => pos,
+            AstType::Ref(pos, _, _, _) => pos,
+            AstType::Tuple(pos, _, _) => pos,
+            AstType::Never(pos, _) => pos,
+            AstType::Dict(pos, _, _) => pos,
         }
     }
 }
@@ -448,7 +448,11 @@ impl AstTypeName {
                 // look for parameter env at the current qualifier name
                 res.revert_to_scope(&el.scope);
                 let env = res.find_top_level_env(&qual, type_reg)
-                    .ok_or(AstTranslationError::MisplacedTypeParams { pos: el.pos, name: qual.clone() })?;
+                    .ok_or(AstTranslationError::MisplacedTypeParams {
+                        pos: el.pos,
+                        src: el.src.clone(),
+                        name: qual.clone(),
+                    })?;
                 stack.add_env(env, type_reg).unwrap();
             }
         }
@@ -590,18 +594,18 @@ impl IntoHir for AstType {
 
     fn hir_repr(self, phase: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         match self {
-            AstType::Base(pos, name) => {
+            AstType::Base(pos, _src, name) => {
                 Ok(HirType::Base(pos, name.hir_repr(phase)?))
             }
-            AstType::Array(pos, el, len) => {
+            AstType::Array(pos, _src, el, len) => {
                 let element_ty = el.hir_repr(phase)?;
 
                 let len_value = match len.as_ref() {
-                    AstExpr::Elicit(_) => None,
+                    AstExpr::Elicit(_, _) => None,
                     _ => {
                         let mut array_len = len.hir_repr(phase)?;
                         let len_type = phase.types.usize();
-                        array_len.resolve_names(phase)?;
+                        array_len.resolve_names(phase).wrap_ast(array_len.src())?;
 
                         let mut infer_state = InferState::new();
                         let mut infer = phase.infer_from(&mut infer_state);
@@ -610,10 +614,10 @@ impl IntoHir for AstType {
 
                         let type_uid = array_len.get_type_uid(&mut infer);
                         infer.at(node).eq(&type_uid, &len_type).unwrap();
-                        array_len.resolve_types(phase, &mut infer_state)?;
+                        array_len.resolve_types(phase, &mut infer_state).wrap_ast(array_len.src())?;
                         array_len.finalize_types(&mut phase.infer_from(&mut infer_state));
 
-                        Some(array_len.as_const_value(phase)?)
+                        Some(array_len.as_const_value(phase).wrap_ast(array_len.src())?)
                     }
                 };
                 Ok(HirType::Array(
@@ -622,25 +626,25 @@ impl IntoHir for AstType {
                     len_value,
                 ))
             }
-            AstType::Slice(pos, el) => {
+            AstType::Slice(pos, _src, el) => {
                 Ok(HirType::Slice(pos, Box::new(el.hir_repr(phase)?)))
             }
-            AstType::Elicit(pos) => {
+            AstType::Elicit(pos, _) => {
                 Ok(HirType::Elicit(pos))
             }
-            AstType::Empty(pos) => {
+            AstType::Empty(pos, _) => {
                 Ok(HirType::Empty(pos))
             }
-            AstType::Ref(pos, base, mutable) => {
+            AstType::Ref(pos, _, base, mutable) => {
                 Ok(HirType::Ref(pos, Box::new(base.hir_repr(phase)?), mutable))
             },
-            AstType::Tuple(pos, members) => {
+            AstType::Tuple(pos, _, members) => {
                 Ok(HirType::Tuple(pos, members.into_iter()
                     .map(|mem| mem.hir_repr(phase))
                     .collect::<Result<Vec<_>, _>>()?))
             },
-            AstType::Never(pos) => Ok(HirType::Never(pos)),
-            AstType::Dict(pos, members) => {
+            AstType::Never(pos, _) => Ok(HirType::Never(pos)),
+            AstType::Dict(pos, _, members) => {
                 Ok(HirType::Dict(pos, members.into_iter()
                     .map(|mem| mem.hir_repr(phase))
                     .collect::<Result<Vec<_>, _>>()?))
@@ -650,12 +654,30 @@ impl IntoHir for AstType {
 }
 
 impl AstType {
+    pub fn src(&self) -> &ModuleSrc {
+        match self {
+            AstType::Base(_, src, _) => src,
+            AstType::Array(_, src, _, _) => src,
+            AstType::Slice(_, src, _) => src,
+            AstType::Elicit(_, src) => src,
+            AstType::Empty(_, src) => src,
+            AstType::Ref(_, src, _, _) => src,
+            AstType::Tuple(_, src, _) => src,
+            AstType::Never(_, src) => src,
+            AstType::Dict(_, src, _) => src,
+        }
+    }
+
     pub fn trait_repr(self, parser: &mut HirPhase) -> Result<HirTrait, AstTranslationError> {
         match self {
-            AstType::Base(pos, name) => {
-                Ok(HirTrait { pos, name: name.trait_repr(parser)? })
+            AstType::Base(pos, src, name) => {
+                Ok(HirTrait { pos, src, name: name.trait_repr(parser)? })
             }
-            _ => Err(AstTranslationError::InvalidTraitName { pos: *self.pos(), ty: self })
+            _ => Err(AstTranslationError::InvalidTraitName {
+                pos: *self.pos(),
+                src: self.src().clone(),
+                ty: self,
+            })
         }
     }
 }
@@ -696,7 +718,7 @@ mod test {
         let scope = *resolver.current_scope().unwrap();
         assert_eq!(
             AstType::parse(&mut Parser::with_env("std::Option +", &mut resolver, &mut type_reg, module_src.clone())),
-            Ok(AstType::Base(SrcPos { col: 0, line: 0, size: 3 }, AstTypeName::new(vec![
+            Ok(AstType::Base(SrcPos { col: 0, line: 0, size: 3 }, module_src.clone(), AstTypeName::new(vec![
                 AstTypeNameEntry {
                     pos: SrcPos { col: 0, line: 0, size: 3 },
                     scope,
@@ -720,7 +742,7 @@ mod test {
 
         assert_eq!(
             AstType::parse(&mut Parser::with_env("std::Option::<>", &mut resolver, &mut type_reg, module_src.clone())),
-            Ok(AstType::Base(SrcPos { col: 0, line: 0, size: 3 }, AstTypeName::new(vec![
+            Ok(AstType::Base(SrcPos { col: 0, line: 0, size: 3 }, module_src.clone(), AstTypeName::new(vec![
                 AstTypeNameEntry {
                     pos: SrcPos { col: 0, line: 0, size: 3 },
                     scope,
@@ -740,7 +762,7 @@ mod test {
             ])))
         );
 
-        let array_ty = AstType::Base(SrcPos { col: 1, line: 0, size: 3 }, AstTypeName::new(vec![
+        let array_ty = AstType::Base(SrcPos { col: 1, line: 0, size: 3 }, module_src.clone(), AstTypeName::new(vec![
             AstTypeNameEntry {
                 pos: SrcPos { col: 1, line: 0, size: 3 },
                 scope,
@@ -753,9 +775,10 @@ mod test {
 
         let module_src = inline_code!("[f64]");
         assert_eq!(
-            AstType::parse(&mut Parser::with_env("[f64]", &mut resolver, &mut type_reg, module_src)),
+            AstType::parse(&mut Parser::with_env("[f64]", &mut resolver, &mut type_reg, module_src.clone())),
             Ok(AstType::Slice(
                 SrcPos { col: 0, line: 0, size: 1 },
+                module_src.clone(),
                 Box::new(array_ty.clone()),
             ))
         );
@@ -765,6 +788,7 @@ mod test {
             AstType::parse(&mut Parser::with_env("[f64; 32_usize]", &mut resolver, &mut type_reg, module_src.clone())),
             Ok(AstType::Array(
                 SrcPos { col: 0, line: 0, size: 1 },
+                module_src.clone(),
                 Box::new(array_ty),
                 Box::new(AstLiteral::num_lit(
                     SrcPos { col: 6, line: 0, size: 8 },

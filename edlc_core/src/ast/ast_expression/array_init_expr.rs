@@ -134,14 +134,14 @@ impl IntoHir for AstInitExpr {
                 let elements = els.into_iter()
                     .map(|item| item.hir_repr(parser))
                     .collect::<Result<Vec<_>, _>>()?;
-                HirArrayInit::list(self.pos, self.scope, self.src, elements)
-                    .map_err(|err| AstTranslationError::HirError { err })
+                HirArrayInit::list(self.pos, self.scope, self.src.clone(), elements)
+                    .map_err(|err| AstTranslationError::HirError { err, src: self.src })
             }
             InitVariant::Copy { val, len } => {
                 let val = val.hir_repr(parser)?;
                 let len = len.hir_repr(parser)?;
-                HirArrayInit::copy(self.pos, self.scope, self.src, Box::new(val), Box::new(len))
-                    .map_err(|err| AstTranslationError::HirError { err })
+                HirArrayInit::copy(self.pos, self.scope, self.src.clone(), Box::new(val), Box::new(len))
+                    .map_err(|err| AstTranslationError::HirError { err, src: self.src })
             }
         }
     }

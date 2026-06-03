@@ -26,7 +26,7 @@ use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, Mir
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
-use crate::issue::SrcError;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
@@ -285,20 +285,70 @@ impl ResolveNames for HirName {
             let associate = associate_path.as_type_instance(self.pos, phase)?;
             return match associate {
                 SegmentType::Type(ty) => {
-                    let const_val = phase.res.find_associated_const(&ty, &last.path).ok_or(HirError {
-                        pos: self.pos,
-                        ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
-                    })?;
+                    let Some(const_val) = phase.res.find_associated_const(&ty, &last.path) else {
+                        phase.report_error(
+                            TypeArguments::new(&[
+                                TypeArgument::new_display(&"symbol not found"),
+                            ]),
+                            &[
+                                SrcError::Double {
+                                    src: self.src.clone(),
+                                    first: associate_path.src_range().unwrap(),
+                                    second: last.pos.into(),
+                                    error_first: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"symbol is associated to type `"),
+                                        TypeArgument::new_edl(&ty),
+                                        TypeArgument::new_display(&"`"),
+                                    ]),
+                                    error_second: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"unknown identifier"),
+                                    ]),
+                                }
+                            ],
+                            None,
+                        );
+
+                        return Err(HirError {
+                            pos: self.pos,
+                            ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
+                        });
+                    };
+
                     self.info = Some(CompilerInfo {
                         name_src: NameSource::Const(const_val),
                     });
                     Ok(())
                 }
                 SegmentType::Trait(ty) => {
-                    let const_val = phase.res.find_trait_associated_const(&ty, &last.path).ok_or(HirError {
-                        pos: self.pos,
-                        ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
-                    })?;
+                    let Some(const_val) = phase.res.find_trait_associated_const(&ty, &last.path) else {
+                        phase.report_error(
+                            TypeArguments::new(&[
+                                TypeArgument::new_display(&"symbol not found"),
+                            ]),
+                            &[
+                                SrcError::Double {
+                                    src: self.src.clone(),
+                                    first: associate_path.src_range().unwrap(),
+                                    second: last.pos.into(),
+                                    error_first: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"symbol is associated to trait `"),
+                                        TypeArgument::new_edl(&ty),
+                                        TypeArgument::new_display(&"`"),
+                                    ]),
+                                    error_second: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"unknown identifier"),
+                                    ]),
+                                }
+                            ],
+                            None,
+                        );
+
+                        return Err(HirError {
+                            pos: self.pos,
+                            ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
+                        });
+                    };
+
                     self.info = Some(CompilerInfo {
                         name_src: NameSource::Const(const_val),
                     });
@@ -322,22 +372,22 @@ impl HirName {
         }
     }
 
-    fn resolve_as_fn_ptr(&mut self, _phase: &mut HirPhase) -> Result<(), HirError> {
-        // phase.report_error(
-        //     issue::format_type_args!(
-        //         format_args!("unresolved name `{}`", self.name)
-        //     ),
-        //     &[
-        //         SrcError::Single {
-        //             src: self.src.clone(),
-        //             pos: self.pos.into(),
-        //             error: issue::format_type_args!(
-        //                 format_args!("expected name of variable, constant or function")
-        //             )
-        //         }
-        //     ],
-        //     None,
-        // );
+    fn resolve_as_fn_ptr(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+        phase.report_error(
+            issue::format_type_args!(
+                format_args!("unresolved symbol `{}`", self.name)
+            ),
+            &[
+                SrcError::Single {
+                    src: self.src.clone(),
+                    pos: self.pos.into(),
+                    error: issue::format_type_args!(
+                        format_args!("expected name of variable, constant or function")
+                    )
+                }
+            ],
+            None,
+        );
 
         Err(HirError {
             pos: self.pos,

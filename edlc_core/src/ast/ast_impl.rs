@@ -27,6 +27,7 @@ use crate::ast::ast_const::AstConst;
 use crate::ast::ast_where::AstWhere;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlConst, EdlMaybeType, EdlType, EdlTypeInstance};
+use crate::file::ModuleSrc;
 use crate::hir::hir_impl::HirImpl;
 use crate::hir::{HirPhase, IntoEdl};
 use crate::hir::hir_expr::hir_const::HirConst;
@@ -36,6 +37,7 @@ use crate::resolver::{QualifierName, ScopeId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstImpl {
+    src: ModuleSrc,
     pos: SrcPos,
     scope: ScopeId,
     trait_name: Option<AstType>,
@@ -67,6 +69,7 @@ impl Parsable for AstImpl {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
         let pos = expect_token!(parser; (Token::Key(KeyWord::Impl)), pos => pos
             expected "`impl` definition")?;
+        let src = parser.module_src.clone();
         let env = AstParamEnv::parse(parser)?;
         parser.env.push_block();
         let scope = *parser.env.current_scope().wrap(pos)?;
@@ -219,6 +222,7 @@ impl Parsable for AstImpl {
         };
 
         Ok(AstImpl {
+            src,
             pos,
             scope,
             base_name,
@@ -263,7 +267,9 @@ impl AstImpl {
     }
 
     fn push_constant_definition(
-        c: AstConst, phase: &mut HirPhase, association: &EdlTypeInstance
+        c: AstConst,
+        phase: &mut HirPhase,
+        association: &EdlTypeInstance,
     ) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
         let edl_ty = ty.edl_repr(phase)
@@ -288,7 +294,7 @@ impl AstImpl {
         // change scope and push top level item to the name resolver
         phase.res.revert_to_scope(&c.scope);
         let mut constant_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })?;
         constant_name.push(c.name.clone());
 
         let const_id = phase.types.insert_const(EdlConst {
@@ -296,7 +302,7 @@ impl AstImpl {
             name: constant_name,
         });
         phase.res.push_associated_const(association, c.name.clone(), const_id)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })
     }
 }
 
@@ -325,7 +331,7 @@ impl IntoHir for AstImpl {
         // push `Self` type to the resolver
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_self_type(base_name_edl.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         let trait_name_edl = if let Some(trait_name) = self.trait_name {
             let mut trait_name_hir = trait_name.trait_repr(parser)?;
@@ -334,7 +340,7 @@ impl IntoHir for AstImpl {
             let trait_name = &parser.types.get_trait(edl_id.trait_id).unwrap().name;
             parser.res.revert_to_scope(&self.scope);
             parser.res.push_association(base_name_edl.clone(), trait_name.clone())
-                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
             Some(edl_id)
         } else {
@@ -384,7 +390,7 @@ impl IntoHir for AstImpl {
             let state = type_def.translate_as_associate(associate_name.clone(), parser)?;
             parser.res.revert_to_scope(&self.scope);
             state.push_type_associated_alias(&base_name_edl, &mut parser.res, &parser.types)
-                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
             resolver.insert(state);
         }
         // --> resolving use statements would go here
@@ -395,6 +401,6 @@ impl IntoHir for AstImpl {
         for func in self.funcs.into_iter() {
             body.push(func.hir_repr(parser)?);
         }
-        Ok(HirImpl::new(self.pos, self.scope, base_scope, trait_name_edl, base_name_edl, env_id, body ))
+        Ok(HirImpl::new(self.src.clone(), self.pos, self.scope, base_scope, trait_name_edl, base_name_edl, env_id, body ))
     }
 }

@@ -127,8 +127,8 @@ impl IntoHir for AstLiteral {
         match self.val {
             LiteralValue::Str(s) => Ok(HirLiteral::str(self.pos, self.scope, self.src, s)),
             LiteralValue::Char(c) => Ok(HirLiteral::char(self.pos, self.scope, self.src, c)),
-            LiteralValue::Num(num) => HirLiteral::number(self.pos, self.scope, self.src, num, &parser.types)
-                .map_err(|e| AstTranslationError::EdlError { pos: self.pos, err: e }),
+            LiteralValue::Num(num) => HirLiteral::number(self.pos, self.scope, self.src.clone(), num, &parser.types)
+                .map_err(|e| AstTranslationError::EdlError { pos: self.pos, src: self.src, err: e }),
         }
     }
 }

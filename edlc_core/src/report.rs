@@ -14,6 +14,7 @@
  *    limitations under the License.
  */
 use crate::file::ModuleSrc;
+use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,6 +48,60 @@ impl<E, W> Default for Report<E, W> {
 }
 
 impl<E, W> Report<E, W> {
+    pub fn print_errors(&self, phase: &mut HirPhase)
+    where
+        E: ReportableError
+    {
+        let prev = phase.report_mode.print_errors;
+        phase.report_mode.print_errors = true;
+        for ReportError { payload, pos, src } in self.errors.iter() {
+            payload.report_err(phase, pos, src);
+        }
+        phase.report_mode.print_errors = prev;
+    }
+
+    pub fn print_warnings(&self, phase: &mut HirPhase)
+    where
+        W: ReportableWarning
+    {
+        let prev = phase.report_mode.print_warnings;
+        phase.report_mode.print_warnings = true;
+        for ReportWarning { payload, pos, src } in self.warnings.iter() {
+            payload.report_warn(phase, pos, src);
+        }
+        phase.report_mode.print_warnings = prev;
+    }
+
+    pub fn catch_err<R, F: FnOnce() -> Result<R, E>>(
+        &mut self,
+        op: F,
+        pos: &SrcPos,
+        src: &ModuleSrc,
+    ) -> Option<R> {
+        match op() {
+            Ok(s) => Some(s),
+            Err(err) => {
+                self.insert_err(err, *pos, src.clone());
+                None
+            }
+        }
+    }
+
+    pub fn catch_warn<R, F: FnOnce() -> Result<R, W>>(
+        &mut self,
+        op: F,
+        pos: &SrcPos,
+        src: &ModuleSrc,
+    ) -> Option<R> {
+        match op() {
+            Ok(s) => Some(s),
+            Err(warn) => {
+                self.insert_warn(warn, *pos, src.clone());
+                None
+            }
+        }
+    }
+
     pub fn insert_err(&mut self, err: E, pos: SrcPos, src: ModuleSrc) {
         self.errors.push(ReportError { pos, src, payload: err });
     }
@@ -104,5 +159,13 @@ impl<E, W> Report<E, W> {
             Err(Err::from(self))
         }
     }
+}
+
+pub trait ReportableError {
+    fn report_err(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc);
+}
+
+pub trait ReportableWarning {
+    fn report_warn(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc);
 }
 

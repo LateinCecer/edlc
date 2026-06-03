@@ -17,7 +17,7 @@
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir};
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_as::HirAs;
 use crate::hir::{HirPhase, IntoEdl};
@@ -70,12 +70,13 @@ impl IntoHir for AstAsExpr {
     type Output = HirAs;
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
+        let target = self.ty.hir_repr(parser)?.edl_repr(parser).wrap_ast(&self.src)?;
         Ok(HirAs::new(
             self.pos,
             self.scope,
             self.src,
             Box::new(self.lhs.hir_repr(parser)?),
-            self.ty.hir_repr(parser)?.edl_repr(parser)?,
+            target,
         ))
     }
 }

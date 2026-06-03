@@ -21,6 +21,7 @@ use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeInstance};
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::documentation::{DocCompilerState, DocElement};
+use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::{HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::translation::HirTranslationError;
@@ -33,6 +34,7 @@ use crate::resolver::{ResolveError, ScopeId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirImpl {
+    pub src: ModuleSrc,
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub ty_scope: Option<ScopeId>,
@@ -44,6 +46,7 @@ pub struct HirImpl {
 
 impl HirImpl {
     pub fn new(
+        src: ModuleSrc,
         pos: SrcPos,
         scope: ScopeId,
         ty_scope: Option<ScopeId>,
@@ -53,6 +56,7 @@ impl HirImpl {
         funcs: Vec<HirFn>,
     ) -> Self {
         HirImpl {
+            src,
             pos,
             scope,
             ty_scope,

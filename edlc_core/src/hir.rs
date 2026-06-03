@@ -73,6 +73,7 @@ use crate::documentation::{DocCompilerState, DocElement};
 use crate::hir::code_container::CodeContainer;
 use crate::issue;
 pub use crate::hir::hir_report::{report_infer_error, ReportResult, WithInferer, StateContainer, BundledInfererError};
+use crate::report::Report;
 
 pub trait HirElement {}
 
@@ -607,11 +608,23 @@ impl HirItem {
             Self::Use(u) => u.pos,
         }
     }
+
+    pub fn src(&self) -> &ModuleSrc {
+        match self {
+            HirItem::Let(val) => &val.src,
+            HirItem::Const(val) => &val.src,
+            HirItem::Func(val) => &val.signature.src,
+            HirItem::Impl(val) => &val.src,
+            HirItem::Submod(val, _) => &val.src,
+            HirItem::Use(val) => &val.src,
+        }
+    }
 }
 
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirModule {
+    pub src: ModuleSrc,
     pub items: Vec<HirItem>,
     pub full_name: QualifierName,
     pub scope: ScopeId,
@@ -632,6 +645,8 @@ impl HirModule {
         phase.report_mode.print_warnings = false;
         if !errors.is_empty() {
             // reset reporting mode
+            let resolve_report = HirError::resolve_report(errors.iter());
+            resolve_report.print_errors(phase);
             phase.report_mode.print_errors = false;
             phase.report_mode.print_warnings = false;
             return errors;
@@ -682,6 +697,10 @@ impl HirModule {
         // traverse HIR tree and insert default mutability values
         self.insert_default_mutability(phase, infer_state, &mut errors);
         self.finalize_types(phase, infer_state);
+
+        let resolve_report = HirError::resolve_report(errors.iter());
+        resolve_report.print_errors(phase);
+
         phase.report_mode.print_errors = false;
         phase.report_mode.print_warnings = false;
         errors
@@ -824,10 +843,7 @@ impl HirModule {
                 _ => Ok(()),
             };
             if let Err(err) = res {
-                errors.push(HirError {
-                    pos: item.pos(),
-                    ty: Box::new(HirErrorType::Resolver(err)),
-                });
+                errors.push(HirError::new_res(item.pos(), err, item.src().clone()));
             }
         }
     }
@@ -1155,10 +1171,10 @@ impl HirError {
         }
     }
 
-    pub fn new_res(pos: SrcPos, err: ResolveError) -> Self {
+    pub fn new_res(pos: SrcPos, err: ResolveError, src: ModuleSrc) -> Self {
         HirError {
             pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
+            ty: Box::new(HirErrorType::Resolver(err, src)),
         }
     }
 
@@ -1178,6 +1194,20 @@ impl HirError {
             HirErrorType::EdlError(err) => err.type_resolve_recoverable(),
             _ => false,
         }
+    }
+
+    /// Creates a report from all resolver errors in an iterator of resolver errors.
+    pub fn resolve_report<'a, I: IntoIterator<Item=&'a Self>>(
+        errors: I,
+    ) -> Report<ResolveError, ()> {
+        let mut report = Report::default();
+        for item in errors.into_iter() {
+            let HirErrorType::Resolver(err, src) = item.ty.as_ref() else {
+                continue;
+            };
+            report.insert_err(err.clone(), item.pos, src.clone());
+        }
+        report
     }
 }
 
@@ -1236,7 +1266,7 @@ pub enum HirErrorType {
     /// returns either nothing, or by value.
     FunctionCallArg,
     /// Some error with the name resolver
-    Resolver(ResolveError),
+    Resolver(ResolveError, ModuleSrc),
     NameUnresolved(HirTypeName),
     VariableIsNotConstant(EdlVarId),
     IllegalState(String),
@@ -1331,7 +1361,7 @@ impl Display for HirErrorType {
             HirErrorType::FunctionCallArg => {
                 write!(f, "function call argument error.")
             },
-            HirErrorType::Resolver(res) => {
+            HirErrorType::Resolver(res, src) => {
                 write!(f, "{res}")
             },
             HirErrorType::NameUnresolved(name) => {

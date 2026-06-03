@@ -24,6 +24,7 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl};
+use crate::issue::SrcRange;
 use crate::lexer::SrcPos;
 use crate::prelude::edl_type::EdlTypeId;
 use crate::resolver::{QualifierName, ScopeId, SelfType};
@@ -73,6 +74,21 @@ impl Display for HirTypeNameSegment {
 
 
 impl HirTypeName {
+    pub fn src_range(&self) -> Option<SrcRange> {
+        let Some(first) = self.path.first() else {
+            return None;
+        };
+        if self.path.len() > 2 {
+            let last = self.path.last().unwrap();
+            Some(SrcRange {
+                start: first.pos,
+                end: last.pos,
+            })
+        } else {
+            Some(first.pos.into())
+        }
+    }
+
     /// Extracts the last element from the HIR type name.
     /// If the type name contains more than one element, the remainder of the type name (first
     /// segments) are returned as the second parameter in the return tuple.
@@ -612,6 +628,7 @@ impl HirType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirTrait {
     pub pos: SrcPos,
+    pub src: ModuleSrc,
     pub name: HirTypeName,
 }
 

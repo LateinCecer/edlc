@@ -266,7 +266,7 @@ impl ResolveFn for HirBlock {
 impl ResolveNames for HirBlock {
     fn resolve_names(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         let prev_scope = *phase.res.current_scope()
-            .map_err(|err| HirError::new_res(self.pos, err))?;
+            .map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         phase.res.revert_to_scope(&self.scope);
         phase.pos = self.pos;
 

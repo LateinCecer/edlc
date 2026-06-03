@@ -555,10 +555,7 @@ impl AstFnSignature {
                 scope: self.scope,
             },
             &mut parser.types,
-        ).map_err(|err| HirError {
-            pos: self.pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
-        })?;
+        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         Ok(())
     }
 

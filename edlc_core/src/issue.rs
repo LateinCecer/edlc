@@ -32,7 +32,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::mpsc::Sender;
 use serde::{Deserialize, Serialize};
-use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
+use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
 
 
 #[derive(Default, Clone, Debug)]
@@ -151,6 +151,7 @@ impl EdlDisplay for $T {
 );
 
 impl_edl_display!(type EdlTypeInstance);
+impl_edl_display!(type EdlTraitInstance);
 impl_edl_display!(type EdlMaybeType);
 impl_edl_display!(type EdlParameterDef);
 impl_edl_display!(type EdlFnInstance);

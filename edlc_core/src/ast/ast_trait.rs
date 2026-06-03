@@ -56,6 +56,7 @@ struct ConstDef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstTrait {
+    src: ModuleSrc,
     pos: SrcPos,
     scope: ScopeId,
     name: String,
@@ -99,6 +100,7 @@ impl Parsable for AstTrait {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
         let pos = expect_token!(parser; (Token::Key(KeyWord::Trait)), pos => pos
             expected "`trait` definition")?;
+        let src = parser.module_src.clone();
         let name = expect_token!(parser; (Token::Ident(name)) => name
             expected "trait name identifier")?;
         let env = AstParamEnv::parse(parser)?;
@@ -248,6 +250,7 @@ impl Parsable for AstTrait {
         };
 
         Ok(AstTrait {
+            src,
             pos,
             scope,
             name,
@@ -334,7 +337,7 @@ impl TypeDef {
         });
         let ty_instance = phase.types.new_type_instance(ty).unwrap();
         phase.res.push_trait_associated_type(tra, self.name, ty_instance)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })
     }
 }
 
@@ -367,7 +370,7 @@ impl AstTrait {
         // change scope and push top level item to the name resolver
         phase.res.revert_to_scope(&c.scope);
         let mut constant_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })?;
         constant_name.push(c.name.clone());
 
         let const_id = phase.types.insert_const(EdlConst {
@@ -375,17 +378,17 @@ impl AstTrait {
             name: constant_name
         });
         phase.res.push_trait_associated_const(association, c.name.clone(), const_id)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })
     }
 
     fn push(self, phase: &mut HirPhase) -> Result<(), AstTranslationError> {
         // push trait to resolver
         // push trait definition as type
         let prev_scope = *phase.res.current_scope()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
         phase.res.revert_to_scope(&self.scope);
         let mut base_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         let mut env = self.env.clone().hir_repr(phase)?;
         let edl_env = env.edl_repr(phase)?;
@@ -412,7 +415,7 @@ impl AstTrait {
                 id: trait_id,
             },
             &mut phase.types,
-        ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+        ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         // create trait instance with initiated parameter environment
         let mut trait_instance = phase.types.new_trait_instance(trait_id).unwrap();
@@ -437,9 +440,9 @@ impl AstTrait {
         // push `Self` trait to the name resolver
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_self_trait(trait_instance.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
         phase.res.push_trait_association(trait_instance.clone(), base_name.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         // parse associated consts
         for const_def in self.consts.into_iter() {
