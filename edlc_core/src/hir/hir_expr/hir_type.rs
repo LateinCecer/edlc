@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::fmt::{Display, Formatter};
 use crate::ast::ast_param_env::AstPreParams;
@@ -24,6 +26,7 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl};
+use crate::issue::SrcRange;
 use crate::lexer::SrcPos;
 use crate::prelude::edl_type::EdlTypeId;
 use crate::resolver::{QualifierName, ScopeId, SelfType};
@@ -73,6 +76,21 @@ impl Display for HirTypeNameSegment {
 
 
 impl HirTypeName {
+    pub fn src_range(&self) -> Option<SrcRange> {
+        let Some(first) = self.path.first() else {
+            return None;
+        };
+        if self.path.len() > 2 {
+            let last = self.path.last().unwrap();
+            Some(SrcRange {
+                start: first.pos,
+                end: last.pos,
+            })
+        } else {
+            Some(first.pos.into())
+        }
+    }
+
     /// Extracts the last element from the HIR type name.
     /// If the type name contains more than one element, the remainder of the type name (first
     /// segments) are returned as the second parameter in the return tuple.
@@ -567,15 +585,9 @@ impl IntoEdl for HirType {
                 Ok(EdlMaybeType::Unknown)
             },
             HirType::Empty(_) => Ok(EdlMaybeType::Fixed(phase.types.empty())),
-            HirType::Ref(pos, base, true) => {
+            HirType::Ref(pos, base, mutable) => {
                 let base = base.edl_repr(phase)?;
-                phase.types.new_mut_ref(base)
-                    .map_err(|err| HirError::new_edl(*pos, err))
-                    .map(|ty| EdlMaybeType::Fixed(ty))
-            }
-            HirType::Ref(pos, base, false) => {
-                let base = base.edl_repr(phase)?;
-                phase.types.new_ref(base)
+                phase.types.new_ref(base, Some(EdlConstValue::from_bool(*mutable)))
                     .map_err(|err| HirError::new_edl(*pos, err))
                     .map(|ty| EdlMaybeType::Fixed(ty))
             }
@@ -618,6 +630,7 @@ impl HirType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirTrait {
     pub pos: SrcPos,
+    pub src: ModuleSrc,
     pub name: HirTypeName,
 }
 

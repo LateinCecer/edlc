@@ -1,23 +1,26 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::collections::HashMap;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant};
+use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirStructMember;
 use crate::hir::{HirPhase, IntoEdl};
 use crate::lexer::{Punct, SrcPos, Token};
@@ -42,6 +45,7 @@ pub enum StructType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
+    pub src: ModuleSrc,
     pub members: Vec<AstStructMember>,
     pub init_ty: StructType,
 }
@@ -71,9 +75,10 @@ impl StructDef {
                 for m in self.members.iter() {
                     phase.res.revert_to_scope(&m.scope);
                     let mut ty = m.clone().ty.hir_repr(phase)?;
-                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase)? else {
+                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase).wrap_ast(&self.src)? else {
                         return Err(AstTranslationError::ElicitType {
                             pos: m.pos,
+                            src: self.src.clone(),
                         });
                     };
                     members.insert(m.name.clone(), edl_ty);
@@ -85,9 +90,10 @@ impl StructDef {
                 for m in self.members.iter() {
                     phase.res.revert_to_scope(&m.scope);
                     let mut ty = m.clone().ty.hir_repr(phase)?;
-                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase)? else {
+                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase).wrap_ast(&self.src)? else {
                         return Err(AstTranslationError::ElicitType {
                             pos: m.pos,
+                            src: self.src.clone(),
                         });
                     };
                     members.push(edl_ty);
@@ -171,6 +177,7 @@ impl Parsable for StructDef {
 
                 let members = Self::parse_dict_members(parser)?;
                 Ok(StructDef {
+                    src: parser.module_src.clone(),
                     members,
                     init_ty: StructType::List,
                 })
@@ -181,11 +188,13 @@ impl Parsable for StructDef {
 
                 let (members, _) = Self::parse_tuple_members(parser)?;
                 Ok(StructDef {
+                    src: parser.module_src.clone(),
                     members,
                     init_ty: StructType::Tuple,
                 })
             },
             _ => Ok(StructDef {
+                src: parser.module_src.clone(),
                 members: Vec::new(),
                 init_ty: StructType::Unit,
             })

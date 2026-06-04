@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::core::edl_error::EdlError;
@@ -20,7 +22,7 @@ use crate::core::edl_param_env::{EdlParamStack, EdlParameterDef, InsertParameter
 use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlMaybeType, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, ReplaceEnv, StackReplacements};
 use crate::core::index_map::IndexMap;
-use crate::core::type_analysis::{EnvConstraint, EnvConstraintStack, ExportedSnapshot, Infer, InferAt, InferEq, InferError, InferProvider, InferState, NodeId, SigConstraint, TypeUid};
+use crate::core::type_analysis::{AutoRefState, EnvConstraint, EnvConstraintStack, ExportedSnapshot, Infer, InferAt, InferEq, InferError, InferProvider, InferState, NodeId, SigConstraint, TypeUid};
 use crate::resolver::{QualifierName, ScopeId};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -67,6 +69,7 @@ pub struct EdlFnCallInfo {
 pub struct CallConstraint {
     pub id: EdlTypeId,
     pub sig: SigConstraint,
+    pub auto_ref: AutoRefState,
     pub base: Option<TypeUid>,
     pub snapshot: ExportedSnapshot,
 }
@@ -226,12 +229,13 @@ impl EdlImpl {
             roll_back_err!(sig_constraint.hint_generics(&hints.params, &mut inferer, node), inferer, snapshot, fn_id);
         }
         inferer = infer.infer_from(state);
-        roll_back_err!(sig_constraint.adapt(node, &args.args, &args.ret, &mut inferer), inferer, snapshot, fn_id);
+        let auto_ref = roll_back_err!(sig_constraint.adapt(node, &args.args, &args.ret, &mut inferer), inferer, snapshot, fn_id);
 
         let snapshot = inferer.roll_back_to(snapshot);
         Ok(CallConstraint {
             id: fn_id,
             sig: sig_constraint,
+            auto_ref,
             base: Some(base),
             snapshot,
         })
@@ -275,12 +279,13 @@ impl EdlImpl {
             roll_back_err!(sig_constraint.hint_generics(&hints.params, &mut inferer, node), inferer, snapshot, fn_id);
         }
         inferer = infer.infer_from(state);
-        roll_back_err!(sig_constraint.adapt(node, &args.args, &args.ret, &mut inferer), inferer, snapshot, fn_id);
+        let auto_ref = roll_back_err!(sig_constraint.adapt(node, &args.args, &args.ret, &mut inferer), inferer, snapshot, fn_id);
 
         let snapshot = inferer.roll_back_to(snapshot);
         Ok(CallConstraint {
             id: fn_id,
             sig: sig_constraint,
+            auto_ref,
             base: Some(base_ty),
             snapshot,
         })
@@ -592,9 +597,10 @@ pub struct GenericTypeHints {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ResolveSuccess {
+pub(crate) struct ResolveSuccess {
     fn_id: EdlTypeId,
-    sig: SigConstraint,
+    pub(crate) sig: SigConstraint,
+    pub(crate) auto_ref: AutoRefState,
     base: Option<TypeUid>,
 }
 
@@ -613,7 +619,7 @@ pub struct CallResolver {
     pub args: FnArgumentConstraints,
     generic_type_hints: Option<GenericTypeHints>,
 
-    res: Option<ResolveSuccess>,
+    pub(crate) res: Option<ResolveSuccess>,
 }
 
 /// Returns the resolution facts for a plane function call.
@@ -866,7 +872,8 @@ impl CallResolver {
         self.res = Some(ResolveSuccess {
             sig: candidate.sig,
             fn_id: candidate.id,
-            base: candidate.base
+            base: candidate.base,
+            auto_ref: candidate.auto_ref,
         });
         Ok(())
     }
@@ -893,20 +900,21 @@ impl CallResolver {
             let hints = roll_back_err!(hints, ctx, snapshot, fn_id);
             roll_back_err!(sig_constraint.hint_generics(&hints.params, &mut ctx, node), ctx, snapshot, fn_id);
         }
-        roll_back_err!(sig_constraint.adapt(node, &self.args.args, &self.args.ret, &mut ctx), ctx, snapshot, fn_id);
+        let auto_ref = roll_back_err!(sig_constraint.adapt(node, &self.args.args, &self.args.ret, &mut ctx), ctx, snapshot, fn_id);
         let snapshot = ctx.roll_back_to(snapshot);
         Ok(CallConstraint {
             id: fn_id,
             base: None,
             snapshot,
             sig: sig_constraint,
+            auto_ref,
         })
     }
 
     pub fn finalize_types(
         &mut self,
         infer: &mut Infer<'_, '_>
-    ) -> Option<(EdlTypeId, EdlParamStack, Option<EdlMaybeType>)> {
+    ) -> Option<(EdlTypeId, EdlParamStack, Option<EdlMaybeType>, Vec<EdlMaybeType>)> {
         let Some(res) = self.res.as_ref() else {
             return None;
         };
@@ -926,6 +934,13 @@ impl CallResolver {
         } else {
             None
         };
-        Some((res.fn_id, stack, base))
+
+        // format parameters
+        let params = res.sig.param_types
+            .iter()
+            .map(|param| infer.find_type(param.ty))
+            .collect();
+
+        Some((res.fn_id, stack, base, params))
     }
 }

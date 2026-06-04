@@ -1,22 +1,24 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_array_index::HirArrayIndex;
 use crate::hir::hir_expr::hir_array_init::HirArrayInit;
@@ -31,21 +33,27 @@ use crate::hir::hir_expr::hir_let::HirLet;
 use crate::hir::hir_expr::hir_literal::HirLiteral;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::hir_return::HirReturn;
-use crate::hir::translation::{HirTranslationError, IntoMir};
-use crate::hir::{HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::translation::{HirTranslationError};
+use crate::hir::{report_infer_error, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_expr::{Context, DebugSymbols, MirBlockRef, MirFlowGraph, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
 use crate::prelude::hir_expr::hir_loop::HirLoop;
 use crate::prelude::HirContext;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use crate::compiler::EdlCompiler;
 use crate::core::edl_type;
-use crate::core::type_analysis::{Infer, InferState, TypeUid, ExtConstUid};
+use crate::core::type_analysis::*;
+use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::hir_field::HirField;
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::hir_expr::hir_type_init::HirTypeInit;
+use crate::mir::mir_type::MirTypeId;
+use crate::prelude::mir_vars::VariableMapper;
+use crate::resolver::ScopeId;
 
 pub mod hir_array_init;
 pub mod hir_array_index;
@@ -69,6 +77,8 @@ pub mod hir_continue;
 pub mod hir_return;
 mod hir_type_def;
 pub mod hir_type_init;
+mod hir_ref;
+mod hir_deref;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirExpression {
@@ -88,6 +98,56 @@ pub enum HirExpression {
     Continue(HirContinue),
     Return(HirReturn),
     TypeInit(HirTypeInit),
+    Ref(HirRef),
+    Deref(HirDeref),
+}
+
+impl SourceObject for HirExpression {
+    fn pos(&self) -> SrcPos {
+        match self {
+            HirExpression::ArrayInit(val) => val.pos,
+            HirExpression::ArrayIndex(val) => val.pos,
+            HirExpression::As(val) => val.pos,
+            HirExpression::Block(val) => val.pos,
+            HirExpression::Call(val) => val.pos,
+            HirExpression::Field(val) => val.pos,
+            HirExpression::Literal(val) => val.pos,
+            HirExpression::Name(val) => val.pos,
+            HirExpression::Assign(val) => val.pos,
+            HirExpression::Let(val) => val.pos,
+            HirExpression::If(val) => val.pos,
+            HirExpression::Loop(val) => val.pos,
+            HirExpression::Break(val) => val.pos,
+            HirExpression::Continue(val) => val.pos,
+            HirExpression::Return(val) => val.pos,
+            HirExpression::TypeInit(val) => val.pos,
+            HirExpression::Ref(val) => val.pos,
+            HirExpression::Deref(val) => val.pos,
+        }
+    }
+
+    fn src(&self) -> &ModuleSrc {
+        match self {
+            HirExpression::ArrayInit(val) => &val.src,
+            HirExpression::ArrayIndex(val) => &val.src,
+            HirExpression::As(val) => &val.src,
+            HirExpression::Block(val) => &val.src,
+            HirExpression::Call(val) => &val.src,
+            HirExpression::Field(val) => &val.src,
+            HirExpression::Literal(val) => &val.src,
+            HirExpression::Name(val) => &val.src,
+            HirExpression::Assign(val) => &val.src,
+            HirExpression::Let(val) => &val.src,
+            HirExpression::If(val) => &val.src,
+            HirExpression::Loop(val) => &val.src,
+            HirExpression::Break(val) => &val.src,
+            HirExpression::Continue(val) => &val.src,
+            HirExpression::Return(val) => &val.src,
+            HirExpression::TypeInit(val) => &val.src,
+            HirExpression::Ref(val) => &val.src,
+            HirExpression::Deref(val) => &val.src,
+        }
+    }
 }
 
 impl HirExpression {
@@ -109,67 +169,56 @@ impl HirExpression {
             HirExpression::Continue(_) => (),
             HirExpression::Return(_) => (),
             HirExpression::TypeInit(_) => (),
+            HirExpression::Ref(_) => (),
+            HirExpression::Deref(_) => (),
         }
     }
 
     /// Returns true if it is possible to assign a value to the expression.
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
         match self {
-            HirExpression::Field(val) => val.can_be_assigned_to(phase),
-            HirExpression::Name(name) => name.can_be_assigned_to(phase),
-            HirExpression::ArrayIndex(index) => index.can_be_assigned_to(phase),
+            HirExpression::Field(val) => val.can_be_assigned_to(),
+            HirExpression::Name(name) => name.can_be_assigned_to(),
+            HirExpression::ArrayIndex(index) => index.can_be_assigned_to(),
+            HirExpression::Deref(deref) => deref.can_be_assigned_to(),
+            _ => InternalMutability::Immutable,
+        }
+    }
+
+    /// Returns true if the expression is internally handled as a reference.
+    /// This means that the representation of this expression in MIR is a reference type and any
+    /// expressions that use this expression and do not expect an internal reference must insert
+    /// a MIR dereferencing operation before using the resulting MIR value.
+    pub fn is_internal_ref(&self, phase: &HirPhase) -> Result<bool, HirError> {
+        match self {
+            HirExpression::Field(val) => val.is_internal_ref(phase),
+            HirExpression::Name(name) => name.is_internal_ref(phase),
+            HirExpression::ArrayIndex(index) => index.is_internal_ref(phase),
+            HirExpression::Deref(deref) => deref.is_internal_ref(phase),
             _ => Ok(false),
         }
     }
 
-    pub fn is_ref_like(&self, phase: &HirPhase) -> Result<bool, HirError> {
+    pub fn scope(&self) -> &ScopeId {
         match self {
-            HirExpression::Field(val) => val.is_ref_like(phase),
-            HirExpression::Name(name) => name.is_ref_like(phase),
-            HirExpression::ArrayIndex(index) => index.is_ref_like(phase),
-            _ => Ok(false),
-        }
-    }
-
-    pub fn pos(&self) -> SrcPos {
-        match self {
-            HirExpression::ArrayInit(val) => val.pos,
-            HirExpression::ArrayIndex(val) => val.pos,
-            HirExpression::As(val) => val.pos,
-            HirExpression::Block(val) => val.pos,
-            HirExpression::Call(val) => val.pos,
-            HirExpression::Field(val) => val.pos,
-            HirExpression::Literal(val) => val.pos,
-            HirExpression::Name(val) => val.pos,
-            HirExpression::Assign(val) => val.pos,
-            HirExpression::Let(val) => val.pos,
-            HirExpression::If(val) => val.pos,
-            HirExpression::Loop(val) => val.pos,
-            HirExpression::Break(val) => val.pos,
-            HirExpression::Continue(val) => val.pos,
-            HirExpression::Return(val) => val.pos,
-            HirExpression::TypeInit(val) => val.pos,
-        }
-    }
-
-    pub fn src(&self) -> &ModuleSrc {
-        match self {
-            HirExpression::ArrayInit(val) => &val.src,
-            HirExpression::ArrayIndex(val) => &val.src,
-            HirExpression::As(val) => &val.src,
-            HirExpression::Block(val) => &val.src,
-            HirExpression::Call(val) => &val.src,
-            HirExpression::Field(val) => &val.src,
-            HirExpression::Literal(val) => &val.src,
-            HirExpression::Name(val) => &val.src,
-            HirExpression::Assign(val) => &val.src,
-            HirExpression::Let(val) => &val.src,
-            HirExpression::If(val) => &val.src,
-            HirExpression::Loop(val) => &val.src,
-            HirExpression::Break(val) => &val.src,
-            HirExpression::Continue(val) => &val.src,
-            HirExpression::Return(val) => &val.src,
-            HirExpression::TypeInit(val) => &val.src,
+            HirExpression::ArrayInit(val) => &val.scope,
+            HirExpression::ArrayIndex(val) => &val.scope,
+            HirExpression::As(val) => &val.scope,
+            HirExpression::Block(val) => &val.scope,
+            HirExpression::Call(val) => &val.scope,
+            HirExpression::Field(val) => &val.scope,
+            HirExpression::Literal(val) => &val.scope,
+            HirExpression::Name(val) => &val.scope,
+            HirExpression::Assign(val) => &val.scope,
+            HirExpression::Let(val) => &val.scope,
+            HirExpression::If(val) => &val.scope,
+            HirExpression::Loop(val) => &val.scope,
+            HirExpression::Break(val) => &val.scope,
+            HirExpression::Continue(val) => &val.scope,
+            HirExpression::Return(val) => &val.scope,
+            HirExpression::TypeInit(val) => &val.scope,
+            HirExpression::Ref(val) => &val.scope,
+            HirExpression::Deref(val) => &val.scope,
         }
     }
 
@@ -197,6 +246,8 @@ impl HirExpression {
             HirExpression::Continue(val) => val.verify(phase, ctx, infer_state),
             HirExpression::Return(val) => val.verify(phase, ctx, infer_state),
             HirExpression::TypeInit(val) => val.verify(phase, ctx, infer_state),
+            HirExpression::Ref(val) => val.verify(phase, ctx, infer_state),
+            HirExpression::Deref(val) => val.verify(phase, ctx, infer_state),
         }
     }
 
@@ -217,48 +268,132 @@ impl HirExpression {
             _ => Ok(false),
         }
     }
+
+    /// Prepares the HIR expression for evaluation by translating it to MIR.
+    /// The returned MIR code has not undergone _any_ MIR code transformation steps.
+    /// The caller is responsible for transforming and validating the generated MIR code before
+    /// execution through of method of their choosing.
+    ///
+    /// One method to transform the output of this function into MIR code that is ready for codegen
+    /// or adhoc evaluation in the VM is to run [mir_expr::compile_expression] on it.
+    pub fn prepare_mir_eval<B: Backend>(
+        &self,
+        compiler: &mut EdlCompiler,
+        backend: &mut B,
+        ctx: Context,
+    ) -> Result<MirFlowGraph, HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen = Box<dyn CodeGen<B>>> {
+        let parameters = [];
+        let return_type = self.get_type(&mut compiler.phase)?;
+        if !return_type.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos(),
+                ty: return_type,
+            });
+        }
+        let return_type = compiler.mir_phase.types
+            .mir_id(&return_type.unwrap(), &compiler.phase.types)?;
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            return_type,
+            ctx,
+            self.src().clone(),
+            DebugSymbols { pos: self.pos() },
+            *self.scope(),
+        );
+        let ret_value = body.create_temp_variable(return_type);
+
+        let mut var_mapper = VariableMapper::new();
+        let mut loop_manager = LoopMapper::new();
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase: &mut compiler.mir_phase,
+                hir_phase: &mut compiler.phase,
+                mir_funcs: &mut backend.func_reg_mut(),
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_manager,
+            };
+            self.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
+        };
+        body.insert_return(current_block, ret_value, DebugSymbols { pos: self.pos() });
+        body.seal();
+        Ok(body)
+    }
 }
 
-impl IntoMir for HirExpression {
-    type MirRepr = MirExpr;
+impl DefaultMut for HirExpression {}
 
-    fn mir_repr<B: Backend>(
-        &self,
-        edl_types: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        match self {
-            HirExpression::ArrayInit(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::ArrayIndex(val) => val.mir_repr(edl_types, mir_phase, mir_funcs),
-            HirExpression::As(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Block(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Call(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Field(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Literal(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Name(val) => val.mir_repr(edl_types, mir_phase, mir_funcs),
-            HirExpression::Assign(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::Let(val) => val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into()),
-            HirExpression::If(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Loop(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Break(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Continue(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
-            HirExpression::Return(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
+pub trait SourceObject {
+    fn pos(&self) -> SrcPos;
+    fn src(&self) -> &ModuleSrc;
+}
+
+pub trait DefaultMut: ResolveTypes + SourceObject {
+    /// Inserts the default mutability into the expression.
+    /// This should be called after type inference but before validation.
+    ///
+    /// # Node
+    ///
+    /// This does not traverse the HIR node tree.
+    /// Children should be visited through the [HirTreeWalker] infrastructure.
+    fn insert_default_mutability(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        fn process(
+            m: ExtConstUid,
+            pos: &SrcPos,
+            src: &ModuleSrc,
+            infer: &mut Infer<'_, '_>,
+        ) -> Result<bool, InferError> {
+            match infer.find_ext_const(m) {
+                Some(EdlConstValue::Literal(EdlLiteralValue::Bool(_))) => {
+                    // already resolved!
+                    return Ok(false);
+                },
+                Some(EdlConstValue::Literal(_)) => {
+                    unreachable!("invalid literal value for mutability")
+                }
+                _ => (),
             }
-            HirExpression::TypeInit(val) => {
-                val.mir_repr(edl_types, mir_phase, mir_funcs).map(|val| val.into())
-            },
+
+            // insert
+            let node = infer.state.node_gen.gen_info(pos, src);
+            infer
+                .at(node)
+                .eq(&m, &EdlConstValue::from_bool(false))?;
+            Ok(true)
         }
+
+        // first check the mutability of the base expression
+        let mut infer = phase.infer_from(infer_state);
+        let m = self.mutability(&mut infer);
+        let pos = self.pos();
+        let src = self.src();
+        let mut changed = match process(m, &pos, src, &mut infer) {
+            Ok(v) => v,
+            Err(err) => return Err(report_infer_error(err, infer_state, phase)),
+        };
+
+        // check return value for references
+        let ty = self.get_type_uid(&mut infer);
+        if matches!(infer.find_type(ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
+            let m: ExtConstUid = infer.get_generic_const(ty, 1).unwrap().into();
+            let src = self.src();
+            changed |= match process(m, &pos, src, &mut infer) {
+                Ok(v) => v,
+                Err(err) => return Err(report_infer_error(err, infer_state, phase)),
+            };
+        }
+
+        if changed {
+            self.resolve_types(phase, infer_state)?;
+        }
+        Ok(())
     }
 }
 
@@ -281,6 +416,8 @@ impl ResolveFn for HirExpression {
             HirExpression::Continue(val) => val.resolve_fn(phase),
             HirExpression::Return(val) => val.resolve_fn(phase),
             HirExpression::TypeInit(val) => val.resolve_fn(phase),
+            HirExpression::Ref(val) => val.resolve_fn(phase),
+            HirExpression::Deref(val) => val.resolve_fn(phase),
         }
     }
 }
@@ -304,6 +441,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.resolve_types(phase, infer_state),
             HirExpression::Return(val) => val.resolve_types(phase, infer_state),
             HirExpression::TypeInit(val) => val.resolve_types(phase, infer_state),
+            HirExpression::Ref(val) => val.resolve_types(phase, infer_state),
+            HirExpression::Deref(val) => val.resolve_types(phase, infer_state),
         }
     }
 
@@ -325,6 +464,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.get_type_uid(inferer),
             HirExpression::Return(val) => val.get_type_uid(inferer),
             HirExpression::TypeInit(val) => val.get_type_uid(inferer),
+            HirExpression::Ref(val) => val.get_type_uid(inferer),
+            HirExpression::Deref(val) => val.get_type_uid(inferer),
         }
     }
 
@@ -346,6 +487,8 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.finalize_types(inferer),
             HirExpression::Return(val) => val.finalize_types(inferer),
             HirExpression::TypeInit(val) => val.finalize_types(inferer),
+            HirExpression::Ref(val) => val.finalize_types(inferer),
+            HirExpression::Deref(val) => val.finalize_types(inferer),
         }
     }
 
@@ -367,6 +510,31 @@ impl ResolveTypes for HirExpression {
             HirExpression::Continue(val) => val.as_const(inferer),
             HirExpression::Return(val) => val.as_const(inferer),
             HirExpression::TypeInit(val) => val.as_const(inferer),
+            HirExpression::Ref(val) => val.as_const(inferer),
+            HirExpression::Deref(val) => val.as_const(inferer),
+        }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        match self {
+            HirExpression::ArrayInit(val) => val.mutability(inferer),
+            HirExpression::ArrayIndex(val) => val.mutability(inferer),
+            HirExpression::As(val) => val.mutability(inferer),
+            HirExpression::Block(val) => val.mutability(inferer),
+            HirExpression::Call(val) => val.mutability(inferer),
+            HirExpression::Field(val) => val.mutability(inferer),
+            HirExpression::Literal(val) => val.mutability(inferer),
+            HirExpression::Name(val) => val.mutability(inferer),
+            HirExpression::Assign(val) => val.mutability(inferer),
+            HirExpression::Let(val) => val.mutability(inferer),
+            HirExpression::If(val) => val.mutability(inferer),
+            HirExpression::Loop(val) => val.mutability(inferer),
+            HirExpression::Break(val) => val.mutability(inferer),
+            HirExpression::Continue(val) => val.mutability(inferer),
+            HirExpression::Return(val) => val.mutability(inferer),
+            HirExpression::TypeInit(val) => val.mutability(inferer),
+            HirExpression::Ref(val) => val.mutability(inferer),
+            HirExpression::Deref(val) => val.mutability(inferer),
         }
     }
 }
@@ -390,6 +558,8 @@ impl ResolveNames for HirExpression {
             HirExpression::Continue(val) => val.resolve_names(phase),
             HirExpression::Return(val) => val.resolve_names(phase),
             HirExpression::TypeInit(val) => val.resolve_names(phase),
+            HirExpression::Ref(val) => val.resolve_names(phase),
+            HirExpression::Deref(val) => val.resolve_names(phase),
         }
     }
 }
@@ -446,6 +616,8 @@ impl HirTreeWalker for HirExpression {
             HirExpression::Continue(val) => val.walk(filter, task)?,
             HirExpression::Return(val) => val.walk(filter, task)?,
             HirExpression::TypeInit(val) => val.walk(filter, task)?,
+            HirExpression::Ref(val) => val.walk(filter, task)?,
+            HirExpression::Deref(val) => val.walk(filter, task)?,
         };
         if let Some(res) = res {
             child.push(res);
@@ -482,6 +654,8 @@ impl HirTreeWalker for HirExpression {
             HirExpression::Continue(val) => val.walk_mut(filter, task)?,
             HirExpression::Return(val) => val.walk_mut(filter, task)?,
             HirExpression::TypeInit(val) => val.walk_mut(filter, task)?,
+            HirExpression::Ref(val) => val.walk_mut(filter, task)?,
+            HirExpression::Deref(val) => val.walk_mut(filter, task)?,
         };
         if let Some(res) = res {
             child.push(res);
@@ -509,6 +683,8 @@ impl HirExpr for HirExpression {
             HirExpression::Continue(val) => val.get_type(phase),
             HirExpression::Return(val) => val.get_type(phase),
             HirExpression::TypeInit(val) => val.get_type(phase),
+            HirExpression::Ref(val) => val.get_type(phase),
+            HirExpression::Deref(val) => val.get_type(phase),
         }
     }
 
@@ -530,6 +706,8 @@ impl HirExpr for HirExpression {
             HirExpression::Continue(val) => val.is_comptime(),
             HirExpression::Return(val) => val.is_comptime(),
             HirExpression::TypeInit(val) => val.is_comptime(),
+            HirExpression::Ref(val) => val.is_comptime(),
+            HirExpression::Deref(val) => val.is_comptime(),
         }
     }
 
@@ -549,27 +727,6 @@ impl HirExpr for HirExpression {
 impl EdlFnArgument for HirExpression {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        match self {
-            HirExpression::ArrayInit(val) => val.is_mutable(state),
-            HirExpression::ArrayIndex(val) => val.is_mutable(state),
-            HirExpression::As(val) => val.is_mutable(state),
-            HirExpression::Block(block) => block.is_mutable(state),
-            HirExpression::Call(val) => val.is_mutable(state),
-            HirExpression::Field(val) => val.is_mutable(state),
-            HirExpression::Literal(val) => val.is_mutable(state),
-            HirExpression::Name(val) => val.is_mutable(state),
-            HirExpression::Assign(val) => val.is_mutable(state),
-            HirExpression::Let(val) => val.is_mutable(state),
-            HirExpression::If(val) => val.is_mutable(state),
-            HirExpression::Break(val) => val.is_mutable(state),
-            HirExpression::Loop(val) => val.is_mutable(state),
-            HirExpression::Continue(val) => val.is_mutable(state),
-            HirExpression::Return(val) => val.is_mutable(state),
-            HirExpression::TypeInit(val) => val.is_mutable(state),
-        }
-    }
-
     fn const_expr(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         match self {
             HirExpression::ArrayInit(val) => val.const_expr(state),
@@ -588,6 +745,8 @@ impl EdlFnArgument for HirExpression {
             HirExpression::Continue(val) => val.const_expr(state),
             HirExpression::Return(val) => val.const_expr(state),
             HirExpression::TypeInit(val) => val.const_expr(state),
+            HirExpression::Ref(val) => val.const_expr(state),
+            HirExpression::Deref(val) => val.const_expr(state),
         }
     }
 }
@@ -605,4 +764,201 @@ pub trait HirExpr: ResolveNames + HirTreeWalker {
     fn is_comptime(&self) -> bool;
 
     fn as_const_value(&self, phase: &mut HirPhase) -> Result<EdlConstValue, HirError>;
+}
+
+struct LoopMapperEntry {
+    loop_name: HirUid,
+    merge_block: MirBlockRef,
+    header_block: MirBlockRef,
+    result_value: MirValue,
+}
+
+pub struct LoopMapper {
+    entries: HashMap<HirUid, LoopMapperEntry>,
+}
+
+impl LoopMapper {
+    pub fn new() -> Self {
+        LoopMapper {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        loop_uid: HirUid,
+        merge_block: MirBlockRef,
+        header_block: MirBlockRef,
+        value: MirValue,
+    ) {
+        self.entries.insert(
+            loop_uid,
+            LoopMapperEntry {
+                loop_name: loop_uid,
+                header_block,
+                merge_block,
+                result_value: value,
+            }
+        );
+    }
+
+    fn header(&self, loop_uid: &HirUid) -> Option<&MirBlockRef> {
+        self.entries.get(loop_uid).map(|x| &x.header_block)
+    }
+
+    fn merger(&self, loop_uid: &HirUid) -> Option<&MirBlockRef> {
+        self.entries.get(loop_uid).map(|x| &x.merge_block)
+    }
+
+    fn value(&self, loop_uid: &HirUid) -> Option<&MirValue> {
+        self.entries.get(loop_uid).map(|x| &x.result_value)
+    }
+}
+
+
+/// Encodes the writing state of HIR->MIR code translation.
+pub struct MirGraph<'a, 'graph, B: Backend> {
+    pub hir_phase: &'a mut HirPhase,
+    pub mir_phase: &'a mut MirPhase,
+    pub mir_funcs: &'a mut MirFuncRegistry<B>,
+    pub graph: &'graph mut MirFlowGraph,
+    pub var_mapper: &'graph mut VariableMapper,
+    pub loop_mapper: &'graph mut LoopMapper,
+    pub current_block: MirBlockRef,
+}
+
+impl<'a, 'graph, B: Backend> MirGraph<'a, 'graph, B> {
+    pub fn is_current_sealed(&self) -> bool {
+        self.graph.is_block_sealed(&self.current_block)
+    }
+}
+
+pub trait MakeGraph {
+    /// Writes an expression to the specified flow graph.
+    /// The return value of the expression will be stored to a temporary variable that is then
+    /// returned as a temporary variable by this function.
+    ///
+    /// # Note on Temporary Variables
+    ///
+    /// Temporary variables can result in the generation of actual variables during codegen, however,
+    /// in many cases this is not actually the case.
+    /// The compiler will analyse the usage of the generated variable and temporary variables without
+    /// any reads will not see the result of the expression evaluation stored _at all_.
+    ///
+    /// # Internal References
+    ///
+    /// If `self` is internally handled as a reference and if `target` does not match the output
+    /// of `mir_type` but instead that of `mir_deref_type`, then the expression value is
+    /// automatically dereferenced to fit into the target value.
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
+
+    /// Returns the MIR type of the value that this graph source object can be written to.
+    /// If this object writes to an internal reference, the type returned by this method call is a
+    /// MIR reference (may be mutable).
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError>;
+
+    /// Returns the MIR type of the value that this graph source object can be written to
+    /// (much like [Self::mir_type]).
+    /// If this object writes to an internal reference, the type returned by this method call is
+    /// the *dereferenced* base type in its MIR representation.
+    /// This should be used to create a temporary value if the goal is to obtain a dereferenced base
+    /// value, instead of an internal reference.
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        self.mir_type(graph)
+    }
+}
+
+impl MakeGraph for HirExpression {
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        match self {
+            HirExpression::ArrayInit(expr) => expr.write_to_graph(graph, target),
+            HirExpression::ArrayIndex(expr) => expr.write_to_graph(graph, target),
+            HirExpression::As(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Block(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Call(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Field(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Literal(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Name(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Assign(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Let(expr) => expr.write_to_graph(graph, target),
+            HirExpression::If(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Loop(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Break(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Continue(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Return(expr) => expr.write_to_graph(graph, target),
+            HirExpression::TypeInit(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Ref(expr) => expr.write_to_graph(graph, target),
+            HirExpression::Deref(expr) => expr.write_to_graph(graph, target),
+        }
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        match self {
+            HirExpression::ArrayInit(expr) => expr.mir_type(graph),
+            HirExpression::ArrayIndex(expr) => expr.mir_type(graph),
+            HirExpression::As(expr) => expr.mir_type(graph),
+            HirExpression::Block(expr) => expr.mir_type(graph),
+            HirExpression::Call(expr) => expr.mir_type(graph),
+            HirExpression::Field(expr) => expr.mir_type(graph),
+            HirExpression::Literal(expr) => expr.mir_type(graph),
+            HirExpression::Name(expr) => expr.mir_type(graph),
+            HirExpression::Assign(expr) => expr.mir_type(graph),
+            HirExpression::Let(expr) => expr.mir_type(graph),
+            HirExpression::If(expr) => expr.mir_type(graph),
+            HirExpression::Loop(expr) => expr.mir_type(graph),
+            HirExpression::Break(expr) => expr.mir_type(graph),
+            HirExpression::Continue(expr) => expr.mir_type(graph),
+            HirExpression::Return(expr) => expr.mir_type(graph),
+            HirExpression::TypeInit(expr) => expr.mir_type(graph),
+            HirExpression::Ref(expr) => expr.mir_type(graph),
+            HirExpression::Deref(expr) => expr.mir_type(graph),
+        }
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        match self {
+            HirExpression::ArrayInit(expr) => expr.mir_deref_type(graph),
+            HirExpression::ArrayIndex(expr) => expr.mir_deref_type(graph),
+            HirExpression::As(expr) => expr.mir_deref_type(graph),
+            HirExpression::Block(expr) => expr.mir_deref_type(graph),
+            HirExpression::Call(expr) => expr.mir_deref_type(graph),
+            HirExpression::Field(expr) => expr.mir_deref_type(graph),
+            HirExpression::Literal(expr) => expr.mir_deref_type(graph),
+            HirExpression::Name(expr) => expr.mir_deref_type(graph),
+            HirExpression::Assign(expr) => expr.mir_deref_type(graph),
+            HirExpression::Let(expr) => expr.mir_deref_type(graph),
+            HirExpression::If(expr) => expr.mir_deref_type(graph),
+            HirExpression::Loop(expr) => expr.mir_deref_type(graph),
+            HirExpression::Break(expr) => expr.mir_deref_type(graph),
+            HirExpression::Continue(expr) => expr.mir_deref_type(graph),
+            HirExpression::Return(expr) => expr.mir_deref_type(graph),
+            HirExpression::TypeInit(expr) => expr.mir_deref_type(graph),
+            HirExpression::Ref(expr) => expr.mir_deref_type(graph),
+            HirExpression::Deref(expr) => expr.mir_deref_type(graph),
+        }
+    }
 }

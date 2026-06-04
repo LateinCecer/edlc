@@ -2,3 +2,4 @@
 target/
 *.log
 Cargo.lock
+test_mir/

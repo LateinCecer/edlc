@@ -1,30 +1,28 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use log::info;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
+use crate::mir::mir_comptime::MirComptimeEval;
+use crate::mir::mir_expr::{MirGraphElement, MirValue};
 use crate::mir::mir_type::MirTypeId;
-use crate::prelude::mir_expr::MirTreeWalker;
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,98 +33,19 @@ pub struct MirLet {
     pub id: MirUid,
     pub var_id: EdlVarId,
     pub ty: MirTypeId,
-    pub val: Box<MirExpr>,
+    pub val: MirComptimeEval,
     pub global: bool,
     pub mutable: bool,
 }
 
-impl From<MirLet> for MirExpr {
-    fn from(value: MirLet) -> Self {
-        MirExpr::Let(value)
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirLet {
-    fn is_const_expr(
-        &self,
-        _phase: &MirPhase,
-        _funcs: &MirFuncRegistry<B>
-    ) -> Result<bool, MirError<B>> {
-        Ok(false)
-    }
-}
-
-impl MirLet {
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        info!("Optimizing MIR let expression...");
-
-        phase.ctx_mut()
-            .push()
-            .set_comptime(self.pos)?;
-        self.val.optimize(phase, backend, hir_phase)?;
-        phase.ctx_mut()
-            .pop()?;
-
-        phase.insert_var(self.var_id, self.ty, self.global);
-        phase.update_var(self.var_id, &self.val, &backend.func_reg())?;
-        Ok(())
+impl MirGraphElement for MirLet {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
     }
 
-    /// Verifies that the code on the RHS of the let expression is valid code.
-    /// If this test passes, then this item is ready for codegen.
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        regs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        let val_ty = self.val.get_type(regs, phase);
-        if val_ty != self.ty {
-            return Err(MirError::TypeMismatch {
-                exp: self.ty,
-                got: val_ty,
-            });
-        }
-
-        if self.global {
-            // global variable values are evaluated in a comptime context
-            phase.ctx_mut()
-                .push()
-                .set_comptime(self.pos)?;
-        }
-        self.val.verify(phase, regs, hir_phase)?;
-
-        if self.global {
-            // global variable values are evaluated in a comptime context
-            phase.ctx_mut()
-                .pop()?;
-        } else {
-            phase.insert_var(self.var_id, self.ty, self.global);
-            phase.update_var(self.var_id, &self.val, regs)?;
-        }
-        Ok(())
-    }
-}
-
-impl<B: Backend> MirTreeWalker<B> for MirLet {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk(filter, task)
+    fn uses_var(&self, _val: &MirValue) -> bool {
+        false
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk_mut(filter, task)
-    }
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
 }

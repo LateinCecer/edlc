@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::ast::ItemDoc;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
@@ -22,19 +24,19 @@ use crate::core::type_analysis::*;
 use crate::core::{edl_type, EdlVarId};
 use crate::documentation::{DocCompilerState, DocElement, LetDoc, Modifier, Modifiers};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_let::MirLet;
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
-
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {
@@ -48,6 +50,9 @@ struct InferInfo {
     var_uid: TypeUid,
     finalized_var_uid: EdlMaybeType,
     dereference: bool,
+    /// This refers to the mutability of the _return value_ of the let-expression.
+    /// That is always `()` and should always be immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -107,7 +112,7 @@ impl ResolveTypes for HirLet {
         let rhs_ty = self.value.get_type_uid(infer);
 
         let var_uid = self.infer_info.as_ref().unwrap().var_uid;
-        if matches!(infer.find_type(rhs_ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF) {
+        if matches!(infer.find_type(rhs_ty), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
             // rhs is a reference type
             let inner_ty = infer.get_generic_type(rhs_ty, 0).unwrap();
             if let Err(err) = infer.at(node)
@@ -176,12 +181,16 @@ impl ResolveTypes for HirLet {
             let var_uid = inferer.get_or_insert_var(
                 self.info.as_ref().unwrap().var_id, node);
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.infer_info = Some(InferInfo {
                 node,
                 own_uid,
                 var_uid,
                 finalized_var_uid: EdlMaybeType::Unknown,
                 dereference: false,
+                mutable,
             });
             own_uid
         }
@@ -196,6 +205,14 @@ impl ResolveTypes for HirLet {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    /// Please node that this mutablity statement refers to the mutablity of the return value of the
+    /// let-expression.
+    /// It does not refer to the mutability of the variable that is created in the let-expression!
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.infer_info.as_ref().unwrap().mutable
     }
 }
 
@@ -249,6 +266,10 @@ impl HirLet {
             .unwrap();
         let var = phase.vars.get_var(var).unwrap();
         Ok(var.name.clone())
+    }
+
+    pub fn id(&self) -> Option<&EdlVarId> {
+        self.info.as_ref().map(|info| &info.var_id)
     }
 
     pub fn verify(&mut self, phase: &mut HirPhase, ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {
@@ -330,7 +351,8 @@ impl HirLet {
         let tmp = [
             format_args!("type of let expression").into()
         ];
-        let ty = self.infer_info.as_ref().unwrap().finalized_var_uid.clone();
+        let info = self.infer_info.as_ref().unwrap();
+        let ty = info.finalized_var_uid.clone();
         let self_ty = TypeSource {
             ty: ty.clone(),
             pos: self.pos.into(),
@@ -338,14 +360,37 @@ impl HirLet {
             remark: TypeArguments::new(&tmp),
         };
         // dbg!(&ty, &self.ty_hint);
-        phase.check_report_type_expr(
-            format_args!("The initial type of a let expression must match its designated type"),
-            self_ty,
-            &self.value,
-            issue::format_type_args!(
-                format_args!("initial value of let expression")
-            )
-        )?;
+        if info.dereference {
+            let mut inferer = phase.infer_from(infer_state);
+            let value_ty = self.value.get_type_uid(&mut inferer);
+            let generic = inferer.get_generic_type(value_ty, 0)
+                .expect("tried to auto-dereference expression that does not return a reference type");
+            let value_ty = inferer.find_type(generic.uid);
+
+            let tmp = [
+                format_args!("rhs value of let expression").into(),
+            ];
+            let got = TypeSource {
+                ty: value_ty,
+                pos: self.value.pos().into(),
+                src: self.value.src(),
+                remark: TypeArguments::new(&tmp),
+            };
+            phase.check_report_type(
+                format_args!("RHS value does not dereference to the type hint provided by the let expression"),
+                self_ty,
+                got,
+            )?;
+        } else {
+            phase.check_report_type_expr(
+                format_args!("The initial type of a let expression must match its designated type"),
+                self_ty,
+                &self.value,
+                issue::format_type_args!(
+                    format_args!("initial value of let expression")
+                )
+            )?;
+        }
 
         // check that the return value is not `!`
         let EdlMaybeType::Fixed(ty) = ty else { panic!() };
@@ -386,7 +431,7 @@ impl HirLet {
     /// currently located in.
     fn register(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         let mut level_name = phase.res.current_level_name()
-            .map_err(|err| HirError::new_res(self.pos, err))?;
+            .map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         level_name.push(self.name.clone());
         let var_id = phase.vars.add_var(EdlVar {
             ty: self.ty_hint.clone(),
@@ -408,12 +453,12 @@ impl HirLet {
                     id: var_id,
                 },
                 &mut phase.types,
-            ).map_err(|e| HirError::new_res(self.pos, e))?;
+            ).map_err(|e| HirError::new_res(self.pos, e, self.src.clone()))?;
         } else {
             phase.res.push_local_var(
                 self.name.clone(),
                 var_id,
-            ).map_err(|e| HirError::new_res(self.pos, e))?;
+            ).map_err(|e| HirError::new_res(self.pos, e, self.src.clone()))?;
         }
 
         self.info = Some(CompilerInfo {
@@ -423,41 +468,64 @@ impl HirLet {
     }
 }
 
-impl IntoMir for HirLet {
-    type MirRepr = MirLet;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirLet {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let ty = &self.infer_info.as_ref().unwrap().finalized_var_uid;
-        if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ty.clone() })
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        // only implement local variable definitions here, as global definitions are handled
+        // separately in an isolated environment that snatches the value directly from the [HirLet]
+        // without calling this function.
+        let var_ty = self.infer_info.as_ref().unwrap().finalized_var_uid.clone();
+        if !var_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: var_ty,
+            });
         }
-        let EdlMaybeType::Fixed(ty) = &ty else {
-            panic!();
-        };
-        let mir_ty = mir_phase.types.mir_id(ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
+        let var_ty = graph.mir_phase.types
+            .mir_id(&var_ty.unwrap(), &graph.hir_phase.types)?;
+        let target_value = graph.var_mapper.get_or_create(
+            self.info.as_ref().unwrap().var_id,
+            var_ty,
+            &mut graph.graph,
+        );
+        if self.infer_info.as_ref().unwrap().dereference {
+            HirDeref::write_deref_to_graph(
+                &self.value,
+                graph,
+                target_value,
+                self.pos,
+            )?;
+        } else {
+            self.value.write_to_graph(graph, target_value)?;
+        }
 
-        // resolve value
-        let val = self.value.mir_repr(phase, mir_phase, mir_funcs)?;
-        let info = self.info()?;
+        if graph.is_current_sealed() {
+            return Ok(()); // value encountered early exit
+        }
 
-        Ok(MirLet {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            var_id: info.var_id,
-            ty: mir_ty,
-            val: Box::new(val),
-            global: self.global,
-            mutable: self.mutable,
-        })
+        let empty_id = graph.graph.expressions
+            .insert_empty(&graph.mir_phase.types);
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            empty_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos },
+        );
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 
@@ -500,13 +568,6 @@ impl HirExpr for HirLet {
 
 impl EdlFnArgument for HirLet {
     type CompilerState = HirPhase;
-
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
 
     /// While the value of the let expression might be known at compiletime, the actual let-expression
     /// cannot be executed in pre-processing, since it involves allocating stack space.

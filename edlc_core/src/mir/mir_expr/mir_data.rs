@@ -1,40 +1,68 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::mem;
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_type::MirTypeId;
-use crate::resolver::ScopeId;
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::{MirError, MirPhase};
+use crate::prelude::{AmorphusData, ExecutorVM};
+use std::mem;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirData {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
-    pub id: MirUid,
     pub ty: MirTypeId,
     pub value: Vec<u8>,
 }
 
+impl MirGraphElement for MirData {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
+    }
+
+    fn uses_var(&self, _val: &MirValue) -> bool {
+        false
+    }
+
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
+}
+
 impl MirData {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        _reg: &MirTypeRegistry,
+    ) -> Result<(), ExecutionError> {
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(target_ty, self.ty);
+        vm.copy_bytes(target_range.start, self.value.as_slice());
+        Ok(())
+    }
+
+    /// A raw data set is by definition supposed to be constant.
+    #[inline(always)]
+    pub fn is_avail(
+        &self,
+    ) -> bool {
+        true
+    }
+
     pub fn as_usize<B: Backend>(&self, phase: &MirPhase) -> Result<usize, MirError<B>> {
         if self.ty != phase.types.usize() {
             return Err(MirError::TypeMismatch {
@@ -45,20 +73,12 @@ impl MirData {
         assert_eq!(self.value.len(), mem::size_of::<usize>());
         Ok(unsafe { core::ptr::read_unaligned(self.value.as_ptr() as *const _) })
     }
-}
 
-impl From<MirData> for MirExpr {
-    fn from(value: MirData) -> Self {
-        MirExpr::Data(value)
+    pub fn data(&self) -> AmorphusData<'_> {
+        AmorphusData {
+            ty: self.ty,
+            data: self.value.as_slice(),
+        }
     }
 }
 
-impl<B: Backend> IsConstExpr<B> for MirData {
-    fn is_const_expr(
-        &self,
-        _phase: &MirPhase,
-        _funcs: &MirFuncRegistry<B>
-    ) -> Result<bool, MirError<B>> {
-        Ok(true)
-    }
-}

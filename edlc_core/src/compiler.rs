@@ -1,22 +1,25 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::hash::DefaultHasher;
 use std::io;
 use std::sync::Arc;
 use log::debug;
@@ -29,7 +32,7 @@ use crate::core::{edl_trait, edl_type};
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlFunctionBody;
 use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
-use crate::core::edl_param_env::{EdlParameterDef, EdlParameterEnv, EdlParamStack};
+use crate::core::edl_param_env::{EdlParameterDef, EdlParameterEnv, EdlParamStack, EdlGenericParamVariant, EdlGenericParamValue};
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
 use crate::core::edl_type::{EdlConst, EdlEnvId, EdlFnInstance, EdlMaybeType, EdlType, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType, FunctionState};
 use crate::file::{ModuleSrc, ParserSupplier};
@@ -38,6 +41,7 @@ use crate::hir::hir_fn::HirFn;
 use crate::hir::translation::HirTranslationError;
 use crate::{inline_code, issue};
 use crate::ast::ast_type_def::{AstTypeDef, LayoutOptions};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::InferState;
 use crate::documentation::{DocCompilerState, DocElement, DocGenerator};
 use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
@@ -48,6 +52,7 @@ use crate::mir::MirPhase;
 use crate::parser::{InFile, LocatedParseError, Parsable, Parser, ReportError};
 use crate::prelude::ast_fn::AstFnModifier;
 use crate::prelude::SrcSupplier;
+use crate::report::ReportableError;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId, TopLevelNameResolver};
 
 
@@ -121,6 +126,28 @@ macro_rules! report_ast {
             }
         }
     };
+}
+
+macro_rules! report_translation {
+    ($result:expr, $compiler:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(err) => {
+                return Err($compiler.report_ast_translation_err(err));
+            }
+        }
+    }
+}
+
+macro_rules! report_resolve {
+    ($result:expr, $compiler:expr, $pos:expr, $src:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(err) => {
+                return Err($compiler.report_resolver_err(err, $pos, $src));
+            }
+        }
+    }
 }
 
 impl EdlCompiler {
@@ -213,7 +240,7 @@ impl EdlCompiler {
     }
 
     pub fn parse_type(&mut self, module_src: ModuleSrc) -> Result<EdlMaybeType, CompilerError> {
-        let current_scope = *self.phase.res.current_scope()?;
+        let current_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -221,7 +248,7 @@ impl EdlCompiler {
         let ast_ty = AstType::parse(&mut parser)
             .in_file(module_src)
             .map_err(|err| self.report_ast_err(err))?;
-        let mut hir_ty = ast_ty.hir_repr(&mut self.phase)?;
+        let mut hir_ty = report_translation!(ast_ty.hir_repr(&mut self.phase), self);
         let edl_ty = hir_ty.edl_repr(&mut self.phase)?;
 
         self.phase.res.revert_to_scope(&current_scope);
@@ -229,7 +256,7 @@ impl EdlCompiler {
     }
 
     pub fn parse_env(&mut self, module_src: ModuleSrc) -> Result<EdlParameterEnv, CompilerError> {
-        let current_scope = *self.phase.res.current_scope()?;
+        let current_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -237,7 +264,7 @@ impl EdlCompiler {
         let ast_env = AstParamEnv::parse(&mut parser)
             .in_file(module_src)
             .map_err(|err| self.report_ast_err(err))?;
-        let mut hir_env = ast_env.hir_repr(&mut self.phase)?;
+        let mut hir_env = report_translation!(ast_env.hir_repr(&mut self.phase), self);
         let edl_env = hir_env.edl_repr(&mut self.phase)?;
 
         self.phase.res.revert_to_scope(&current_scope);
@@ -245,7 +272,7 @@ impl EdlCompiler {
     }
 
     pub fn parse_and_insert_env(&mut self, module_src: ModuleSrc) -> Result<EdlEnvId, CompilerError> {
-        let current_scope = *self.phase.res.current_scope()?;
+        let current_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -253,7 +280,7 @@ impl EdlCompiler {
         let ast_env = AstParamEnv::parse(&mut parser)
             .in_file(module_src)
             .map_err(|err| self.report_ast_err(err))?;
-        let mut hir_env = ast_env.hir_repr(&mut self.phase)?;
+        let mut hir_env = report_translation!(ast_env.hir_repr(&mut self.phase), self);
         let edl_env = hir_env.edl_repr(&mut self.phase)?;
         let id = self.phase.types.insert_parameter_env(edl_env);
 
@@ -267,7 +294,7 @@ impl EdlCompiler {
     }
 
     pub fn parse_fn_signature(&mut self, module_src: ModuleSrc) -> Result<EdlTypeId, CompilerError> {
-        let current_scope = *self.phase.res.current_scope()?;
+        let current_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -280,9 +307,9 @@ impl EdlCompiler {
             AstFnSignature::parse(&mut parser, modifiers).in_file(module_src), self);
         ast_sig.doc = docs;
 
-        let mut hir_sig = ast_sig.hir_repr(&mut self.phase)?;
+        let mut hir_sig = report_translation!(ast_sig.hir_repr(&mut self.phase), self);
         // insert function signature into code container
-        let full_name = hir_sig.full_name(&mut self.phase)?;
+        let full_name = hir_sig.full_name(&mut self.phase).map_err(CompilerError::ResolveError)?;
         let mut func_doc = hir_sig.doc(&DocCompilerState {
             types: &self.phase.types,
             vars: &self.phase.vars,
@@ -293,7 +320,7 @@ impl EdlCompiler {
         let edl_sig = hir_sig.edl_repr(&mut self.phase)?;
 
         self.phase.res.revert_to_scope(&current_scope);
-        self.phase.res.push_top_level_item(
+        report_resolve!(self.phase.res.push_top_level_item(
             hir_sig.name.clone(),
             ItemSrc::Intrinsic("".to_string()),
             ItemInit::Function {
@@ -301,7 +328,7 @@ impl EdlCompiler {
                 scope: hir_sig.scope,
             },
             &mut self.phase.types,
-        )?;
+        ), self, &hir_sig.pos, &hir_sig.src);
 
         let top_level_name = vec![hir_sig.name].into();
         self.phase.res.find_top_level_function(
@@ -313,7 +340,7 @@ impl EdlCompiler {
     }
 
     pub fn parse_function(&mut self, module_src: ModuleSrc) -> Result<HirFn, CompilerError> {
-        let current_scope = *self.phase.res.current_scope()?;
+        let current_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -325,7 +352,7 @@ impl EdlCompiler {
         let mut ast_fn = report_ast!(
             AstFn::parse(&mut parser, modifiers).in_file(module_src), self);
         ast_fn.signature.doc = docs;
-        let hir_fn = ast_fn.hir_repr(&mut self.phase)?;
+        let hir_fn = report_translation!(ast_fn.hir_repr(&mut self.phase), self);
 
         self.phase.res.revert_to_scope(&current_scope);
         Ok(hir_fn)
@@ -336,14 +363,14 @@ impl EdlCompiler {
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
 
         let env = self.parse_env(env_src)?;
-        self.phase.res.push_top_level_item(
+        report_resolve!(self.phase.res.push_top_level_item(
             name.to_string(),
             ItemSrc::Intrinsic(name.to_string()),
             ItemInit::Type {
                 params: env,
             },
             &mut self.phase.types,
-        )?;
+        ), self, &SrcPos::default(), &name_src);
 
         let top_level_name: QualifierName = vec![name.to_string()].into();
         self.phase.res.find_top_level_type(&top_level_name, &self.phase.types)
@@ -359,8 +386,8 @@ impl EdlCompiler {
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
         let mut parser = self.create_parser(&src_code, src.clone());
         let ast_def = report_ast!(AstTypeDef::parse(&mut parser).in_file(src), self);
-        let state = ast_def.push_to_resolver(&mut self.phase)?;
-        let _ = state.update_layout(&mut self.phase, options)?;
+        let state = report_translation!(ast_def.push_to_resolver(&mut self.phase), self);
+        let _ = report_translation!(state.update_layout(&mut self.phase, options), self);
         Ok(())
     }
 
@@ -372,7 +399,7 @@ impl EdlCompiler {
         src: ModuleSrc,
         name: QualifierName
     ) -> Result<HirModule, CompilerError> {
-        self.prepare_module(&name)?;
+        self.prepare_module(&name).map_err(CompilerError::ResolveError)?;
         let code = src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
         let mut parser = self.parser(&code, src.clone());
@@ -380,8 +407,8 @@ impl EdlCompiler {
             AstModule::parse(&mut parser, name, String::new()).in_file(src.clone()), self);
 
         self.phase.report_mode.print_errors = true;
-        ast_module.prepare_root(&mut self.phase)?;
-        let mut hir_module = ast_module.hir_repr(&mut self.phase)?;
+        report_translation!(ast_module.prepare_root(&mut self.phase), self);
+        let mut hir_module = report_translation!(ast_module.hir_repr(&mut self.phase), self);
         self.phase.report_mode.print_errors = false;
 
         let mut infer_state = InferState::new();
@@ -397,7 +424,7 @@ impl EdlCompiler {
             return Err(CompilerError::Multiple(errs));
         }
         // register module in code container
-        hir_module.register_code(&mut self.phase)?;
+        report_resolve!(hir_module.register_code(&mut self.phase), self, &SrcPos::default(), &hir_module.src);
         Ok(hir_module)
     }
 
@@ -430,7 +457,7 @@ impl EdlCompiler {
         stack.push(&root);
 
         while let Some(module) = stack.pop() {
-            self.prepare_module(&module.name)?;
+            self.prepare_module(&module.name).map_err(CompilerError::ResolveError)?;
             debug!("registering module name: {}", module.name);
             for (child, _) in module.iter_children() {
                 stack.push(child);
@@ -439,9 +466,9 @@ impl EdlCompiler {
 
         self.phase.report_mode.print_errors = true;
         self.phase.report_mode.print_warnings = true;
-        root.prepare_root(&mut self.phase)?;
+        report_translation!(root.prepare_root(&mut self.phase), self);
         // parse into HIR repr
-        let mut hir_module = root.hir_repr(&mut self.phase)?;
+        let mut hir_module = report_translation!(root.hir_repr(&mut self.phase), self);
 
         self.phase.report_mode.print_errors = false;
         self.phase.report_mode.print_warnings = false;
@@ -460,7 +487,7 @@ impl EdlCompiler {
             return Err(CompilerError::Multiple(errs));
         }
         // register module in code container
-        hir_module.register_code(&mut self.phase)?;
+        hir_module.register_code(&mut self.phase).map_err(CompilerError::ResolveError)?;
         Ok(hir_module)
     }
 
@@ -471,7 +498,7 @@ impl EdlCompiler {
         base_file: &str,
     ) -> Result<HirModule, CompilerError> {
         let mut root = report_ast!(AstModule::load_root(self, src_supplier, name, base_file), self);
-        self.prepare_module(&root.name)?;
+        report_resolve!(self.prepare_module(&root.name), self, &SrcPos::default(), &root.src);
         // scripts do not have submodules, thus we must not resolve any submodules
         let num_children = root.iter_children().count();
         if num_children != 0 {
@@ -479,7 +506,7 @@ impl EdlCompiler {
             // error information which can then be used to construct the error arguments.
             // the reason for this is, that [TypeArguments] expects a lifetime and thus the
             // provided argument must essentially be forced to outlive the actual error message.
-            let mut errors = Vec::<(SrcPos, ModuleSrc, [TypeArgument; 1])>::new();
+            let mut errors = Vec::<(SrcPos, ModuleSrc, [TypeArgument<'_, DefaultHasher>; 1])>::new();
             for (child, pos) in root.iter_children() {
                 errors.push((
                     *pos,
@@ -513,9 +540,9 @@ edl init --bin
         }
 
         self.phase.report_mode.print_errors = true;
-        root.prepare_root(&mut self.phase)?;
+        report_translation!(root.prepare_root(&mut self.phase), self);
         // parse into HIR repr
-        let mut hir_module = root.hir_repr(&mut self.phase)?;
+        let mut hir_module = report_translation!(root.hir_repr(&mut self.phase), self);
         self.phase.report_mode.print_errors = false;
 
         let mut infer_state = InferState::new();
@@ -531,7 +558,7 @@ edl init --bin
             return Err(CompilerError::Multiple(errs));
         }
         // register code in code container
-        hir_module.register_code(&mut self.phase)?;
+        report_resolve!(hir_module.register_code(&mut self.phase), self, &SrcPos::default(), &hir_module.src);
         Ok(hir_module)
     }
 
@@ -584,11 +611,11 @@ edl init --bin
     pub fn parse_impl<const N: usize>(
         &mut self,
         env: ModuleSrc,
-        base: ModuleSrc,
+        base_src: ModuleSrc,
         function_signatures: [ModuleSrc; N],
         trait_name: Option<(ModuleSrc, ModuleSrc)>
     ) -> Result<[EdlTypeId; N], CompilerError> {
-        let prev_scope = *self.phase.res.current_scope()?;
+        let prev_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
 
         let env_str = env.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -597,19 +624,19 @@ edl init --bin
             AstParamEnv::parse(&mut parser).in_file(env), self);
 
         self.phase.res.push_block();
-        let scope = *self.phase.res.current_scope()?;
-        let mut hir_env = ast_env.hir_repr(&mut self.phase)?;
+        let scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
+        let mut hir_env = report_translation!(ast_env.hir_repr(&mut self.phase), self);
         let env = hir_env.edl_repr(&mut self.phase)?;
         let env_id = self.phase.types.insert_parameter_env(env);
         self.phase.res.revert_to_scope(&scope);
         self.phase.res.push_env(env_id, &mut self.phase.types)?;
 
-        let base_str = base.get_src()
+        let base_str = base_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-        let mut parser = self.parser(&base_str, base.clone());
+        let mut parser = self.parser(base_str, base_src.clone());
         let ast_base = report_ast!(AstType::parse(&mut parser)
-            .in_file(base), self);
-        let mut hir_base = ast_base.hir_repr(&mut self.phase)?;
+            .in_file(base_src.clone()), self);
+        let mut hir_base = report_translation!(ast_base.hir_repr(&mut self.phase), self);
         let edl_base = hir_base.edl_repr(&mut self.phase)?;
 
         let EdlMaybeType::Fixed(base) = edl_base else {
@@ -626,6 +653,9 @@ edl init --bin
             types: &self.phase.types,
             vars: &self.phase.vars,
         });
+
+        self.phase.res.revert_to_scope(&scope);
+        report_resolve!(self.phase.res.push_self_type(base.clone()), self, &SrcPos::default(), &base_src);
 
         // parse and register function signatures
         let mut fns = HashMap::new();
@@ -646,7 +676,7 @@ edl init --bin
                 AstFnSignature::parse(&mut parser, modifiers).in_file(func.clone()), self);
 
             ast_func.doc = docs;
-            let mut hir_func = ast_func.hir_repr(&mut self.phase)?;
+            let mut hir_func = report_translation!(ast_func.hir_repr(&mut self.phase), self);
             // insert function definition into code container
             // let mut full_name = base_type_name.clone();
             // full_name.push(hir_func.name.clone());
@@ -704,7 +734,7 @@ edl init --bin
             let mut parser = self.parser(&trait_param_str, trait_params.clone());
             let ast_trait_params = report_ast!(
                 AstParamDef::parse(&qualifier_name, &mut parser).in_file(trait_params), self);
-            let mut hir_trait_params = ast_trait_params.hir_repr(&mut self.phase)?;
+            let mut hir_trait_params = report_translation!(ast_trait_params.hir_repr(&mut self.phase), self);
             let edl_trait_params = hir_trait_params.edl_repr(trait_env_id, &mut self.phase)?;
 
             // todo check function signatures for compatibility
@@ -726,57 +756,36 @@ edl init --bin
         &mut self,
         name: ModuleSrc,
         env: ModuleSrc,
-        funcs: &[ModuleSrc],
+        _funcs: &[ModuleSrc],
         associated_types: &[ModuleSrc],
         core_id: Option<EdlTraitId>,
     ) -> Result<EdlTraitId, CompilerError> {
-        let prev_scope = *self.phase.res.current_scope()?;
-        let mut base_name = self.phase.res.current_level_name()?;
+        let prev_scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
+        let mut base_name = self.phase.res.current_level_name().map_err(CompilerError::ResolveError)?;
 
         let env_str = env.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-        let mut parser = self.parser(&env_str, env.clone());
+        let mut parser = self.parser(env_str, env.clone());
         let ast_env = report_ast!(
             AstParamEnv::parse(&mut parser).in_file(env), self);
 
         self.phase.res.push_block();
-        let scope = *self.phase.res.current_scope()?;
-        let mut hir_env = ast_env.hir_repr(&mut self.phase)?;
+        let scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
+        let mut hir_env = report_translation!(ast_env.hir_repr(&mut self.phase), self);
         let env = hir_env.edl_repr(&mut self.phase)?;
         let env_id = self.phase.types.insert_parameter_env(env);
         self.phase.res.revert_to_scope(&scope);
         self.phase.res.push_env(env_id, &mut self.phase.types)?;
 
-        let mut fns = Vec::new();
-        for func in funcs {
-            self.phase.res.revert_to_scope(&scope);
-
-            let func_str = func.get_src()
-                .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-            let mut parser = self.parser(&func_str, func.clone());
-            let docs = report_ast!(
-                ItemDoc::try_parse(&mut parser).in_file(func.clone()), self);
-            let modifiers = report_ast!(
-                Vec::<AstFnModifier>::parse(&mut parser).in_file(func.clone()), self);
-            let mut ast_func = report_ast!(
-                AstFnSignature::parse(&mut parser, modifiers).in_file(func.clone()), self);
-
-            ast_func.doc = docs;
-            let mut hir_func = ast_func.hir_repr(&mut self.phase)?;
-            let edl_func = hir_func.edl_repr(&mut self.phase)?;
-
-            fns.push(edl_func);
-        }
-
+        // parse name
         let name_str = name.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
         base_name.push(name_str.clone());
         let edl_trait = EdlTrait {
             name: base_name,
             env: env_id,
-            // fns,
             associated_types: associated_types.iter().map(|e| e.get_src()
-                    .map(|src| src.to_string()))
+                .map(|src| src.to_string()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| CompilerError::IoError(Arc::new(err)))?,
         };
@@ -787,15 +796,61 @@ edl init --bin
             self.phase.types.insert_trait(edl_trait)
         };
 
-        self.phase.res.revert_to_scope(&scope);
-        self.phase.res.push_top_level_item(
+        self.phase.res.revert_to_scope(&prev_scope);
+        report_resolve!(self.phase.res.push_top_level_item(
             name_str.to_string(),
             ItemSrc::Intrinsic("".to_string()),
             ItemInit::Trait {
                 id: trait_id,
             },
             &mut self.phase.types,
-        )?;
+        ), self, &SrcPos::default(), &name);
+
+        // create self parameter
+        // self.phase.res.push_self_trait()
+        let mut trait_instance = self.phase.types.new_trait_instance(trait_id).unwrap();
+        let env_def = self.phase.types.get_env(env_id).unwrap().clone();
+        trait_instance.param.params
+            .iter_mut()
+            .zip(env_def.params.iter().enumerate())
+            .for_each(|(param, (index, def))| {
+                match &def.variant {
+                    EdlGenericParamVariant::Const(_) => {
+                        *param = EdlGenericParamValue::Const(EdlConstValue::GenericConst {
+                            param: env_id,
+                            index,
+                        });
+                    }
+                    EdlGenericParamVariant::Type => {
+                        let ty = self.phase.types.generic(env_id, index);
+                        *param = EdlGenericParamValue::Type(ty);
+                    }
+                }
+            });
+        self.phase.res.revert_to_scope(&scope);
+        report_resolve!(self.phase.res.push_self_trait(trait_instance), self, &SrcPos::default(), &name);
+
+        // TODO parse function signatures
+        // let mut fns = Vec::new();
+        // for func in funcs {
+        //     self.phase.res.revert_to_scope(&scope);
+        //
+        //     let func_str = func.get_src()
+        //         .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
+        //     let mut parser = self.parser(func_str, func.clone());
+        //     let docs = report_ast!(
+        //         ItemDoc::try_parse(&mut parser).in_file(func.clone()), self);
+        //     let modifiers = report_ast!(
+        //         Vec::<AstFnModifier>::parse(&mut parser).in_file(func.clone()), self);
+        //     let mut ast_func = report_ast!(
+        //         AstFnSignature::parse(&mut parser, modifiers).in_file(func.clone()), self);
+        //
+        //     ast_func.doc = docs;
+        //     let mut hir_func = ast_func.trait_signature(&mut self.phase)?;
+        //     let edl_func = hir_func.edl_repr(&mut self.phase)?;
+        //
+        //     fns.push(edl_func);
+        // }
 
         // revert to initial scope
         self.phase.res.revert_to_scope(&prev_scope);
@@ -992,13 +1047,7 @@ edl init --bin
             &[inline_code!("Output")],
             Some(edl_trait::EDL_REM_TRAIT),
         )?;
-        self.parse_trait(
-            inline_code!("Copy"),
-            inline_code!("<Lhs>;"),
-            &[inline_code!("fn copy(lhs: Lhs) -> Lhs;")],
-            &[],
-            Some(edl_trait::EDL_COPY_TRAIT),
-        )?;
+
         self.parse_trait(
             inline_code!("Display"),
             inline_code!("<Lhs>;"),
@@ -1069,6 +1118,33 @@ edl init --bin
             &[],
             Some(edl_trait::EDL_INTO_TRAIT),
         )?;
+
+        self.parse_trait(
+            inline_code!("Copy"),
+            inline_code!("<Lhs>;"),
+            &[inline_code!("fn copy(lhs: Lhs) -> Lhs;")],
+            &[],
+            Some(edl_trait::EDL_COPY_TRAIT),
+        )?;
+        self.parse_trait(
+            inline_code!("Drop"),
+            inline_code!("<This>"),
+            &[
+                inline_code!("fn drop(s: This)"),
+            ],
+            &[],
+            Some(edl_trait::EDL_DROP_TRAIT)
+        )?;
+        self.parse_trait(
+            inline_code!("Event"),
+            inline_code!("<This>"),
+            &[
+                inline_code!("fn record() -> This"),
+                inline_code!("fn synchronize(self)"),
+            ],
+            &[],
+            Some(edl_trait::EDL_EVENT_TRAIT),
+        )?;
         Ok(())
     }
 
@@ -1089,13 +1165,23 @@ edl init --bin
         Ok(())
     }
 
+    pub fn register_event_type<T: MirLayout + 'static>(
+        &mut self,
+        ty: ModuleSrc,
+    ) -> Result<(), CompilerError> {
+        let event_type_id = self.parse_type(ty)?.unwrap();
+        self.phase.types.register_event_type(event_type_id);
+        self.mir_phase.types.register_event_type::<T>(&self.phase.types)?;
+        Ok(())
+    }
+
     pub fn get_func_instance(
         &mut self,
         func_id: EdlTypeId,
         func_params: ModuleSrc,
         associated_type: Option<ModuleSrc>
     ) -> Result<EdlFnInstance, CompilerError> {
-        let scope = *self.phase.res.current_scope()?;
+        let scope = *self.phase.res.current_scope().map_err(CompilerError::ResolveError)?;
         let sig = self.phase.types.get_fn_signature(func_id)?.clone();
         // parse function signature environment parameters
         let param_str = func_params.get_src()
@@ -1103,7 +1189,7 @@ edl init --bin
         let mut parser = self.parser(&param_str, func_params.clone());
         let ast_def = report_ast!(
             AstParamDef::parse_env(sig.env, &mut parser).in_file(func_params), self);
-        let mut hir_def = ast_def.hir_repr(&mut self.phase)?;
+        let mut hir_def = report_translation!(ast_def.hir_repr(&mut self.phase), self);
         let edl_def = hir_def.edl_repr(sig.env, &mut self.phase)?;
         if !edl_def.is_fully_resolved() {
             return Err(CompilerError::UnresolvedParameterDef(edl_def));
@@ -1117,7 +1203,7 @@ edl init --bin
             let mut parser = self.parser(&associated_type_src, associated_type.clone());
             let ast_associated_ty = report_ast!(
                 AstType::parse(&mut parser).in_file(associated_type), self);
-            let mut hir_associated_ty = ast_associated_ty.hir_repr(&mut self.phase)?;
+            let mut hir_associated_ty = report_translation!(ast_associated_ty.hir_repr(&mut self.phase), self);
             let edl_ty = hir_associated_ty.edl_repr(&mut self.phase)?;
 
             if !edl_ty.is_fully_resolved() {
@@ -1229,6 +1315,28 @@ edl init --bin
         CompilerError::AstError(err)
     }
 
+    pub fn report_ast_translation_err(&mut self, err: AstTranslationError) -> CompilerError {
+        let prev_print_error = self.phase.report_mode.print_errors;
+        let prev_print_warn = self.phase.report_mode.print_warnings;
+        self.phase.report_mode.print_errors = true;
+        self.phase.report_mode.print_warnings = true;
+        err.report_err(&mut self.phase);
+        self.phase.report_mode.print_errors = prev_print_error;
+        self.phase.report_mode.print_warnings = prev_print_warn;
+        CompilerError::AstTranslationError(err)
+    }
+
+    pub fn report_resolver_err(&mut self, err: ResolveError, pos: &SrcPos, src: &ModuleSrc) -> CompilerError {
+        let prev_print_error = self.phase.report_mode.print_errors;
+        let prev_print_warn = self.phase.report_mode.print_warnings;
+        self.phase.report_mode.print_errors = true;
+        self.phase.report_mode.print_warnings = true;
+        err.report_err(&mut self.phase, pos, src);
+        self.phase.report_mode.print_errors = prev_print_error;
+        self.phase.report_mode.print_warnings = prev_print_warn;
+        CompilerError::ResolveError(err)
+    }
+
     /// Generates documentation for all code that has so far been compiled with this compiler using
     /// the specified documentation generator.
     /// See [DocGenerator] for more information.
@@ -1326,18 +1434,6 @@ impl From<HirTranslationError> for CompilerError {
     }
 }
 
-impl From<Vec<HirError>> for CompilerError {
-    fn from(value: Vec<HirError>) -> Self {
-        CompilerError::Multiple(value)
-    }
-}
-
-impl From<AstTranslationError> for CompilerError {
-    fn from(value: AstTranslationError) -> Self {
-        Self::AstTranslationError(value)
-    }
-}
-
 impl From<HirError> for CompilerError {
     fn from(value: HirError) -> Self {
         Self::HirError(value)
@@ -1350,13 +1446,12 @@ impl From<EdlError> for CompilerError {
     }
 }
 
+#[cfg(debug_assertions)]
 impl From<ResolveError> for CompilerError {
     fn from(value: ResolveError) -> Self {
-        Self::ResolveError(value)
+        CompilerError::ResolveError(value)
     }
 }
-
-
 
 
 #[cfg(test)]

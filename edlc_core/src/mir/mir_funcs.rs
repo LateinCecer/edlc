@@ -1,46 +1,51 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 mod comptime_value;
 
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use log::debug;
 use crate::core::edl_error::EdlError;
-use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTypeId, EdlTypeRegistry, FmtType};
-use crate::core::EdlVarId;
+use crate::core::edl_fn::FnArgumentConstraints;
+use crate::core::edl_impl::{CallResolver, GenericTypeHints};
+use crate::core::edl_param_env::EdlParameterDef;
+use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::index_map::IndexMap;
+use crate::core::{edl_trait, EdlVarId};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
-use crate::hir::HirPhase;
 use crate::hir::translation::HirTranslationError;
+use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_block::MirBlock;
-use crate::mir::mir_expr::MirTreeWalker;
+use crate::mir::mir_expr::mir_call::{CallContext, MirCall};
+use crate::mir::mir_expr::{ExecutionError, HeadlessId, MirExprId, MirFlowGraph, MirLoc, MirValue, StackFrameLayout};
+pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueId, ComptimeValueMapper};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry, TMirFnCallInfo, TMirFnInstance, UnifiedFnInstance};
-use crate::mir::{MirError, MirPhase, MirUid};
-use crate::mir::mir_expr::mir_assign::VarFinder;
-use crate::mir::mir_expr::MirExpr;
-pub use crate::mir::mir_funcs::comptime_value::{ComptimeValueMapper, ComptimeValueId};
-use crate::mir::mir_let::MirLet;
+use crate::mir::{DebugInformation, MirError, MirPhase, MirUid};
+use crate::prelude::edl_type::EdlMaybeType;
+use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
 use crate::resolver::ScopeId;
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::PathBuf;
+use std::ops;
 
 pub const INTR_ADD_USIZE: &str = "add_usize";
 pub const INTR_SUB_USIZE: &str = "sub_usize";
@@ -48,10 +53,20 @@ pub const INTR_MUL_USIZE: &str = "mul_usize";
 pub const INTR_DIV_USIZE: &str = "div_usize";
 
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum CallSrc {
+    Expr(MirExprId),
+    Headless(HeadlessId),
+}
+
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct MirFuncId(usize);
 
 impl MirFuncId {
+    pub fn ordinal(&self) -> usize {
+        self.0
+    }
+
     pub fn clean_print(&self) -> String {
         format!("{:x}", self.0)
     }
@@ -59,8 +74,9 @@ impl MirFuncId {
 
 enum CodeGenState<B: Backend> {
     Waiting,
-    Ready(Box<dyn CodeGen<B>>),
-    Inline(Box<MirFn>, Box<dyn CodeGen<B>>, bool),
+    MirPass { body: Box<MirFn> },
+    Ready { body: Box<MirFn>, call_gen: Box<dyn CodeGen<B>> },
+    Internal { call_gen: Box<dyn CodeGen<B>> },
 }
 
 pub struct MirFuncInfo<B: Backend> {
@@ -82,8 +98,6 @@ where B: Backend {
 
     impl_definitions: HashMap<EdlTypeId, usize>,
     impls: Vec<HirImpl>,
-
-    pub body_generators: Vec<MirFn>,
     func_id: FnId,
 
     /// The compiler needs some function implementations to work properly.
@@ -102,8 +116,6 @@ impl<B: Backend> Default for MirFuncRegistry<B> {
             generators: IndexMap::default(),
             definitions: HashMap::default(),
             hybrid_call_lookup: HashMap::default(),
-
-            body_generators: Vec::new(),
             func_id: FnId(0),
 
             impl_definitions: HashMap::default(),
@@ -284,8 +296,8 @@ impl DependencyAnalyser {
         &self,
         stack: &CallStack,
         phase: &mut HirPhase,
-        issue: TypeArguments,
-        help: Option<TypeArguments>
+        issue: TypeArguments<'_, DefaultHasher>,
+        help: Option<TypeArguments<'_, DefaultHasher>>,
     ) {
         let mut error_info = Vec::new();
         for call in stack.0.iter().rev() {
@@ -306,7 +318,7 @@ impl DependencyAnalyser {
                     (&sig[0] as &dyn FmtType).into(),
                 ]
             })
-            .collect::<Vec<[TypeArgument; 2]>>();
+            .collect::<Vec<[TypeArgument<'_, DefaultHasher>; 2]>>();
         // format final error messages
         let errors = error_info.iter()
             .zip(errors.iter())
@@ -487,17 +499,12 @@ impl<B: Backend> MirFuncRegistry<B> {
         // this is done to avoid infinite recursion during MIR function resolution.
         let im = im.clone();
         let mut mir_instance = im.mir_repr(hir_phase, mir_phase, self, edl, comptime_params, force_comptime_call)?;
+        mir_instance.mir_id = Some(id);
 
         // now that the code-gen is ready, place it into the function registry
-        let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+        // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
         let func = self.generators.get_mut(id.0).unwrap();
-        if !mir_instance.inline {
-            self.body_generators.push(mir_instance);
-            func.code_gen = CodeGenState::Ready(loc);
-        } else {
-            self.body_generators.push(mir_instance.clone());
-            func.code_gen = CodeGenState::Inline(Box::new(mir_instance), loc, true);
-        }
+        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
     }
 
@@ -531,17 +538,114 @@ impl<B: Backend> MirFuncRegistry<B> {
         // this is done to avoid infinite recursive loops during MIR function resolution.
         let def = def.clone(); // we have to clone that here, since we need `&mut self`
         let mut mir_instance = def.mir_repr(hir_phase, mir_phase, self, &edl.param, comptime_params, forced_comptime_call)?;
+        mir_instance.mir_id = Some(id);
         // now that the code-gen is ready, place it into the function registry
-        let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+        // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
+
         let func = self.generators.get_mut(id.0).unwrap();
-        if !mir_instance.inline {
-            self.body_generators.push(mir_instance);
-            func.code_gen = CodeGenState::Ready(loc);
-        } else {
-            self.body_generators.push(mir_instance.clone());
-            func.code_gen = CodeGenState::Inline(Box::new(mir_instance), loc, true);
-        }
+        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
+    }
+
+    /// Collects all functions that are ready for code generation.
+    /// The caller must make sure that each function is only generated once, if the codegen backend
+    /// does not support overwriting function definitions on the fly (hot-pluggable code via PIC).
+    pub fn collect_codegen<P: Fn(&MirFuncId) -> bool>(&self, predicate: P) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::Ready { body, .. } = &f.code_gen {
+                if predicate(body.mir_id.as_ref().unwrap()) {
+                    Some(body.as_ref().clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    /// Collects all functions in the function registry that must be transformed during a MIR pass.
+    /// This must, unfortunately, be done through explicit copies, since the transformation itself
+    /// requires mutable access to the function registry itself (usually).
+    ///
+    /// After transformation, the results are reinserted into the registry with
+    /// [Self::finish_mir_pass].
+    ///
+    /// # On Hybrid Functions
+    ///
+    /// Hybrid functions, that is all functions that have a runtime context but contain `comptime`
+    /// function parameters, can only be processed once the function call that belongs to the
+    /// hybrid function instance is fully resolved and the values of the constant parameters are
+    /// registered in the function registry.
+    /// This method collects hybrid functions, but only under the condition that all comptime
+    /// parameters for that hybrid function are present.
+    pub fn collect_mir_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                // comptime functions are always collected by this pass
+                if body.signature.comptime || body.signature.comptime_only || body.comptime_params
+                    .iter()
+                    .all(|p| self.comptime_mapper.get(p.value).is_some()) {
+                    // since `all` returns ture if `comptime_params` is empty, this arm includes
+                    // all non-hybrid functions
+                    Some(body.as_ref().clone())
+                } else {
+                    // hybrid functions are ignored in this first pass
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    /// Collects all `comptime` and `?comptime` functions for processing.
+    /// Since these functions cannot call runtime functions, they _cannot_ depend on hybrid
+    /// functions.
+    /// At the same time, this call of functions is necessary to resolve comptime time constants
+    /// and must thus be processed before runtime context functions are processed.
+    pub fn collect_comptime_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                if body.signature.comptime || body.signature.comptime_only {
+                    Some(body.as_ref().clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    /// Can be used to reinsert transformed functions back into the function registry.
+    pub fn finish_mir_pass(&mut self, pass: Vec<MirFn>)
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+        for mut func in pass.into_iter() {
+            let id = func.mir_id.unwrap();
+            let call_generator = func.reserve_loc(id).unwrap();
+            self.generators
+                .get_mut(id.0)
+                .unwrap()
+                .code_gen = CodeGenState::Ready { call_gen: call_generator, body: Box::new(func) };
+        }
+    }
+
+    /// Collects function body copies for an optimization pass.
+    /// In essence, this method captures all functions that are marked as `Ready` in the code gen
+    /// state.
+    pub fn collect_opt_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPass { body } = &f.code_gen {
+                Some(body.as_ref().clone())
+            } else {
+                None
+            })
+            .collect()
     }
 
     /// Registers a function definition.
@@ -580,7 +684,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         let f = MirFuncInfo {
             edl_version: tmir.clone(),
-            code_gen: CodeGenState::Ready(Box::new(code_gen)),
+            code_gen: CodeGenState::Internal { call_gen: Box::new(code_gen) },
             comptime,
             comptime_only,
         };
@@ -620,7 +724,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         types: &MirTypeRegistry,
         edl_types: &EdlTypeRegistry,
         name: &str,
-    ) -> Result<(), EdlError> {
+    ) -> Result<MirFuncId, EdlError> {
         let sig = edl_types.get_fn_signature(edl.func)?;
         assert_eq!(sig.comptime | sig.comptime_only, comptime,
                    "comptime specified in function signature must match \
@@ -637,10 +741,10 @@ impl<B: Backend> MirFuncRegistry<B> {
         }
         let id = self.register_internal(edl, code_gen, types, edl_types, false)?;
         *self.compiler_intrinsic_functions.entry(name.to_string()).or_insert(id) = id;
-        Ok(())
+        Ok(id)
     }
 
-    pub fn get_intrinsic(&self, name: &'static str) -> Option<&MirFuncId> {
+    pub fn get_intrinsic(&self, name: &str) -> Option<&MirFuncId> {
         self.compiler_intrinsic_functions.get(name)
     }
 
@@ -650,7 +754,7 @@ impl<B: Backend> MirFuncRegistry<B> {
     /// can be evaluated at compiletime and replaced with a constant value at runtime, which may
     /// greatly improve runtime performance.
     pub fn is_comptime(&self, id: MirFuncId) -> Option<bool> {
-        self.generators.get(id.0).map(|gen| gen.comptime)
+        self.generators.get(id.0).map(|gen| gen.comptime || gen.comptime_only)
     }
 
     /// Returns `true` if this function can **only** be called during comptime.
@@ -667,48 +771,84 @@ impl<B: Backend> MirFuncRegistry<B> {
         &mut self,
         id: MirFuncId,
         backend: &mut B::FuncGen<'_>,
-        type_reg: &mut MirPhase
+        type_reg: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        mir_call: &MirCall,
+        target: Option<&MirValue>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<B>> {
         let code_gen = &mut self.generators.get_mut(id.0)
             .expect("Invalid MIR function id").code_gen;
 
         match code_gen {
             CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
-            CodeGenState::Ready(gen) => gen.code_gen(backend, type_reg),
-            CodeGenState::Inline(body, gen, has_signature) => {
-                // Inlined functions do not always generate a function signature at all.
-                // If we want to generate the function, we need to make sure that the function
-                // actually exists.
-                // Thus, we need to add the generator to the set of function body generators if it
-                // is not already present in there
-                if !*has_signature {
-                    self.body_generators.push(*body.clone());
-                    *has_signature = true;
-                }
-                gen.code_gen(backend, type_reg)
-            },
+            CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
+            CodeGenState::Ready{ call_gen, .. }
+                | CodeGenState::Internal { call_gen } => call_gen
+                .code_gen(backend, type_reg, cfg, mir_call, target, call_src),
+        }
+    }
+
+    /// Returns a reference to the code generator.
+    pub fn get_call_gen(
+        &self,
+        id: MirFuncId,
+    ) -> Option<&dyn CodeGen<B>> {
+        let code_gen = &self.generators.get(id.0)
+            .expect("Invalid MIR function id").code_gen;
+        match code_gen {
+            CodeGenState::Ready { call_gen, .. }
+                | CodeGenState::Internal { call_gen } => Some(call_gen.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn collect_debug_info(
+        &self,
+        info: &mut DebugInformation,
+        id: MirFuncId,
+        loc: &MirLoc,
+    ) {
+        let code_gen = &self.generators.get(id.0)
+            .expect("Invalid MIR function id").code_gen;
+
+        match code_gen {
+            CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
+            CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
+            CodeGenState::Ready{ call_gen, .. }
+            | CodeGenState::Internal { call_gen } => call_gen
+                .debug_info(info, loc),
         }
     }
 
     /// Gets the function body of a function to inline.
     /// If the function is not marked for inlining, `None` is returned.
-    pub fn get_inline_body(&self, id: MirFuncId, _mir_phase: &mut MirPhase) -> Result<Option<Box<MirFn>>, MirError<B>> {
-        if let CodeGenState::Inline(body, _, _) = &self.generators.get(id.0)
+    pub fn get_inline_body(
+        &self,
+        id: MirFuncId,
+    ) -> Result<Option<&MirFn>, MirError<B>> {
+        if let CodeGenState::MirPass { body }
+            | CodeGenState::Ready { body, .. } = &self.generators.get(id.0)
             .expect("Invalid MIR function id").code_gen {
-            // copy body and insert comptime parameters if necessary
             /*
             Note: For function body inlining, we can assume that the comptime parameter values are
               present, since they can be evaluated and insert right before inlining.
               Therefore, if `define_comptime_parameters` tries to defer verification, we can be
               sure that there is en error.
              */
-            let body = body.clone();
-            // <CompileResult<B> as Into<Result<(), MirError<B>>>>::into(
-            //     body.define_comptime_parameters(mir_phase, self))?;
-            Ok(Some(body))
+            Ok(Some(body.as_ref()))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_source_information(&self, id: MirFuncId) -> Option<(SrcPos, ModuleSrc)> {
+        self.get_inline_body(id)
+            .ok()
+            .and_then(|s| s.map(|func| (
+                func.signature.pos,
+                func.signature.src.clone())
+            ))
     }
 
     /// Returns the dependencies of one function to other functions.
@@ -757,12 +897,241 @@ impl<B: Backend> MirFuncRegistry<B> {
         id
     }
 
-    /// Returns a subset of mir functions for which instances have been requested during the last
-    /// codegen operations.
-    /// The set of MIR functions that is currently stored in this function registry will be returned
-    /// in full and its contents within the registry will be emptied.
-    pub fn get_body_generators(&self) -> &Vec<MirFn> {
-        &self.body_generators
+    pub fn auto_impl(
+        &mut self,
+        ty: MirTypeId,
+        sp: SpecialFunction,
+        hir_phase: &mut HirPhase,
+        mir_phase: &mut MirPhase,
+        info: &AutoFnLoc,
+    ) -> Result<Option<(MirFuncId, CallContext)>, HirTranslationError>
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
+        let ty = mir_phase.types.get_edl_type(ty)
+            .expect("MIR type definition does not exist");
+        if let Some(loc) = sp.lookup(
+            &ty, hir_phase, &info.src, &info.pos, info.scope_id,
+        ) {
+            let id = self.mir_id(
+                &loc,
+                hir_phase,
+                mir_phase,
+                ComptimeParams::empty(),
+                false,
+            )?;
+            let sig = hir_phase.types.get_fn_signature(loc.func)?;
+            return Ok(Some((id, CallContext::from_sig(sig))));
+        }
+
+        // TODO do auto implementation stuff here
+        Ok(None)
+    }
+}
+
+pub struct AutoFnLoc {
+    pub src: ModuleSrc,
+    pub pos: SrcPos,
+    pub scope_id: ScopeId,
+}
+
+pub enum SpecialFunction {
+    Drop,
+    Copy,
+    Record,
+    Sync,
+}
+
+impl SpecialFunction {
+    fn lookup(
+        &self,
+        ty: &EdlTypeInstance,
+        hir_phase: &mut HirPhase,
+        src: &ModuleSrc,
+        pos: &SrcPos,
+        scope: ScopeId,
+    ) -> Option<EdlFnInstance> {
+        use crate::core::type_analysis::*;
+        let impls = hir_phase.impl_reg.clone();
+        let impls = impls.borrow_mut();
+        let mut infer_state = InferState::new();
+
+        let mut resolver = match self {
+            SpecialFunction::Drop => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_DROP_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_DROP_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let empty = hir_phase.types.empty();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, &empty).unwrap();
+                inferer.at(node).eq(&val, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(val, "drop".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            }
+            SpecialFunction::Copy => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_COPY_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_COPY_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let ref_ty = hir_phase.types.new_ref(
+                    EdlMaybeType::Fixed(ty.clone()),
+                    Some(EdlConstValue::from_bool(false)),
+                ).unwrap();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, ty).unwrap();
+                inferer.at(node).eq(&val, &ref_ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(ret, "copy".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+            SpecialFunction::Sync => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_EVENT_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_EVENT_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let empty = hir_phase.types.empty();
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                let val = inferer.new_type(node);
+                inferer.at(node).eq(&ret, &empty).unwrap();
+                inferer.at(node).eq(&val, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![val],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(val, "synchronize".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+            SpecialFunction::Record => {
+                let env_id = hir_phase
+                    .types
+                    .get_trait(edl_trait::EDL_EVENT_TRAIT)
+                    .unwrap()
+                    .env;
+                let env = hir_phase
+                    .types
+                    .get_env(env_id)
+                    .unwrap();
+                let trait_instance = EdlTraitInstance {
+                    trait_id: edl_trait::EDL_EVENT_TRAIT,
+                    param: EdlParameterDef::new(env, env_id),
+                };
+
+                let mut inferer = hir_phase.infer_from(&mut infer_state);
+                let node = inferer.state.node_gen.gen_info(pos, src);
+
+                let ret = inferer.new_type(node);
+                inferer.at(node).eq(&ret, ty).unwrap();
+
+                let args = FnArgumentConstraints {
+                    args: vec![],
+                    ret,
+                };
+                let mut resolver = CallResolver::associate_function(ret, "record".to_string(), args, scope);
+                resolver.with_trait(trait_instance);
+                resolver
+                    .resolve::<_, fn(EdlEnvId, &mut HirPhase) -> Result<GenericTypeHints, String>>(
+                        hir_phase,
+                        &mut infer_state,
+                        &impls,
+                        None,
+                        node,
+                    )
+                    .ok()?;
+                resolver
+            },
+        };
+
+        let mut inferer = hir_phase.infer_from(&mut infer_state);
+        let (func_id, stack, base, _params) = resolver.finalize_types(&mut inferer)?;
+        let fn_instance = EdlFnInstance {
+            func: func_id,
+            param: stack,
+            associated_ty: base.map(|base| base.unwrap()),
+        };
+        Some(fn_instance)
     }
 }
 
@@ -771,7 +1140,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 pub struct MirComptimeParam {
     pub param_index: usize,
     pub comptime_index: usize,
-    value: ComptimeValueId,
+    pub(crate) value: ComptimeValueId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -781,34 +1150,6 @@ pub struct UnifiedComptimeParam {
     pub value: Vec<u8>,
 }
 
-impl MirComptimeParam {
-    pub fn generate_let_expr<B: Backend>(
-        &self,
-        sig: &MirFnSignature,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &MirFuncRegistry<B>,
-    ) -> Result<MirLet, MirError<B>> {
-        let value = mir_funcs.comptime_mapper.get(self.value)
-            .ok_or(MirError::ComptimeValueUnavailable(self.value))?;
-
-        Ok(MirLet {
-            pos: *value.get_pos(),
-            src: value.get_src().clone(),
-            global: false,
-            scope: *value.get_scope(),
-            ty: value.get_type(mir_funcs, mir_phase),
-            id: mir_phase.new_id(),
-            mutable: sig.comptime_params[self.comptime_index].mutable,
-            var_id: sig.comptime_params[self.comptime_index].var_id,
-            val: Box::new(value.clone()),
-        })
-    }
-
-    pub fn get_pos<'a, B: Backend>(&self, mir_funcs: &'a MirFuncRegistry<B>) -> Option<&'a SrcPos> {
-        mir_funcs.comptime_mapper.get(self.value)
-            .map(|val| val.get_pos())
-    }
-}
 
 impl PartialEq for MirComptimeParam {
     fn eq(&self, other: &MirComptimeParam) -> bool {
@@ -895,6 +1236,7 @@ impl ComptimeParams {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFnSignature {
     pub pos: SrcPos,
+    pub src: ModuleSrc,
     pub id: MirUid,
     pub scope: ScopeId,
     pub name: String,
@@ -904,6 +1246,8 @@ pub struct MirFnSignature {
     pub ret: MirTypeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
 }
 
 
@@ -915,15 +1259,19 @@ pub struct MirFnParam {
     pub ty: MirTypeId,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub var_id: EdlVarId,
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MirFn {
     pub signature: MirFnSignature,
-    pub body: MirBlock,
+    pub body: MirFlowGraph,
     pub comptime_params: ComptimeParams,
+
+    // safe some analysis results for this function.
+    pub stack_frame_layout: Option<StackFrameLayout>,
 
     pub mir_id: Option<MirFuncId>,
     /// The instruction pointer at which the function can be found after compiling
@@ -962,12 +1310,18 @@ impl<B: Backend> From<CompileResult<B>> for Result<(), MirError<B>> {
 
 
 impl MirFn {
-    pub fn new(signature: MirFnSignature, body: MirBlock, params: ComptimeParams, force_comptime: bool) -> Self {
+    pub fn new(
+        signature: MirFnSignature,
+        body: MirFlowGraph,
+        params: ComptimeParams,
+        force_comptime: bool,
+    ) -> Self {
         MirFn {
             inline: false,
             force_comptime,
             signature,
             body,
+            stack_frame_layout: None,
             mir_id: None,
             id: None,
             approx_size: None,
@@ -975,181 +1329,121 @@ impl MirFn {
         }
     }
 
-    /// Lists all the dependencies to other functions that exist in this MIR function
-    /// implementation.
-    pub fn dependencies<B: Backend>(&self) -> Result<FunctionDependencies, MirError<B>> {
-        let calls = self.body.walk(
-            &|item| matches!(item, MirExpr::Call(_)),
-            &|item| match item {
-                MirExpr::Call(call) => {
-                    Ok(call.func)
-                },
-                _ => panic!("illegal state")
-            }
-        )?;
-        Ok(FunctionDependencies::Resolved(calls))
-    }
+    /// Executes the function in the virtual executor.
+    pub fn execute_in_vm(
+        &self,
+        params: &[(ops::Range<usize>, MirTypeId)],
+        vm: &mut ExecutorVM,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<AmorphusDataCopy, ExecutionError> {
+        // create a copy of the stack frame layout and allocate memory for it.
+        // we need the copy here since the allocation might do some changes to the layout depending
+        // on the actual location of the stack frame in memory.
+        // since this might be a recursive function call, we need to copy the stack frame layout
+        // just in case.
+        // keep in mind that this is not a problem that we encounter in the actual codegen backend.
+        let mut stack_frame_layout = self.stack_frame_layout
+            .as_ref().unwrap().clone();
+        vm.alloc_stack_frame(&mut stack_frame_layout);
+        // copy parameter values from the source to the parameter slot
+        let root_parameters = self.body.get_root_parameters();
+        for (index, param_src) in params.iter().enumerate() {
+            let param_dst = stack_frame_layout
+                .get_offset(&root_parameters[index], vm).unwrap();
+            vm.memcpy(&param_dst, param_src);
+        }
+        assert_eq!(root_parameters.len(), params.len(), "not enough parameters");
+        // get comptime parameters
+        // NOTE: for hybrid functions the new optimization pipeline compiles the input parameters
+        //       directly into the base function!
 
-    /// This function traverses the body of the MIR function and registers all comptime parameter
-    /// values that are provided to comptime functions in function calls to the function registry.
-    /// It is important that this method is only ever called **after** the function has already
-    /// been verified.
-    /// Otherwise, it is likely that calling this function will result in unintelligible error
-    /// messages.
-    pub fn register_comptime_function_arguments<B: Backend>(
-        &mut self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        backend: &mut B,
-    ) -> Result<(), MirError<B>> {
-        let _ = self.body.walk_mut(
-            &mut |item| matches!(item, MirExpr::Call(_)),
-            &mut |item| match item {
-                MirExpr::Call(call) => call.register_comptime_values(mir_phase, backend, phase),
-                _ => panic!("illegal state"),
-            }
-        )?;
-        Ok(())
-    }
+        // let root_param_offset = params.len();
+        // for (index, param) in self.comptime_params.iter().enumerate() {
+        //     let func_ref = backend.func_reg();
+        //     let value = func_ref.comptime_mapper.get(param.value).unwrap();
+        //     let param_dst = stack_frame_layout
+        //         .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
+        //     vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
+        // }
 
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        backend: &mut B,
-    ) -> Result<(), MirError<B>> {
-        assert!(!mir_phase.is_optimizing, "optimization should not occur for code that \
-        is evaluated during the optimization of other code, as this leads to unsolvable \
-        dependency issues.");
+        // println!("Block parameter values:");
+        // for (index, param) in self.body.get_root_parameters().iter().enumerate() {
+        //     let loc = stack_frame_layout.get_offset(&param, vm).unwrap();
+        //     let data = vm.get_data(loc.0.clone(), loc.1);
+        //     println!("  {index} - ${:x}: {:?}", param.0, data);
+        // }
 
-        <CompileResult<B> as Into<Result<(), MirError<B>>>>::into(
-            self.verify(phase, mir_phase, &backend.func_reg()))?;
-
-        debug!("optimizing function {} @ {}", self.signature.name, self.signature.pos);
-        self.push_ctx(phase, mir_phase, &backend.func_reg())?;
-        mir_phase.is_optimizing = true;
-        self.body.optimize(mir_phase, backend, phase, true)?;
-        mir_phase.is_optimizing = false;
-        self.pop_ctx(phase, mir_phase, &backend.func_reg())?;
-
-        self.verify(phase, mir_phase, &backend.func_reg()).into()
-    }
-
-    /// Checks if the function body defines a specified variable.
-    fn defines_var<B: Backend>(&self, id: EdlVarId) -> Result<bool, MirError<B>> {
-        self.body.find_var_definitions().map(|vec| vec.into_iter()
-                .any(|(var, _pos)| var == id))
-    }
-
-    fn define_comptime_parameters<B: Backend>(
-        &mut self,
-        mir_phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>
-    ) -> CompileResult<B> {
-        assert_eq!(self.comptime_params.params.len(), self.signature.comptime_params.len());
-        for (param_value, param) in self.comptime_params.params.iter().zip(self.signature.comptime_params.iter()) {
-            match self.defines_var(param.var_id) {
-                Ok(true) => {
-                    // is already defined (by a previous pass of this method)
-                    continue;
-                },
-                Ok(false) => (), // is not defined, but definable
-                Err(err) => {
-                    // something went wrong
-                    return CompileResult::Err(err);
-                }
-            }
-
-            // since the body does not define the comptime parameter yet, request it from the
-            // function registry and insert an artificial let-expression
-            if funcs.comptime_mapper.get(param_value.value).is_some() {
-                let let_expr = match param_value.generate_let_expr(
-                    &self.signature,
-                    mir_phase,
-                    funcs,
-                ) {
-                    Ok(expr) => expr,
-                    Err(err) => {
-                        return CompileResult::Err(err);
-                    },
-                };
-                debug!("  #COMPTIME inserting function parameter {:?} into function body", let_expr.var_id);
-                self.body.content.insert(0, let_expr.into());
-            } else {
-                return CompileResult::Deferred(param_value.value);
+        // execute body
+        let res = self.body
+            .execute(vm, &stack_frame_layout, reg, backend);
+        vm.pop_frame(&mut stack_frame_layout);
+        match res {
+            Ok(data) => Ok(data),
+            Err(mut err) => {
+                err.trace.contextualize(self.mir_id.unwrap());
+                Err(err)
             }
         }
-        CompileResult::Ok
     }
 
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-    ) -> CompileResult<B> {
-        // look for comptime parameter values
-        match self.define_comptime_parameters(mir_phase, funcs) {
-            CompileResult::Ok => (),
-            e => {
-                return e;
+    /// Executes the function in the virtual executor.
+    pub fn execute_in_vm_copies(
+        &self,
+        params: &[AmorphusData],
+        vm: &mut ExecutorVM,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<AmorphusDataCopy, ExecutionError> {
+        // create a copy of the stack frame layout and allocate memory for it.
+        // we need the copy here since the allocation might do some changes to the layout depending
+        // on the actual location of the stack frame in memory.
+        // since this might be a recursive function call, we need to copy the stack frame layout
+        // just in case.
+        // keep in mind that this is not a problem that we encounter in the actual codegen backend.
+        let mut stack_frame_layout = self.stack_frame_layout
+            .as_ref().unwrap().clone();
+        vm.alloc_stack_frame(&mut stack_frame_layout);
+        // copy parameter values from the source to the parameter slot
+        let root_parameters = self.body.get_root_parameters();
+        for (index, param_src) in params.iter().enumerate() {
+            let param_dst = stack_frame_layout
+                .get_offset(&root_parameters[index], vm).unwrap();
+            vm.get_data_mut([param_dst.0], &[param_dst.1])[0]
+                .memcpy(param_src);
+        }
+        assert_eq!(root_parameters.len(), params.len(), "not enough parameters");
+        // get comptime parameters
+        // NOTE: for hybrid functions the new optimization pipeline compiles the input parameters
+        //       directly into the base function!
+
+        // let root_param_offset = params.len();
+        // for (index, param) in self.comptime_params.iter().enumerate() {
+        //     let func_ref = backend.func_reg();
+        //     let value = func_ref.comptime_mapper.get(param.value).unwrap();
+        //     let param_dst = stack_frame_layout
+        //         .get_offset(&root_parameters[root_param_offset + index], vm).unwrap();
+        //     vm.copy_bytes(param_dst.0.start, value.as_data().as_slice());
+        // }
+
+        // println!("Block parameter values:");
+        // for (index, param) in self.body.get_root_parameters().iter().enumerate() {
+        //     let loc = stack_frame_layout.get_offset(&param, vm).unwrap();
+        //     let data = vm.get_data(loc.0.clone(), loc.1);
+        //     println!("  {index} - ${:x}: {:?}", param.0, data);
+        // }
+
+        // execute body
+        let res = self.body
+            .execute(vm, &stack_frame_layout, reg, backend);
+        vm.pop_frame(&mut stack_frame_layout);
+        match res {
+            Ok(data) => Ok(data),
+            Err(mut err) => {
+                err.trace.contextualize(self.mir_id.unwrap());
+                Err(err)
             }
         }
-        // push context
-        if let Err(err) = self.push_ctx(phase, mir_phase, funcs) {
-            return CompileResult::Err(err);
-        }
-        // enforce comptime were necessary
-        if self.force_comptime {
-            assert!(self.signature.comptime || self.signature.comptime_only);
-            self.body.comptime = true;
-        } else if self.signature.comptime && !self.signature.comptime_only {
-            assert!(!self.body.comptime);
-        }
-        // verify body
-        if let Err(err) = self.body.verify(mir_phase, funcs, phase, true) {
-            return CompileResult::Err(err);
-        }
-        // restore initial context
-        if let Err(err) = self.pop_ctx(phase, mir_phase, funcs) {
-            return CompileResult::Err(err);
-        }
-        CompileResult::Ok
-    }
-
-    fn push_ctx<B: Backend>(
-        &mut self,
-        _phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        mir_phase.push_layer();
-        // if the function is a maybe function, communicate this to the function body for
-        // verification and optimization
-        if self.signature.comptime && !self.signature.comptime_only {
-            let edl_id = funcs.get_edl_id(self.mir_id.unwrap()).unwrap();
-            mir_phase.ctx
-                .push()
-                .set_maybe_comptime(edl_id)?;
-        }
-
-        for param in self.signature.params.iter() {
-            mir_phase.insert_var(param.var_id, param.ty, false);
-        }
-        Ok(())
-    }
-
-    fn pop_ctx<B: Backend>(
-        &mut self,
-        _phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _backend: &MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        if self.signature.comptime && !self.signature.comptime_only {
-            mir_phase.ctx.pop()?;
-        }
-        mir_phase.pop_layer();
-        Ok(())
     }
 }
 
@@ -1158,16 +1452,15 @@ pub trait FnCodeGen<B: Backend> {
     type Ret;
 
     fn gen_func(
-        self,
+        &self,
         backend: &mut B,
         phase: &mut MirPhase,
-        ip: usize
+        hir_phase: &HirPhase,
+        ip: usize,
     ) -> Result<Self::Ret, MirError<B>>;
 
     fn reserve_loc(
         &mut self,
-        phase: &mut MirPhase,
-        func_reg: &mut MirFuncRegistry<B>,
         id: MirFuncId
     ) -> Result<Self::CallGen, HirTranslationError>;
 }

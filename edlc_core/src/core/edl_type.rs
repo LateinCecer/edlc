@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 mod type_alias;
 mod anon;
@@ -24,7 +26,7 @@ use crate::core::edl_param_env::{AdaptOther, AdaptOtherWithStack, Adaptable, Ada
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
 use crate::core::edl_type::anon::AnonymousTypes;
 pub use crate::core::edl_type::type_def::{EdlEnumVariant, EdlRepresentation, EdlStructVariant, EdlTypeState, EdlTypeInitError};
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::index_map::{IndexMap, IndexMapIter, IndexMapViewMut};
 use crate::documentation::{DocCompilerState, DocConstValue, DocElement, TypeDoc, TypeNameSegmentDoc};
 use crate::file::ModuleSrc;
@@ -81,7 +83,6 @@ pub const EDL_ARRAY: EdlTypeId = EdlTypeId(18);
 pub const EDL_SLICE: EdlTypeId = EdlTypeId(19);
 pub const EDL_NEVER: EdlTypeId = EdlTypeId(20);
 pub const EDL_REF: EdlTypeId = EdlTypeId(21);
-pub const EDL_MUT_REF: EdlTypeId = EdlTypeId(22);
 
 
 #[derive(Debug, Clone)]
@@ -184,20 +185,10 @@ impl FmtType for EdlType {
             Self::Generic { env_id, index } => {
                 types.fmt_env_param_name(*env_id, *index, fmt)
             },
-            Self::Function { name, state: FunctionState::Init { sig, .. } } => {
-                if let Some(fn_name) = name {
-                    write!(fmt, "{fn_name}")?;
-                } else {
-                    write!(fmt, "fn")?;
-                }
+            Self::Function { name: _, state: FunctionState::Init { sig, .. } } => {
                 sig.fmt_type(fmt, types)
             },
-            Self::Function { name, state: FunctionState::Pre { sig } } => {
-                if let Some(fn_name) = name {
-                    write!(fmt, "{fn_name}")?;
-                } else {
-                    write!(fmt, "fn")?;
-                }
+            Self::Function { name: _, state: FunctionState::Pre { sig } } => {
                 sig.fmt_type(fmt, types)
             }
         }
@@ -272,6 +263,15 @@ impl FmtType for EdlTypeInstance {
                 write!(fmt, "[")?;
                 self.param.params[0].fmt_type(fmt, types)?;
                 return write!(fmt, "]");
+            }
+            t if t == EDL_REF => {
+                write!(fmt, "&")?;
+                if matches!(self.get_ref_mutability(), Ok(EdlConstValue::Literal(EdlLiteralValue::Bool(true)))) {
+                    write!(fmt, "mut ")?;
+                } else {
+                    write!(fmt, " ")?;
+                }
+                return self.param.params[0].fmt_type(fmt, types);
             }
             _ => (),
         }
@@ -657,18 +657,41 @@ impl EdlTypeInstance {
         self.param.get_const_mut(1)
     }
 
-    pub fn get_slice_type(&self) -> Result<&EdlConstValue, EdlError> {
+    pub fn get_slice_type(&self) -> Result<&EdlTypeInstance, EdlError> {
         if self.ty != EDL_SLICE {
             return Err(EdlError::E003 { exp: EDL_SLICE, got: self.ty });
         }
-        self.param.get_const(0)
+        self.param.get_type(0)
     }
 
-    pub fn get_slice_type_mut(&mut self) -> Result<&mut EdlConstValue, EdlError> {
+    pub fn get_slice_type_mut(&mut self) -> Result<&mut EdlTypeInstance, EdlError> {
         if self.ty != EDL_SLICE {
             return Err(EdlError::E003 { exp: EDL_SLICE, got: self.ty });
         }
-        self.param.get_const_mut(0)
+        self.param.get_type_mut(0)
+    }
+
+    pub fn get_ref_type(&self) -> Result<&EdlTypeInstance, EdlError> {
+        if self.ty != EDL_REF {
+            return Err(EdlError::E003 { exp: EDL_REF, got: self.ty });
+        }
+        self.param.get_type(0)
+    }
+
+    pub fn get_ref_mutability(&self) -> Result<&EdlConstValue, EdlError> {
+        if self.ty != EDL_REF {
+            Err(EdlError::E003 { exp: EDL_REF, got: self.ty })
+        } else {
+            self.param.get_const(1)
+        }
+    }
+
+    pub fn get_ref_mutability_mut(&mut self) -> Result<&mut EdlConstValue, EdlError> {
+        if self.ty != EDL_REF {
+            Err(EdlError::E003 { exp: EDL_REF, got: self.ty })
+        } else {
+            self.param.get_const_mut(1)
+        }
     }
 }
 
@@ -1064,6 +1087,7 @@ pub struct EdlTypeRegistry {
     generic_param_def: EdlParameterDef,
     alias: IndexMap<EdlAlias>,
     anon_types: AnonymousTypes,
+    event_type: Option<EdlTypeInstance>,
 }
 
 impl Default for EdlTypeRegistry {
@@ -1082,6 +1106,7 @@ impl Default for EdlTypeRegistry {
             generic_param_def,
             alias: IndexMap::default(),
             anon_types: AnonymousTypes::default(),
+            event_type: None,
         };
 
         let env = reg.new_env();
@@ -1163,24 +1188,16 @@ impl Default for EdlTypeRegistry {
             name: "T".to_string(),
             variant: EdlGenericParamVariant::Type,
         });
+        env_ref.params.push(EdlGenericParam {
+            name: "M".to_string(),
+            variant: EdlGenericParamVariant::Const(EDL_BOOL),
+        });
         reg.types.view_mut(EDL_REF.0).set(EdlType::Type {
             param: env,
             name: QualifierName::empty(),
             state: EdlTypeState::default(),
         });
 
-        // insert mut ref definition
-        let env = reg.new_env();
-        let env_ref = reg.get_env_mut(env).unwrap();
-        env_ref.params.push(EdlGenericParam {
-            name: "T".to_string(),
-            variant: EdlGenericParamVariant::Type,
-        });
-        reg.types.view_mut(EDL_MUT_REF.0).set(EdlType::Type {
-            param: env,
-            name: QualifierName::empty(),
-            state: EdlTypeState::default(),
-        });
         reg
     }
 }
@@ -1345,21 +1362,13 @@ impl EdlTypeRegistry {
     /// Creates a new type instance with the base type `ref` (&T).
     /// The reference type instance is then a shared reference to a value of the type specified by
     /// [t].
-    pub fn new_ref(&self, t: EdlMaybeType) -> Result<EdlTypeInstance, EdlError> {
+    pub fn new_ref(&self, t: EdlMaybeType, mutable: Option<EdlConstValue>) -> Result<EdlTypeInstance, EdlError> {
         let mut instance = self.new_type_instance(EDL_REF).unwrap();
         if let EdlMaybeType::Fixed(t) = t {
             EdlGenericParamValue::Type(t).adapt_other(&mut instance.param.params[0], self)?;
         }
-        Ok(instance)
-    }
-
-    /// Creates a new type instance with the base type `mut ref` (&mut T).
-    /// The reference type instance is then a mutable reference to a value of the type specified by
-    /// [t].
-    pub fn new_mut_ref(&self, t: EdlMaybeType) -> Result<EdlTypeInstance, EdlError> {
-        let mut instance = self.new_type_instance(EDL_MUT_REF).unwrap();
-        if let EdlMaybeType::Fixed(t) = t {
-            EdlGenericParamValue::Type(t).adapt_other(&mut instance.param.params[0], self)?;
+        if let Some(mutable) = mutable {
+            EdlGenericParamValue::Const(mutable).adapt_other(&mut instance.param.params[1], self)?;
         }
         Ok(instance)
     }
@@ -1392,6 +1401,21 @@ impl EdlTypeRegistry {
 
     pub fn insert_type(&mut self, val: EdlType) -> EdlTypeId {
         EdlTypeId(self.types.insert(val))
+    }
+
+    /// Registers a global event type for synchronization events.
+    /// There can only be one event type per compiler instance and the type must be fully resolved.
+    /// This function may also only be called once per compiler instance.
+    pub fn register_event_type(&mut self, ty: EdlTypeInstance) {
+        assert!(ty.is_fully_resolved());
+        if let Some(prev) = self.event_type.as_ref() {
+            assert_eq!(prev, &ty, "tried to re-register global event type");
+        }
+        self.event_type = Some(ty);
+    }
+
+    pub fn get_event_type(&self) -> Option<&EdlTypeInstance> {
+        self.event_type.as_ref()
     }
 
     pub fn update_type_state(&mut self, id: EdlTypeId, new_state: EdlTypeState) -> Result<(), EdlError> {
@@ -1620,6 +1644,14 @@ impl EdlTypeRegistry {
         }
     }
 
+    pub fn get_fn_qualifier(&self, id: EdlTypeId) -> Result<&Option<QualifierName>, EdlError> {
+        match self.types.get(id.0) {
+            Some(EdlType::Function { name, .. }) => Ok(name),
+            Some(_) => Err(EdlError::E027(id)),
+            None => Err(EdlError::E007(id)),
+        }
+    }
+
     pub fn finalize_function(&mut self, id: EdlTypeId, sig: EdlFnSignature, body: EdlFunctionBody) -> Result<(), EdlError> {
         match self.types.get_mut(id.0) {
             Some(EdlType::Function { state, .. }) => {
@@ -1643,6 +1675,7 @@ impl EdlTypeRegistry {
         match ty {
             t if t == EDL_ARRAY => return write!(fmt, "[_; _]"),
             t if t == EDL_SLICE => return write!(fmt, "[_]"),
+            t if t == EDL_REF => return write!(fmt, "&_"),
             _ => (),
         }
 

@@ -1,40 +1,43 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::error::Error;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlTypeId};
 use crate::core::edl_value::EdlConstValue;
-use crate::core::EdlVarId;
 use crate::core::type_analysis::*;
+use crate::core::{edl_type, EdlVarId};
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::hir_expr::hir_type::{HirTypeName, SegmentType};
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
-use crate::issue::SrcError;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
+use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_constant::MirConstant;
-use crate::mir::mir_expr::mir_variable::MirVariable;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{DebugSymbols, MirRef, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::resolver::ScopeId;
+use std::error::Error;
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,15 +49,29 @@ struct CompilerInfo {
 struct InferInfo {
     node: NodeId,
     own_uid: TypeUid,
+    ref_uid: TypeUid,
     const_uid: ExtConstUid,
     finalized_type: EdlMaybeType,
-    finalized_const: Option<EdlConstValue>
+    finalized_const: Option<EdlConstValue>,
+    /// The mutability of a named identifier is tricky.
+    /// If the base variable is declared as `mut`, then the name ident **can** be mutable but it
+    /// does not have to be as we don't want to force taking a mutable reference of a mutable
+    /// variable very single time we reference that variable (that would fuck with the borrow
+    /// checker and hinder during type inference and monomorphization).
+    /// Thus, if the name refers to something that _can_ be mutable, then we don't infer the
+    /// mutability at all.
+    /// Otherwise, we infer immutability.
+    ///
+    /// This way, mutability is only inferred if other expressions that stand in relation to the
+    /// identifier need it to be mutable.
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 
 #[derive(Clone, Debug, PartialEq)]
 enum NameSource {
-    Var(EdlVarId),
+    Var(EdlVarId, bool),
     Const(EdlConstValue),
     #[allow(dead_code)]
     Function(EdlTypeId), // for function pointers (do we want that?)
@@ -63,7 +80,7 @@ enum NameSource {
 impl NameSource {
     fn adapt_type(&self, pos: SrcPos, ty: &mut EdlMaybeType, phase: &mut HirPhase) -> Result<(), HirError> {
         match self {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _mutable) => {
                 let HirPhase {
                     vars,
                     types,
@@ -92,7 +109,7 @@ impl NameSource {
 
     fn get_type(&self, pos: SrcPos, phase: &HirPhase) -> Result<EdlMaybeType, HirError> {
         match self {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _) => {
                 let var = phase.vars.get_var(*var_id)
                     .ok_or(HirError::new_edl(pos, EdlError::E010(*var_id)))?;
                 let var_ty = var.var_maybe_type().clone();
@@ -148,12 +165,34 @@ impl ResolveTypes for HirName {
             info.own_uid
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
-            let own_uid = match &self.info.as_ref().unwrap().name_src {
-                NameSource::Var(var_id) => {
-                    inferer.get_or_insert_var(*var_id, node)
+            let (own_uid, ref_uid) = match &self.info.as_ref().unwrap().name_src {
+                NameSource::Var(var_id, mutable) => {
+                    let own_uid = inferer.get_or_insert_var(*var_id, node);
+                    // Note: assume that the reference is mutable if the underlying variable is
+                    //       mutable. In MIR we can figure out if the reference actually needs to be
+                    //       mutable or not, so we can find the tightest fitting borrowing rules
+                    //       possible. For type resolution it is enough to reject cases were the
+                    //       user tries to modify an immutable variable.
+                    let ref_uid = if *mutable {
+                        // if the variable itself is mutable, we can leave the mutability of the
+                        // reference indeterminate
+                        inferer.new_reference_type(own_uid, node, None)
+                    } else {
+                        inferer.new_reference_type(own_uid, node, Some(false))
+                    };
+                    (own_uid, ref_uid)
                 },
-                _ => inferer.new_type(node),
+                _ => {
+                    let own_uid = inferer.new_type(node);
+                    let ref_uid = inferer.new_reference_type(own_uid, node, Some(false));
+                    (own_uid, ref_uid)
+                },
             };
+
+            // insert mutability
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            let ref_mut = inferer.get_generic_const(ref_uid, 1).unwrap();
+            inferer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(ref_mut)).unwrap();
 
             // insert constant
             // ---
@@ -177,10 +216,13 @@ impl ResolveTypes for HirName {
 
             self.infer_info = Some(InferInfo {
                 own_uid,
+                ref_uid,
                 const_uid,
                 node,
                 finalized_type: EdlMaybeType::Unknown,
                 finalized_const: None,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -189,7 +231,9 @@ impl ResolveTypes for HirName {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.infer_info.as_mut().unwrap();
         let ty = inferer.find_type(info.own_uid);
+        let mutable = inferer.find_ext_const(info.mutable);
         info.finalized_type = ty;
+        info.finalized_mutable = mutable.try_into().unwrap();
         let val = inferer.find_ext_const(info.const_uid);
         info.finalized_const = val;
     }
@@ -201,6 +245,11 @@ impl ResolveTypes for HirName {
             }
             _ => None,
         }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.infer_info.as_ref().unwrap().mutable
     }
 }
 
@@ -216,8 +265,9 @@ impl ResolveNames for HirName {
 
             let path = &segment.path;
             if let Some(var_id) = phase.res.find_top_level_var(path) {
+                let mutable = phase.vars.is_mutable(var_id).unwrap();
                 self.info = Some(CompilerInfo {
-                    name_src: NameSource::Var(var_id),
+                    name_src: NameSource::Var(var_id, mutable),
                 });
                 return Ok(());
             }
@@ -237,20 +287,70 @@ impl ResolveNames for HirName {
             let associate = associate_path.as_type_instance(self.pos, phase)?;
             return match associate {
                 SegmentType::Type(ty) => {
-                    let const_val = phase.res.find_associated_const(&ty, &last.path).ok_or(HirError {
-                        pos: self.pos,
-                        ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
-                    })?;
+                    let Some(const_val) = phase.res.find_associated_const(&ty, &last.path) else {
+                        phase.report_error(
+                            TypeArguments::new(&[
+                                TypeArgument::new_display(&"symbol not found"),
+                            ]),
+                            &[
+                                SrcError::Double {
+                                    src: self.src.clone(),
+                                    first: associate_path.src_range().unwrap(),
+                                    second: last.pos.into(),
+                                    error_first: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"symbol is associated to type `"),
+                                        TypeArgument::new_edl(&ty),
+                                        TypeArgument::new_display(&"`"),
+                                    ]),
+                                    error_second: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"unknown identifier"),
+                                    ]),
+                                }
+                            ],
+                            None,
+                        );
+
+                        return Err(HirError {
+                            pos: self.pos,
+                            ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
+                        });
+                    };
+
                     self.info = Some(CompilerInfo {
                         name_src: NameSource::Const(const_val),
                     });
                     Ok(())
                 }
                 SegmentType::Trait(ty) => {
-                    let const_val = phase.res.find_trait_associated_const(&ty, &last.path).ok_or(HirError {
-                        pos: self.pos,
-                        ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
-                    })?;
+                    let Some(const_val) = phase.res.find_trait_associated_const(&ty, &last.path) else {
+                        phase.report_error(
+                            TypeArguments::new(&[
+                                TypeArgument::new_display(&"symbol not found"),
+                            ]),
+                            &[
+                                SrcError::Double {
+                                    src: self.src.clone(),
+                                    first: associate_path.src_range().unwrap(),
+                                    second: last.pos.into(),
+                                    error_first: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"symbol is associated to trait `"),
+                                        TypeArgument::new_edl(&ty),
+                                        TypeArgument::new_display(&"`"),
+                                    ]),
+                                    error_second: TypeArguments::new(&[
+                                        TypeArgument::new_display(&"unknown identifier"),
+                                    ]),
+                                }
+                            ],
+                            None,
+                        );
+
+                        return Err(HirError {
+                            pos: self.pos,
+                            ty: Box::new(HirErrorType::NameUnresolved(self.name.clone()))
+                        });
+                    };
+
                     self.info = Some(CompilerInfo {
                         name_src: NameSource::Const(const_val),
                     });
@@ -274,22 +374,22 @@ impl HirName {
         }
     }
 
-    fn resolve_as_fn_ptr(&mut self, _phase: &mut HirPhase) -> Result<(), HirError> {
-        // phase.report_error(
-        //     issue::format_type_args!(
-        //         format_args!("unresolved name `{}`", self.name)
-        //     ),
-        //     &[
-        //         SrcError::Single {
-        //             src: self.src.clone(),
-        //             pos: self.pos.into(),
-        //             error: issue::format_type_args!(
-        //                 format_args!("expected name of variable, constant or function")
-        //             )
-        //         }
-        //     ],
-        //     None,
-        // );
+    fn resolve_as_fn_ptr(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+        phase.report_error(
+            issue::format_type_args!(
+                format_args!("unresolved symbol `{}`", self.name)
+            ),
+            &[
+                SrcError::Single {
+                    src: self.src.clone(),
+                    pos: self.pos.into(),
+                    error: issue::format_type_args!(
+                        format_args!("expected name of variable, constant or function")
+                    )
+                }
+            ],
+            None,
+        );
 
         Err(HirError {
             pos: self.pos,
@@ -304,28 +404,35 @@ impl HirName {
         })
     }
 
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
+        self.infer_info.as_ref().unwrap().finalized_mutable
+    }
+
+    /// Returns the EDL variable id if the name refers to a variable.
+    /// If the name does not refer to a variable, [None] is returned.
+    ///
+    /// # Staging
+    ///
+    /// This method is ment for later stages of the compiling process – after name and type
+    /// resolution.
+    /// If this method is called before that information is present, this method may panic.
+    pub fn var_id(&self) -> Option<&EdlVarId> {
+        let info = self.info().unwrap();
+        match &info.name_src {
+            NameSource::Var(var, _) => Some(var),
+            _ => None,
+        }
+    }
+
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
         let info = self.info()?;
         match &info.name_src {
-            NameSource::Var(var) => {
-                Ok(!phase.vars.is_global(*var)
-                    .map_err(|err| HirError::new_edl(self.pos, err))?
-                    && phase.vars.is_mutable(*var)
-                    .ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))?)
-            }
+            NameSource::Var(_, _) => Ok(true),
             _ => Ok(false)
         }
     }
 
-    pub fn is_ref_like(&self, _phase: &HirPhase) -> Result<bool, HirError> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Var(_) => Ok(true),
-            _ => Ok(false)
-        }
-    }
-
-    pub fn verify(&mut self, phase: &mut HirPhase, _ctx: &mut HirContext, _infer_state: &mut InferState) -> Result<(), HirError> {
+    pub fn verify(&mut self, phase: &mut HirPhase, _ctx: &mut HirContext, infer_state: &mut InferState) -> Result<(), HirError> {
         if self.info.is_none() {
             phase.report_error(
                 issue::format_type_args!(
@@ -353,7 +460,31 @@ impl HirName {
                 ty: Box::new(HirErrorType::NameUnresolved(self.name.clone())),
             });
         }
+
+        // if mutability is still undetermined, we default to immutable borrows here
+        let infer = phase.infer_from(infer_state);
+        if let Some(m) = infer.find_ext_const(self.infer_info.as_ref().unwrap().mutable) {
+            if !m.is_fully_resolved() {
+                self.infer_immutable(phase, infer_state)?;
+            }
+        } else {
+            self.infer_immutable(phase, infer_state)?;
+        }
         Ok(())
+    }
+
+    /// Infers immutability for this expression.
+    fn infer_immutable(&mut self, phase: &mut HirPhase, infer_state: &mut InferState) -> Result<(), HirError> {
+        let mut infer = phase.infer_from(infer_state);
+        let node = self.infer_info.as_ref().unwrap().node;
+
+        if let Err(err) = infer
+            .at(node)
+            .eq(&self.infer_info.as_ref().unwrap().mutable, &EdlConstValue::from_bool(false)) {
+            Err(report_infer_error(err, infer_state, phase))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -402,56 +533,13 @@ impl HirExpr for HirName {
 impl EdlFnArgument for HirName {
     type CompilerState = HirPhase;
 
-    /// Names are considered mutable, if...
-    /// 1. ... the name refers to a variable
-    /// 2. ... the variable is mutable
-    /// 3. ... and the variable is **not** global.
-    ///
-    /// Having global variables as effectively constant means that they can be treated as
-    /// constant expressions in function bodies, which greatly increases runtime performance.
-    ///
-    /// Since many types in EDL are actually pointers to other data structures in memory, it should
-    /// be noted that the data a global variables points to, _can_ be mutable.
-    /// The pointer itself, however, cannot.
-    ///
-    /// # Edit 07.03.2024
-    ///
-    /// This approach comes with a slight problem: it naturally also means that global variables
-    /// cannot be used in functions that take mutable arguments.
-    /// To fix this, the exclusion check for global variables is currently only done during
-    /// assignment checks, and resides within the method `HirName::can_be_assigned_to(...)`.
-    ///
-    /// The decision of how to proceed with mutable variables is somewhat important for the
-    /// overall design of the language, and the final decision regarding this problem has not been
-    /// made yet.
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Const(_) => {
-                // Note on mutability: The mutability of a function argument value is specified as the mutability of
-                // the value of the parameter within the function body.
-                // Since constants are always passed `by value`, their mutability is `true`.
-                Ok(true)
-            }
-            NameSource::Var(var) => {
-                state.vars.is_mutable(*var).ok_or(HirError::new_edl(self.pos, EdlError::E010(*var)))
-                    // .and_then(|mutable| state.vars.is_global(*var)
-                    //     .map(|global| mutable & !global)
-                    //     .map_err(|err| HirError::new_edl(self.pos, err)))
-            }
-            NameSource::Function(_) => {
-                todo!()
-            }
-        }
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState
     ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
         let info = self.info()?;
         match &info.name_src {
-            NameSource::Var(var_id) => {
+            NameSource::Var(var_id, _) => {
                 state.vars.is_global(*var_id).map_err(|err| HirError::new_edl(self.pos, err))
             }
             NameSource::Const(_) => Ok(true), // constants are, well, constant
@@ -460,66 +548,232 @@ impl EdlFnArgument for HirName {
     }
 }
 
-impl IntoMir for HirName {
-    type MirRepr = MirExpr;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirName {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError> {
-        let info = self.info()?;
-        match &info.name_src {
-            NameSource::Var(var) => {
-                let var_ty = &self.infer_info.as_ref().unwrap().finalized_type;
-                // phase.vars.adapt_type(*var, &mut var_ty.clone(), &phase.types)
-                //     .map_err(|err| HirError::new_edl(self.pos, err))?;
-
-                if !var_ty.is_fully_resolved() {
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        match &self.info.as_ref().unwrap().name_src {
+            NameSource::Var(v, _mutable) => {
+                // is a variable
+                let var = graph.hir_phase.vars.get_var(*v)
+                    .expect("variable does not exist");
+                let ty = var.ty.clone();
+                if !ty.is_fully_resolved() {
                     return Err(HirTranslationError::TypeNotFullyResolved {
                         pos: self.pos,
-                        ty: var_ty.clone(),
-                    })
+                        ty: ty.clone(),
+                    });
                 }
-                let EdlMaybeType::Fixed(var_ty) = var_ty else {
-                    unreachable!();
-                };
-                let var_ty = mir_phase.types.mir_id(var_ty, &phase.types)
-                    .map_err(HirTranslationError::EdlError)?;
 
-                Ok(MirVariable {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    var: *var,
-                    ty: var_ty,
-                }.into())
+                let mir_ty = graph.mir_phase.types.mir_id(
+                    &ty.clone().unwrap(), &graph.hir_phase.types)?;
+                let target_ty = *graph.graph.get_var_type(&target);
+                if mir_ty == target_ty {
+                    if var.global {
+                        // is a global variable
+                        let ref_ty = graph.hir_phase.types
+                            .new_ref(ty, Some(EdlConstValue::from_bool(false)))?;
+                        // NOTE: since we deref immediately, we just need a shared reference
+                        let mir_ref_ty = graph.mir_phase.types
+                            .mir_id(&ref_ty, &graph.hir_phase.types)?;
+
+                        let ref_value = graph.graph.create_temp_variable(mir_ref_ty);
+                        let var = MirGlobalVar {
+                            pos: self.pos,
+                            scope: self.scope,
+                            src: self.src.clone(),
+                            ty: mir_ref_ty,
+                            var: *v,
+                            id: graph.mir_phase.new_id(),
+                        };
+                        var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
+                        let expr_id = graph.graph.expressions.insert_variable(var);
+                        graph.graph.insert_def(
+                            graph.current_block,
+                            ref_value,
+                            expr_id,
+                            &graph.mir_phase.types,
+                            DebugSymbols { pos: self.pos },
+                        );
+
+                        graph.graph.def_deref(
+                            graph.current_block,
+                            ref_value,
+                            target,
+                            &graph.mir_phase.types,
+                            DebugSymbols { pos: self.pos },
+                        );
+                        Ok(())
+                    } else {
+                        // is local variable
+                        let var_value = *graph.var_mapper.get(v)
+                            .expect("variable does not have MIR value mapping");
+                        graph.graph.insert_move(
+                            graph.current_block,
+                            var_value,
+                            target,
+                            DebugSymbols { pos: self.pos },
+                        );
+                        Ok(())
+                    }
+                } else {
+                    // in this case we may need to create an internal reference
+                    let target_base_ty = graph.mir_phase.types
+                        .get_ref_type(&target_ty)
+                        .expect("target type is not a reference");
+                    assert_eq!(target_base_ty, mir_ty,
+                               "target reference base type does not match type of reference");
+                    let is_mutable = graph.mir_phase.types.is_ref_mutable(&target_ty);
+
+                    if var.global {
+                        // create a reference to a global variable
+                        assert!(!is_mutable, "cannot create mutable reference to global variable");
+                        let var = MirGlobalVar {
+                            pos: self.pos,
+                            scope: self.scope,
+                            src: self.src.clone(),
+                            ty: target_ty,
+                            var: *v,
+                            id: graph.mir_phase.new_id(),
+                        };
+                        var.assert_check(&mut graph.mir_phase.types, &graph.hir_phase.vars, &graph.hir_phase.types);
+                        let expr_id = graph.graph.expressions.insert_variable(var);
+                        graph.graph.insert_def(
+                            graph.current_block, target, expr_id, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
+                        Ok(())
+                    } else {
+                        // create a reference to a local variable
+                        let var_value = *graph.var_mapper.get(v)
+                            .expect("variable does not have MIR value mapping");
+                        let ref_expr = if is_mutable {
+                            graph.graph.expressions.insert_ref(MirRef::mutable(
+                                var_value,
+                                target_ty,
+                                &graph.graph,
+                                &graph.mir_phase.types,
+                            ))
+                        } else {
+                            graph.graph.expressions.insert_ref(MirRef::shared(
+                                var_value,
+                                target_ty,
+                                &graph.graph,
+                                &graph.mir_phase.types,
+                            ))
+                        };
+                        graph.graph.insert_def(
+                            graph.current_block,
+                            target,
+                            ref_expr,
+                            &graph.mir_phase.types,
+                            DebugSymbols { pos: self.pos },
+                        );
+                        Ok(())
+                    }
+                }
             }
-            NameSource::Const(con) => {
-                let con_ty = con.get_type(&phase.types)
-                    .map_err(|err| HirError::new_edl(self.pos, err))?;
-                let con_instance = phase.types.new_type_instance(con_ty).unwrap();
-                assert!(con_instance.is_fully_resolved());
-                let con_mir = mir_phase.types.mir_id(&con_instance, &phase.types)
-                    .map_err(HirTranslationError::EdlError)?;
+            NameSource::Const(a) => {
+                // is a constant value
+                let val = graph.mir_phase.types.get_const_value(a)
+                    .expect("failed to get literal value from const");
+                let val_ty = graph.hir_phase.types
+                    .new_type_instance(a.get_type(&graph.hir_phase.types)?)
+                    .expect("failed to create new type instance");
+                let mir_val_ty = graph.mir_phase.types
+                    .mir_id(&val_ty, &graph.hir_phase.types)?;
 
-                // get constant value
-                let val = mir_phase.types.get_const_value(con)
-                    .ok_or(HirTranslationError::UnknownMirConst {
-                        pos: self.pos, const_value: con.clone() })?;
+                let expr_id = graph.graph.expressions
+                    .insert_constants(MirConstant {
+                        ty: mir_val_ty,
+                        value: val,
+                        id: graph.mir_phase.new_id(),
+                    });
 
-                Ok(MirConstant {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: con_mir,
-                    value: val,
-                }.into())
+                let target_ty = *graph.graph.get_var_type(&target);
+                if let Some(ref_base) = graph.mir_phase.types.get_ref_type(&target_ty) {
+                    assert!(!graph.mir_phase.types.is_ref_mutable(&target_ty), "cannot create mutable reference to constant");
+                    // we need a shared reference
+                    assert_eq!(ref_base, mir_val_ty);
+                    let tmp_value = graph.graph.create_temp_variable(mir_val_ty);
+                    graph.graph.insert_def(
+                        graph.current_block,
+                        tmp_value,
+                        expr_id,
+                        &graph.mir_phase.types,
+                        DebugSymbols { pos: self.pos },
+                    );
+
+                    // create shared reference
+                    graph.graph.def_ref(
+                        graph.current_block,
+                        tmp_value,
+                        target,
+                        &graph.mir_phase.types,
+                        DebugSymbols { pos: self.pos },
+                    );
+                    Ok(())
+                } else {
+                    // we need the base value
+                    assert_eq!(mir_val_ty, target_ty);
+                    graph.graph.insert_def(
+                        graph.current_block,
+                        target,
+                        expr_id,
+                        &graph.mir_phase.types,
+                        DebugSymbols { pos: self.pos },
+                    );
+                    Ok(())
+                }
             }
-            NameSource::Function(_) => todo!()
+            NameSource::Function(_f) => {
+                // is a function
+                todo!()
+            }
         }
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+
+        // if the base expression is already a reference, we don't take the reference again here.
+        // there are no references of references in EDL.
+        if ty.as_ref().unwrap().ty == edl_type::EDL_REF {
+            return graph.mir_phase.types
+                .mir_id(&ty.unwrap(), &graph.hir_phase.types)
+                .map_err(HirTranslationError::EdlError);
+        }
+
+        let ref_ty = graph.hir_phase.types
+            .new_ref(ty, self.infer_info.as_ref().unwrap().finalized_mutable.clone().into())?;
+        graph.mir_phase.types.mir_id(&ref_ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

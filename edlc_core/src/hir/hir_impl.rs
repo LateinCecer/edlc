@@ -1,28 +1,33 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::collections::HashMap;
-use log::debug;
+use std::hash::DefaultHasher;
+use log::{debug, info};
 use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeInstance};
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::documentation::{DocCompilerState, DocElement};
+use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::{HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::translation::HirTranslationError;
+use crate::issue::{TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
@@ -31,6 +36,7 @@ use crate::resolver::{ResolveError, ScopeId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirImpl {
+    pub src: ModuleSrc,
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub ty_scope: Option<ScopeId>,
@@ -42,6 +48,7 @@ pub struct HirImpl {
 
 impl HirImpl {
     pub fn new(
+        src: ModuleSrc,
         pos: SrcPos,
         scope: ScopeId,
         ty_scope: Option<ScopeId>,
@@ -51,6 +58,7 @@ impl HirImpl {
         funcs: Vec<HirFn>,
     ) -> Self {
         HirImpl {
+            src,
             pos,
             scope,
             ty_scope,
@@ -203,6 +211,10 @@ impl ResolveTypes for HirImpl {
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
     }
+
+    fn mutability(&mut self, _inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        todo!()
+    }
 }
 
 
@@ -258,6 +270,11 @@ impl HirImpl {
         let param = instance.param.get_def(self.env)
             .expect("Tries to generate function from MIR implementation without fitting \
             implementation parameters in the parameter stack of the function instance").clone();
+
+        let impl_params = TypeArguments::new(&[TypeArgument::<'_, DefaultHasher>::new_edl(&param)])
+            .to_string(&phase.types, &phase.vars);
+        info!("implementation monomorphization generic parameters: `{}`", impl_params);
+
         mir_phase.types.push_layer(param, &phase.types)
             .map_err(|err| HirError::new_edl(self.pos, err))?;
 

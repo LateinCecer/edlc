@@ -14,9 +14,10 @@ fn min(x: i32, y: i32) -> i32 {
     } else {
         // print test message and return y through the return value if the if-else chain
         println("what?");
-        y
+        todo()
+        // y
         // std::panic("your code is ass");
-//        ret todo();
+        // ret todo();
     }
 }
 
@@ -33,11 +34,11 @@ type MyData<T> = struct {
 impl core::Add<MyData<f32>, f32> for MyData<f32> {
     type Output = MyData<f32>;
 
-    fn add(lhs: Self, rhs: f32) -> Self::Output {
+    fn add(self, rhs: f32) -> Self::Output {
         MyData {
-            name: lhs.name,
-            id: lhs.id,
-            buffer: lhs.buffer + rhs
+            name: self.name,
+            id: self.id,
+            buffer: self.buffer + rhs
         }
     }
 }
@@ -48,12 +49,14 @@ fn make_tuple(args: { first: i32, second: f32 }) -> (i32, f32) {
 //    todo()
 }
 
-type SVector<T, const N: usize> = struct {
+type SVector<T, const N: usize>
+where T: f32 | f64 = struct {
     data: [T; N],
+    test: T,
 };
 
 impl<const N: usize> SVector<f32, N> {
-    fn norm(self: Self) -> f32 {
+    fn norm(self) -> f32 {
         let mut out = 0.0;
         let mut i = 0usize;
         loop {
@@ -65,8 +68,12 @@ impl<const N: usize> SVector<f32, N> {
     }
 }
 
-impl<T, const N: usize> SVector<T, N> {
-    fn print(self: Self) {
+impl<T, const N: usize> SVector<T, N>
+where
+    T: f32 | f64,
+    const N: 1 | 2 | 3 | 4,
+{
+    fn print(self) {
         std::io::print("(");
         let mut i = 0usize;
         loop {
@@ -82,9 +89,12 @@ impl<T, const N: usize> SVector<T, N> {
 }
 
 impl<T> SVector<T, 1> {
-    fn new(x: T) -> Self {
+    fn new(x: T) -> Self
+    where T: f32 | f64,
+    {
         SVector {
             data: [x],
+            test: x,
         }
     }
 }
@@ -93,6 +103,7 @@ impl<T> SVector<T, 2> {
     fn new(x: T, y: T) -> Self {
         SVector {
             data: [x, y],
+            test: x,
         }
     }
 }
@@ -101,6 +112,7 @@ impl<T> SVector<T, 3> {
     fn new(x: T, y: T, z: T) -> Self {
         SVector {
             data: [x, y, z],
+            test: x,
         }
     }
 }
@@ -136,7 +148,7 @@ fn main() {
     let data: [usize; _] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
     println(TESTOS);
     foo::boa::i_am_testos();
-    println(min(3, -3));
+    println(min(-5, -3));
 
     let mut i = 0usize;
     let mut max: usize = 0;
@@ -151,4 +163,111 @@ fn main() {
         max = usize::max(max, data[i]);
         i += 1;
     }
+    // todo()
+}
+
+#[setup]
+fn simple_setup() {
+    println("setting up testing environment");
+}
+
+#[teardown]
+fn simple_teardown() {
+    println("tearing down testing environment");
+}
+
+#[bench(setup=simple_setup, teardown=simple_teardown)]
+#[test(setup=simple_setup, teardown=simple_teardown)]
+fn test_array() {
+    println("testing weird bug with array accesses...");
+    let A_0 = 1.0_f64;
+    let A_1 = 1.0_f64;
+    let A_2 = 1.0_f64;
+
+    let pi = 3.14159265358979_f64;
+    let twopi = pi * 2.0;
+
+    let A: [f64; 3] = [1.0, 1.0, 1.0];
+    let sigma: [f64; 3] = [0.1, 0.1, 0.1];
+
+    let prefactor: f64 = 1.0 / (f64::sqrt(twopi * twopi * twopi) * sigma[0] * sigma[1] * sigma[2]);
+    println(prefactor);
+    println("success!");
+}
+
+#[bench]
+fn benchmark() {
+    let mut i: usize = 0;
+    let mut out: f64 = 1.0;
+    loop {
+        if i >= 1000_000 { break; }
+        out = f64::sin(out * 1.5);
+        i += 1;
+    }
+    println(out);
+}
+
+
+// -- testing reference related stuff
+impl<T, const N: usize> SVector<T, N> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        core::assert(index < N);
+        ret self.data[index];
+    }
+
+    fn index(&self, index: usize) -> &T {
+        core::assert(index < N);
+        ret self.data[index];
+    }
+
+    fn set_index(&mut self, index: usize, value: T) {
+        self.data[index] = value;
+    }
+
+    fn print_test(&self) {
+        println(self.test);
+    }
+}
+
+fn write_value(x: &mut i32) {
+    let some_value = 99;
+    x = some_value;
+}
+
+fn write_literal(x: &mut i32) {
+    x = 42;
+}
+
+fn write_buffer(x: &mut i32, y: &i32) {
+    x = y;
+}
+
+#[test]
+fn test_write_buffer() {
+    let mut x: i32 = 0;
+    write_buffer(mut x, 67);
+    core::assert(x == 67);
+
+    write_literal(mut x);
+    core::assert(x == 42);
+
+    write_value(mut x);
+    core::assert(x == 99);
+}
+
+#[test]
+fn test_vec_mut_access() {
+    let mut vec = SVector::new(2.1_f64, 1.0_f64);
+    vec.print_test();
+    core::assert(vec.index(0) == 2.1);
+    core::assert(vec.index(1) == 1.0);
+
+    vec.data[0] += 0.1;
+    core::assert(vec.index(0) == 2.2);
+
+    vec.set_index(0, 4.2);
+    core::assert(vec.index(0) == 4.2);
+
+    vec.index_mut(1) = 204.1;
+    core::assert(vec.index(1) == 204.1);
 }

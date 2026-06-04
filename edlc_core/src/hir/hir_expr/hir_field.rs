@@ -1,46 +1,52 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_param_env::{Adaptable, AdaptableWithStack, EdlParamStack};
+use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInstance, EdlTypeRegistry, EdlTypeState, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_variable::MirOffset;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::MirAggregateTypeLayout;
-use crate::mir::{MirError, MirPhase};
+use crate::mir::mir_expr::{DebugSymbols, MirRef, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
 use std::error::Error;
-
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
     node: NodeId,
     type_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    base_stencil: TypeUid,
+    /// A field inherits its mutability from the parent.
+    mutable: ExtConstUid,
+    finalized_mutable: InternalMutability,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -95,12 +101,16 @@ impl HirField {
                 format_args!("LHS of field expression must be fully resolved")
             )
         })?;
-        let EdlMaybeType::Fixed(mut lhs_ty) = lhs_ty else {
+        let EdlMaybeType::Fixed(lhs_ty) = lhs_ty else {
             return Err(HirError {
                 pos: self.pos,
                 ty: Box::new(HirErrorType::TypeNotResolvable),
             });
         };
+        let mut lhs_ty = lhs_ty
+            .get_ref_type()
+            .map_err(|err| HirError::new_edl(self.pos, err))?
+            .clone();
 
         // find field
         let state = match phase.types.get_type(lhs_ty.ty)
@@ -358,12 +368,17 @@ impl HirField {
         }
     }
 
-    pub fn can_be_assigned_to(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        self.lhs.can_be_assigned_to(phase)
+    pub fn can_be_assigned_to(&self) -> InternalMutability {
+        self.info.as_ref().unwrap().finalized_mutable
     }
 
-    pub fn is_ref_like(&self, phase: &HirPhase) -> Result<bool, HirError> {
-        self.lhs.is_ref_like(phase)
+    /// Fields are an offset into another blob of data and therefore always an internal reference.
+    /// That holds true even when the base value is not an internal reference itself – in that case
+    /// an internal reference must be created from the temporary base value before the offset is
+    /// applied and the field effectively becomes an internal reference with a constant offset into
+    /// a temporary value.
+    pub fn is_internal_ref(&self, _phase: &HirPhase) -> Result<bool, HirError> {
+        Ok(true)
     }
 
     /// Resolves the type of the field, adapted it to `target` and returns the type
@@ -678,23 +693,45 @@ fn adapt_member_type(
 
 
 impl ResolveTypes for HirField {
+
+    /// # On the Types of Field Operators
+    ///
+    /// The LHS of a field operator must always be reference.
+    /// Internally, the return value of a field operator is also always a reference – however this
+    /// only applies to the internal references in MIR and onwards.
+    /// On the actual syntax level and in HIR, the return value of the field operator is a plane
+    /// type.
+    /// Since the LHS is a reference, we must infer equality for the mutability of the output value
+    /// and the mutability of the LHS reference.
     fn resolve_types(&mut self, phase: &mut HirPhase, infer_state: &mut InferState) -> Result<(), HirError> {
         let own_uid = self.get_type_uid(&mut phase.infer_from(infer_state));
         let node = self.info.as_ref().unwrap().node;
 
         // resolve base to find where to get the member types from
-        self.lhs.resolve_types(phase, infer_state)?;
+        HirRef::auto(&mut self.lhs, phase, infer_state, self.info.as_ref().unwrap().base_stencil)?;
+
         let infer = &mut phase.infer_from(infer_state);
         let lhs = self.lhs.get_type_uid(infer);
+
+        // at this point we must assume that LHS is a reference
+        let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
+            return Ok(());
+        };
+        // find reference base type to extract field offset
+        let lhs_ty = lhs_ty.get_ref_type()
+            .expect("lhs of field expression must be auto-referenced to a local reference");
+        // infer mutability
+        let lhs_mut = infer.get_generic_const(lhs, 1).unwrap();
+        let mutable = self.info.as_ref().unwrap().mutable;
+        if let Err(err) = infer.at(node).eq(&mutable, &Into::<ExtConstUid>::into(lhs_mut)) {
+            return Err(report_infer_error(err, infer_state, phase));
+        }
+        let lhs: TypeUid = infer.get_generic_type(lhs, 0).unwrap().into();
 
         if let Some(env_constraint) = infer.find_env_constraints(lhs) {
             // insert additional constraints based on the member types
             let mut stack = EnvConstraintStack::default();
             stack.insert(env_constraint);
-
-            let EdlMaybeType::Fixed(lhs_ty) = infer.find_type(lhs) else {
-                return Ok(());
-            };
 
             let EdlType::Type { state, .. } = phase.types.get_type(lhs_ty.ty)
                 .ok_or(HirError::new_edl(self.pos, EdlError::E011(lhs_ty.ty)))? else {
@@ -733,6 +770,8 @@ impl ResolveTypes for HirField {
                             });
                         }
                     };
+
+                    // get parameter environment
                     match infer.at_env(node, &stack).eq(&own_uid, &ty) {
                         Ok(_) => Ok(()),
                         Err(err) => Err(report_infer_error(err, infer_state, phase)),
@@ -773,10 +812,22 @@ impl ResolveTypes for HirField {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+
+            let base_stencil = inferer.new_type(node);
+            let ref_ty = inferer.type_reg.new_ref(EdlMaybeType::Unknown, None).unwrap();
+            inferer
+                .at(node)
+                .eq(&base_stencil, &ref_ty)
+                .unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 type_uid: own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                base_stencil,
+                mutable,
+                finalized_mutable: InternalMutability::Undetermined,
             });
             own_uid
         }
@@ -785,12 +836,19 @@ impl ResolveTypes for HirField {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.info.as_mut().unwrap();
         let ty = inferer.find_type(info.type_uid);
+        let mutable = inferer.find_ext_const(info.mutable);
         info.finalized_type = ty;
+        info.finalized_mutable = mutable.try_into().unwrap();
         self.lhs.finalize_types(inferer);
     }
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -840,13 +898,6 @@ impl HirExpr for HirField {
 impl EdlFnArgument for HirField {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        self.lhs.is_mutable(state)
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState
@@ -855,36 +906,118 @@ impl EdlFnArgument for HirField {
     }
 }
 
-impl IntoMir for HirField {
-    type MirRepr = MirOffset;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirField {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let ty = self.get_type(phase)?;
-        if !ty.is_fully_resolved() {
+        let base_ty = self.lhs.mir_type(graph)?;
+        let base_value = graph.graph.create_temp_variable(base_ty);
+        self.lhs.write_to_graph(graph, base_value)?;
+        if graph.is_current_sealed() {
+            return Ok(()); // lhs exits early
+        }
+
+        let self_ty = self.mir_type(graph)?;
+        assert!(graph.mir_phase.types.is_ref(&self_ty));
+
+        let expr_id = if !graph.mir_phase.types.is_ref_mutable(&self_ty) {
+            // insert as a shared reference
+            graph.graph.expressions
+                .insert_ref(MirRef::shared_field(
+                    base_value,
+                    &self.name,
+                    self_ty,
+                    graph.graph,
+                    &graph.mir_phase.types,
+                ))
+        } else {
+            graph.graph.expressions
+                .insert_ref(MirRef::mut_field(
+                    base_value,
+                    &self.name,
+                    self_ty,
+                    graph.graph,
+                    &graph.mir_phase.types,
+                ))
+        };
+
+        // insert reference expression...
+        if *graph.graph.get_var_type(&target) == self_ty {
+            // ... as an internal reference
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                expr_id,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+        } else {
+            let self_deref_ty = self.mir_deref_type(graph)?;
+            assert_eq!(*graph.graph.get_var_type(&target), self_deref_ty);
+            // ... as a dereferenced base value
+            let tmp = graph.graph.create_temp_variable(self_ty);
+            graph.graph.insert_def(
+                graph.current_block,
+                tmp,
+                expr_id,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+            graph.graph.def_deref(
+                graph.current_block,
+                tmp,
+                target,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let field_ty = self.get_type(&mut graph.hir_phase)?;
+        if !field_ty.is_fully_resolved() {
             return Err(HirTranslationError::TypeNotFullyResolved {
-                ty,
                 pos: self.pos,
+                ty: field_ty,
             });
         }
-        let EdlMaybeType::Fixed(ty) = self.get_type(phase)? else { unreachable!() };
-        let ty = mir_phase.types.mir_id(&ty, &phase.types)
-            .map_err(|_| HirTranslationError::UnknownMirType { pos: self.pos, ty: ty.clone() })?;
 
-        let lhs = self.lhs.mir_repr(phase, mir_phase, mir_funcs)?;
-        let layout = mir_phase.types.get_layout(lhs.get_type(mir_funcs, mir_phase)).unwrap();
-        let field_offset = layout.member_offset(&self.name, &mir_phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-        let mut offset = lhs.into_offset(mir_phase, mir_funcs)
-            .map_err(|err: MirError<B>| HirTranslationError::MirError(self.pos, err.to_string()))?;
-        offset.add_const_offset(field_offset, ty);
-        Ok(offset)
+        let lhs_ty = self.lhs.get_type(&mut graph.hir_phase)?;
+        if !lhs_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: lhs_ty,
+            })
+        }
+        let lhs_ty = lhs_ty.unwrap();
+        let lhs_mutability = lhs_ty.get_ref_mutability()?.clone();
+
+        let ty = graph.hir_phase.types.new_ref(field_ty, Some(lhs_mutability))?;
+        graph.mir_phase.types.mir_id(&ty, &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
+    }
+
+    fn mir_deref_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let field_ty = self.get_type(&mut graph.hir_phase)?;
+        if !field_ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: field_ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&field_ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

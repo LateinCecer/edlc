@@ -1,22 +1,24 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::mem;
 use log::warn;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_fn::{AstFn, AstFnModifier};
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type::AstType;
@@ -24,8 +26,10 @@ use crate::ast::ast_type_def::{AliasResolver, AstTypeDef};
 use crate::ast::{AstModule, ItemDoc};
 use crate::ast::IntoHir;
 use crate::ast::ast_const::AstConst;
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlConst, EdlMaybeType, EdlType, EdlTypeInstance};
+use crate::file::ModuleSrc;
 use crate::hir::hir_impl::HirImpl;
 use crate::hir::{HirPhase, IntoEdl};
 use crate::hir::hir_expr::hir_const::HirConst;
@@ -35,6 +39,7 @@ use crate::resolver::{QualifierName, ScopeId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstImpl {
+    src: ModuleSrc,
     pos: SrcPos,
     scope: ScopeId,
     trait_name: Option<AstType>,
@@ -47,6 +52,7 @@ pub struct AstImpl {
     /// Associated types
     types: Vec<AstTypeDef>,
     doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 impl AstImpl {
@@ -65,6 +71,7 @@ impl Parsable for AstImpl {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
         let pos = expect_token!(parser; (Token::Key(KeyWord::Impl)), pos => pos
             expected "`impl` definition")?;
+        let src = parser.module_src.clone();
         let env = AstParamEnv::parse(parser)?;
         parser.env.push_block();
         let scope = *parser.env.current_scope().wrap(pos)?;
@@ -80,6 +87,8 @@ impl Parsable for AstImpl {
         } else {
             (var1, None)
         };
+
+        let constraints = AstWhere::try_parse(parser)?;
 
         // parse function bodies
         expect_token!(parser; (Token::Punct(Punct::BraceOpen))
@@ -215,6 +224,7 @@ impl Parsable for AstImpl {
         };
 
         Ok(AstImpl {
+            src,
             pos,
             scope,
             base_name,
@@ -224,6 +234,7 @@ impl Parsable for AstImpl {
             consts,
             types,
             doc,
+            type_constraints: constraints,
         })
     }
 }
@@ -231,7 +242,7 @@ impl Parsable for AstImpl {
 impl AstImpl {
     fn find_base_scope(&self, phase: &mut HirPhase) -> Option<ScopeId> {
         // find type scope
-        if let AstType::Base(_, name) = &self.base_name {
+        if let AstType::Base(_, _, name) = &self.base_name {
             let name: QualifierName = name.clone().into();
             phase.res.find_top_level_type_scope(&name)
         } else {
@@ -258,17 +269,20 @@ impl AstImpl {
     }
 
     fn push_constant_definition(
-        c: AstConst, phase: &mut HirPhase, association: &EdlTypeInstance
+        c: AstConst,
+        phase: &mut HirPhase,
+        association: &EdlTypeInstance,
     ) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
         let edl_ty = ty.edl_repr(phase)
-            .map_err(|err| AstTranslationError::HirError { err })?;
+            .map_err(|err| AstTranslationError::HirError { err, src: c.src.clone() })?;
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => {
                 return Err(AstTranslationError::EdlError {
                     pos: c.pos,
+                    src: c.src.clone(),
                     err: EdlError::E031,
                 });
             }
@@ -277,13 +291,14 @@ impl AstImpl {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty)
             });
         }
         // change scope and push top level item to the name resolver
         phase.res.revert_to_scope(&c.scope);
         let mut constant_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })?;
         constant_name.push(c.name.clone());
 
         let const_id = phase.types.insert_const(EdlConst {
@@ -291,7 +306,7 @@ impl AstImpl {
             name: constant_name,
         });
         phase.res.push_associated_const(association, c.name.clone(), const_id)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })
     }
 }
 
@@ -304,32 +319,32 @@ impl IntoHir for AstImpl {
         let base_scope = self.find_base_scope(parser);
 
         let mut hir_env = self.env.hir_repr(parser)?;
-        let edl_env = hir_env.edl_repr(parser)?;
+        let edl_env = hir_env.edl_repr(parser).wrap_ast(&self.src)?;
         let env_id = parser.types.insert_parameter_env(edl_env);
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         // parse base name and trait (if present)
         let mut base_name_hir = self.base_name.hir_repr(parser)?;
-        let EdlMaybeType::Fixed(base_name_edl) = base_name_hir.edl_repr(parser)? else {
-            return Err(AstTranslationError::ElicitType { pos: self.pos });
+        let EdlMaybeType::Fixed(base_name_edl) = base_name_hir.edl_repr(parser).wrap_ast(&self.src)? else {
+            return Err(AstTranslationError::ElicitType { pos: self.pos, src: self.src.clone() });
         };
         // push `Self` type to the resolver
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_self_type(base_name_edl.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         let trait_name_edl = if let Some(trait_name) = self.trait_name {
             let mut trait_name_hir = trait_name.trait_repr(parser)?;
-            let edl_id = trait_name_hir.edl_repr(parser)?;
+            let edl_id = trait_name_hir.edl_repr(parser).wrap_ast(&self.src)?;
             // push trait as an association to the base type, for the scope of the impl body
             let trait_name = &parser.types.get_trait(edl_id.trait_id).unwrap().name;
             parser.res.revert_to_scope(&self.scope);
             parser.res.push_association(base_name_edl.clone(), trait_name.clone())
-                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
             Some(edl_id)
         } else {
@@ -379,7 +394,7 @@ impl IntoHir for AstImpl {
             let state = type_def.translate_as_associate(associate_name.clone(), parser)?;
             parser.res.revert_to_scope(&self.scope);
             state.push_type_associated_alias(&base_name_edl, &mut parser.res, &parser.types)
-                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
             resolver.insert(state);
         }
         // --> resolving use statements would go here
@@ -390,6 +405,6 @@ impl IntoHir for AstImpl {
         for func in self.funcs.into_iter() {
             body.push(func.hir_repr(parser)?);
         }
-        Ok(HirImpl::new(self.pos, self.scope, base_scope, trait_name_edl, base_name_edl, env_id, body ))
+        Ok(HirImpl::new(self.src.clone(), self.pos, self.scope, base_scope, trait_name_edl, base_name_edl, env_id, body ))
     }
 }

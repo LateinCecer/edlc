@@ -1,43 +1,169 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 pub mod macros;
+mod test_setup;
 
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::marker::PhantomData;
+use anyhow::{anyhow};
 use edlc_core::inline_code;
 use edlc_core::parser::{InFile, Parsable};
-use edlc_core::prelude::{CompilerError, EdlCompiler, ErrorFormatter, ExecType, HirContext, IntoHir, JitCompiler, MirError, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
+use edlc_core::prelude::{edl_type, CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
 use edlc_core::prelude::ast_expression::AstExpr;
-use edlc_core::prelude::edl_type::EdlTypeId;
-use edlc_core::prelude::hir_expr::HirExpression;
-use edlc_core::prelude::mir_expr::MirExpr;
+use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance};
+use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_str::{FatPtr, MemPtr};
-use edlc_core::prelude::translation::IntoMir;
-use edlc_core::resolver::QualifierName;
+use edlc_core::resolver::{ItemVariant, QualifierName};
 use cranelift_module::{Linkage, Module};
+use log::info;
 use edlc_core::lexer::SrcPos;
-use edlc_core::prelude::type_analysis::{InferProvider, InferState};
+use edlc_core::prelude::ast_type::AstTypeName;
+use edlc_core::prelude::edl_fn::EdlFnSignature;
+use edlc_core::prelude::edl_impl::AssociatedType;
+use edlc_core::prelude::edl_param_env::{EdlParamStack, EdlParameterDef};
+use edlc_core::prelude::hir_expr::hir_type::{HirTypeNameSegment, SegmentType};
+use edlc_core::prelude::mir_backend::Backend;
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, CompileOptions, Context, DebugSymbols, MirFlowGraph};
+use edlc_core::prelude::mir_funcs::ComptimeParams;
+use edlc_core::prelude::mir_type::abi::ByteLayout;
+use edlc_core::prelude::mir_vars::VariableMapper;
+use edlc_core::prelude::type_analysis::{InferEq, InferProvider, InferState};
+use regex::{Regex, RegexBuilder};
 use crate::codegen::ItemCodegen;
 use crate::compiler::external_func::JITExternCall;
-use crate::compiler::{InsertFunctionPtr, InsertRuntimeFunctionPtr, RuntimeId, TypedProgram};
+use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
 use crate::error::{JITError, JITErrorType};
-use crate::prelude::func::JITCallGen;
+pub use crate::executor::test_setup::{TestReport, FnReport};
 use crate::prelude::{Program, JIT};
+use crate::unwind::{PanicData, PanicError, TrapHandler};
 
+pub trait FunctionContainer<F> {
+    fn get_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<F, anyhow::Error>;
+
+    fn get_named_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<F, anyhow::Error>;
+}
+
+pub trait CatchUnwind<F, A, R> {
+    fn catch_unwind(&self, func: F, args: A) -> Result<R, PanicError>;
+}
+
+macro_rules! impl_function_container(
+    (fn($($p:ident: $P:ident),*) -> $R:ident) => (
+impl<$($P,)* $R, Runtime: 'static> CatchUnwind<extern "C" fn($($P),*) -> $R, ($($P,)*), $R> for CraneliftJIT<Runtime>
+where
+    $($P: MirLayout,)*
+    $R: MirLayout,
+{
+    fn catch_unwind(&self, func: extern "C" fn($($P),*) -> $R, ($($p,)*): ($($P,)*)) -> Result<$R, PanicError> {
+        let val = {
+            let _handler = unsafe { TrapHandler::new() };
+            func($($p,)*)
+            // _handler goes out of scope here and the normal trap handler should take over
+        };
+        PanicData::fetch(&self.backend, &self.compiler.phase).map(|_| val)
+    }
+}
+
+impl<$($P,)* $R, Runtime: 'static> FunctionContainer<extern "C" fn($($P),*) -> $R> for CraneliftJIT<Runtime>
+where
+    $($P: MirLayout,)*
+    $R: MirLayout,
+{
+    fn get_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<extern "C" fn($($P),*) -> $R, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(id)?
+            .clone();
+
+        // format function instance
+        let instance = self.format_function_instance(id, params, associated_type)?;
+        // verify that type layouts are FFI safe
+        let ret = sig
+            .return_type()
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        self.check_layout_ffi_compatible::<$R>(ret)?;
+        #[allow(unused_mut)]
+        let mut i: usize = 0;
+        $(
+            let a = sig.params[i]
+                .ty
+                .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+            self.check_layout_ffi_compatible::<$P>(a)?;
+            i += 1;
+        )*
+        if sig.params.len() != i {
+            return Err(anyhow!("invalid number of function parameters provided: {} != {i}", sig.params.len()));
+        }
+
+        // get function id
+        let ptr = unsafe { self.get_function_ptr(&instance) }?;
+        Ok(unsafe { std::mem::transmute::<*const u8, extern "C" fn($($P),*) -> $R>(ptr) })
+    }
+
+    fn get_named_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<extern "C" fn($($P),*) -> $R, anyhow::Error> {
+        let (id, associated_type, params) = self
+            .find_function_from_name(name)?;
+        <Self as FunctionContainer<_>>::get_function(self, id, params, associated_type)
+    }
+}
+    );
+);
+
+pub trait JITBencher {
+    /// Start a benchmark for a specific function.
+    /// The return value of this method should be the number of rounds for which the function should
+    /// be executed for.
+    fn start_bench(&mut self, name: &QualifierName) -> usize;
+
+    /// Starts a single benchmarking round for the currently running benchmark.
+    fn start_round(&mut self);
+
+    /// Ends a single benchmarking round for the currently running benchmark.
+    fn stop_round(&mut self);
+
+    /// Ends the benchmark for the current function.
+    /// This should be called exactly once after [Self::start_bench].
+    fn end_bench(&mut self);
+}
+
+impl_function_container!(fn() -> R);
+impl_function_container!(fn(a: A) -> R);
+impl_function_container!(fn(a: A, b: B) -> R);
+impl_function_container!(fn(a: A, b: B, c: C) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D, e: E) -> R);
+impl_function_container!(fn(a: A, b: B, c: C, d: D, e: E, f: F) -> R);
 
 
 pub struct CraneliftJIT<Runtime: 'static> {
@@ -76,10 +202,24 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         self.backend.load_i64_math(&mut self.compiler)?;
         self.backend.load_i128_math(&mut self.compiler)?;
 
+        self.load_u8_special()?;
+        self.load_u16_special()?;
+        self.load_u32_special()?;
+        self.load_u64_special()?;
+        self.load_u128_special()?;
+        self.load_usize_special()?;
+
+        self.load_i8_special()?;
+        self.load_i16_special()?;
+        self.load_i32_special()?;
+        self.load_i64_special()?;
+        self.load_i128_special()?;
+        self.load_isize_special()?;
+
         self.backend.load_f32_math(&mut self.compiler)?;
         self.backend.load_f64_math(&mut self.compiler)?;
         self.backend.load_bool_math(&mut self.compiler)?;
-        self.backend.load_bounds_check(&mut self.compiler)?;
+        self.backend.load_assert(&mut self.compiler)?;
 
         self.load_f64_trigonometry()?;
         self.load_f32_trigonometry()?;
@@ -107,37 +247,6 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         true
     }
 
-    /// Creates a new static EDL string and returns the respective fat pointer to the string source.
-    /// It should be noted that static strings are kept in memory until the program is terminated,
-    /// thus this function should really only be used if strings are created that are accessible
-    /// from the body of the program for the entirety of the programs' lifetime.
-    pub fn create_new_static_string(&mut self, val: &str, name: &str) -> Result<FatPtr, MirError<JIT<Runtime>>> {
-        let bytes = val.to_string().into_bytes();
-        let len = bytes.len();
-
-        self.backend.data_description.define(bytes.into_boxed_slice());
-
-        let data_id = self.backend.module
-            .declare_data(name, Linkage::Export, false, false)
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.module
-            .define_data(data_id, &self.backend.data_description)
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.module.finalize_definitions()
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        self.backend.data_description.clear();
-
-        let (ptr, _) = self.backend.module
-            .get_finalized_data(data_id);
-        Ok(FatPtr { ptr: MemPtr(ptr as usize), size: len })
-    }
-
     pub fn insert_extern<F: 'static>(
         &mut self,
         fn_id: EdlTypeId,
@@ -148,24 +257,25 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         name: &str,
     ) -> Result<(), CompilerError>
     where
-        JIT<Runtime>: InsertFunctionPtr<F> {
+        FunctionBinding: FromFunction<F> {
 
         assert!(Self::check_function_name(name),
             "External function name cannot contain whitespace characters");
         let instance = self.compiler.get_func_instance(fn_id, fn_params, associated_type)?;
 
         let symbol = self.intrinsic_symbol_name(name);
-        self.backend.insert_function(symbol.clone(), function);
-        self.backend.func_reg
+        let func_id = self.backend.func_reg
             .borrow_mut()
             .register_intrinsic(
                 instance,
-                JITCallGen::external(symbol, Linkage::Import),
+                JITExternCall::external(symbol.clone(), Linkage::Import),
                 const_expr,
                 &self.compiler.mir_phase.types,
                 &self.compiler.phase.types,
                 "",
             )?;
+        let binding = FunctionBinding::from_function(function);
+        self.backend.insert_function(symbol, &func_id, binding);
         Ok(())
     }
 
@@ -180,29 +290,69 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         runtime_id: Id,
     ) -> Result<(), CompilerError>
     where
-        JIT<Runtime>: InsertRuntimeFunctionPtr<F, Runtime>,
-        Id: Into<RuntimeId> {
+        FunctionBinding: FromFunction<F>,
+        Id: Into<RuntimeId> + Clone + Copy {
 
         assert!(Self::check_function_name(name),
                 "External function name cannot contain whitespace characters");
         let instance = self.compiler.get_func_instance(fn_id, fn_params, associated_type)?;
 
         let symbol = self.intrinsic_symbol_name(name);
-        self.backend.insert_runtime_function(symbol.clone(), function);
-        self.backend.func_reg
+        let func_id = self.backend.func_reg
             .borrow_mut()
             .register_intrinsic(
                 instance,
-                JITExternCall::external_with_runtime(symbol, runtime_id),
+                JITExternCall::external_with_runtime(symbol.clone(), runtime_id),
                 const_expr,
                 &self.compiler.mir_phase.types,
                 &self.compiler.phase.types,
                 "",
             )?;
+        let rt = runtime_id.into();
+        let binding = FunctionBinding::from_function_with_runtime(function, rt.oridnal());
+        self.backend.insert_function(symbol, &func_id, binding);
         Ok(())
     }
 
+    fn compile_to_hir(
+        compiler: &mut EdlCompiler,
+        module: &QualifierName,
+        src: &ModuleSrc,
+        context: ExecType,
+        return_type: &EdlMaybeType,
+    ) -> Result<HirExpression, anyhow::Error> {
+        compiler.prepare_module(module)?;
+        let code = src.get_src()?;
+        let ast = AstExpr::parse(&mut compiler
+            .create_parser(&code, src.clone()))
+            .in_file(src.clone())
+            .map_err(|err| compiler.report_ast_err(err))?;
+        let mut hir = ast.hir_repr(&mut compiler.phase)?;
+        // verify with compiler reports
+        compiler.phase.report_mode.print_errors = true;
+        compiler.phase.report_mode.print_warnings = true;
+
+        hir.resolve_names(&mut compiler.phase)?;
+        let mut infer_state = InferState::new();
+        let node = infer_state.node_gen.gen_info(&SrcPos::default(), src);
+        infer_state.insert_vars(&compiler.phase, node);
+        hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
+        hir.resolve_fn(&mut compiler.phase)?;
+        let mut infer = compiler.phase.infer_from(&mut infer_state);
+        let expr_ty = hir.get_type_uid(&mut infer);
+        infer.at(node).eq(&expr_ty, return_type)?;
+        hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
+        hir.walk_mut(&mut |_| true, &mut |s| {
+            s.insert_default_mutability(&mut compiler.phase, &mut infer_state)
+        })?;
+        hir.finalize_types(&mut compiler.phase.infer_from(&mut infer_state));
+        hir.verify(&mut compiler.phase, &mut HirContext::new(context), &mut infer_state)?;
+        Ok(hir)
+    }
+
     pub fn compile_module(&mut self, name: QualifierName, src: ModuleSrc) -> Result<(), anyhow::Error> {
+        self.compiler.phase.report_mode.print_errors = true;
+        self.compiler.phase.report_mode.print_warnings = true;
         let module = match self.compiler.parse_module(src, name) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -218,7 +368,204 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
             },
         }?;
         module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        module.codegen(&mut self.compiler.phase, &mut self.backend, &mut self.compiler.mir_phase)?;
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
+        self.compile_globals(&module, &mut vm)?;
+        Ok(())
+    }
+
+    fn compile_globals(&mut self, module: &HirModule, vm: &mut ExecutorVM) -> Result<(), anyhow::Error> {
+        for item in module.items.iter() {
+            match item {
+                HirItem::Let(val) => {
+                    let mut code = val.value
+                        .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
+                    let options = CompileOptions::default();
+                    let stack_frame = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                        Err(_err) => {
+                            return Err(anyhow!("panic in execution of global variable"));
+                        },
+                        Ok(eval_result) => {
+                            self.backend.register_global_var(*val.id().unwrap(), eval_result)?;
+                        },
+                    }
+                },
+                HirItem::Const(val) => {
+                    let mut code = val.value
+                        .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
+                    let options = CompileOptions::default();
+                    let stack_frame = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                        Err(_err) => {
+                            return Err(anyhow!("panic in execution of global variable"));
+                        },
+                        Ok(eval_result) => {
+                            let lit = eval_result
+                                .into_literal(&self.compiler.mir_phase.types)
+                                .ok_or_else(|| anyhow!("failed to create literal value from evaluated constant data"))?;
+                            self.compiler.mir_phase.types.insert_const_value::<JIT<Runtime>>(
+                                *val.id().unwrap(), lit)?;
+                        },
+                    }
+                },
+                HirItem::Submod(m, _) => self.compile_globals(m, vm)?,
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
+    fn find_function_from_name(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<(EdlTypeId, Option<EdlTypeInstance>, EdlParameterDef), anyhow::Error> {
+        let code = name.get_src()?;
+        let ast_name = AstTypeName::parse(&mut self.compiler
+            .create_parser(&code, name.clone()))
+            .in_file(name.clone())
+            .map_err(|err| self.compiler.report_ast_err(err))?;
+        let hir_name = ast_name.hir_repr(&mut self.compiler.phase)?;
+        let (last, raw_associated_type) = hir_name.extract_last();
+        let (func, ass_ty) = if let Some(mut raw) = raw_associated_type {
+            let ty = raw.as_type_instance(last.pos, &mut self.compiler.phase)?;
+            match ty {
+                SegmentType::Type(ty) => {
+                    let func = self.compiler.phase.res
+                        .find_associated_item(&ty, &last.path)
+                        .ok_or_else(|| anyhow!("no function '{}' associated to type '{:?}'", last.path, ty))?;
+                    let ItemVariant::Fn(func_id) = &func.variant else {
+                        return Err(anyhow!("item associated to type is not a function"));
+                    };
+                    (*func_id, Some(ty))
+                },
+                SegmentType::Trait(tr) => {
+                    let func = self.compiler.phase.res
+                        .find_associated_trait_item(&tr, &last.path)
+                        .ok_or_else(|| anyhow!("no function '{}' associated to trait '{:?}'", last.path, tr))?;
+                    let ItemVariant::Fn(func_id) = &func.variant else {
+                        return Err(anyhow!("item associated to trait is not a function"));
+                    };
+                    (*func_id, None)
+                },
+            }
+        } else {
+            let func = self.compiler.phase.res
+                .find_top_level_function(&last.path, &self.compiler.phase.types)
+                .ok_or_else(|| anyhow!("function does not exist"))?;
+            (func, None)
+        };
+
+        let sig = self.compiler.phase.types.get_fn_signature(func)?
+            .clone();
+        let ast_param = last.params
+            .parse_env(sig.env, &mut self.compiler.phase)
+            .in_file(name)?;
+        let mut hir_param = ast_param.hir_repr(&mut self.compiler.phase)?;
+        let edl_param = hir_param.edl_repr(sig.env, &mut self.compiler.phase)?;
+        if !edl_param.is_fully_resolved() {
+            return Err(anyhow!("generic parameters not fully resolved"));
+        }
+        Ok((func, ass_ty, edl_param))
+    }
+
+    fn format_function_instance(
+        &mut self,
+        func_ty: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<EdlFnInstance, anyhow::Error> {
+        if let Some(ass_ty) = associated_type {
+            let (mut stack, replacements) = self.compiler.phase
+                .find_parameter_stack(func_ty, params, ass_ty.clone())?;
+            let inv_replacements = replacements
+                .inverse(&mut self.compiler.phase.types)?;
+            stack.replace_all(&inv_replacements, &self.compiler.phase.types);
+
+            Ok(EdlFnInstance {
+                func: func_ty,
+                associated_ty: Some(ass_ty),
+                param: stack,
+            })
+        } else {
+            let mut stack = EdlParamStack::default();
+            stack.insert_def(params);
+
+            Ok(EdlFnInstance {
+                func: func_ty,
+                associated_ty: None,
+                param: stack,
+            })
+        }
+    }
+
+    unsafe fn get_function_ptr(&mut self, instance: &EdlFnInstance) -> Result<*const u8, anyhow::Error> {
+        let mir_id = {
+            let mut funcs = self.backend.func_reg.borrow_mut();
+            let mir_id = funcs
+                .mir_id(
+                    instance,
+                    &mut self.compiler.phase,
+                    &mut self.compiler.mir_phase,
+                    ComptimeParams::empty(),
+                    false,
+                )?;
+            mir_id
+        };
+
+
+        // make sure function is compiled
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
+        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
+        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
+        self.backend
+            .compile_associated_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
+
+        let ptr = unsafe { self.backend.get_func_ptr(mir_id) }
+            .ok_or_else(|| anyhow!("function not compiled"))?;
+        Ok(ptr)
+    }
+
+    /// Checks if an EDL type has an FFI compatible layout to a Rust type.
+    /// This method does not check if the types are actually equivalent; in many cases such a check
+    /// is actually impossible and usually also not what you want.
+    pub fn check_layout_ffi_compatible<Rust: MirLayout>(
+        &mut self,
+        edl_type: EdlMaybeType,
+    ) -> Result<(), anyhow::Error> {
+        if !edl_type.is_fully_resolved() {
+            return Err(anyhow!("return type not fully resolved"));
+        }
+        let mir_ret = self.compiler.mir_phase.types
+            .mir_id(&edl_type.unwrap(), &self.compiler.phase.types)?;
+        if self.compiler.mir_phase.types.byte_size(mir_ret).unwrap() != size_of::<Rust>() {
+            return Err(anyhow!("size of return types does not match rust type"));
+        }
+        if self.compiler.mir_phase.types.byte_alignment(mir_ret).unwrap() != align_of::<Rust>() {
+            return Err(anyhow!("alignment of return types does not match rust type"));
+        }
+        let ret_byte_layout = self.compiler.mir_phase.types.byte_layout(mir_ret).unwrap();
+        let exp_layout = Rust::layout(&self.compiler.mir_phase.types);
+        let mut exp_byte_layout = ByteLayout::default_high();
+        exp_layout.layout.float_bytes(exp_layout.size, &self.compiler.mir_phase.types, &mut exp_byte_layout);
+        if ret_byte_layout != exp_byte_layout {
+            return Err(anyhow!("layout of return types does not match rust type"));
+        }
+        Ok(())
+    }
+
+    fn prepare_module(&mut self, module: &HirModule) -> Result<(), anyhow::Error> {
+        match self.compiler.prepare_mir() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
+                Err(err)
+            }
+        }?;
+        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
+        self.compile_globals(module, &mut vm)?;
         Ok(())
     }
 
@@ -242,12 +589,21 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
     ///
     /// prog.exec(&mut compiler.backend).unwrap();
     /// ```
-    pub fn compile_bin<Src: SrcSupplier, R: Debug + 'static>(
+    pub fn compile_bin<Src: SrcSupplier, R: MirLayout + 'static>(
         &mut self,
         name: &str,
         supplier: &Src,
-        entry: &str
-    ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
+        entry: ModuleSrc
+    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
+        let _module = self.load_bin(name, supplier)?;
+        self.get_named_function(entry)
+    }
+
+    pub fn load_bin<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+    ) -> Result<HirModule, anyhow::Error> {
         let module = match self.compiler.parse_bin(name, supplier) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -255,16 +611,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             },
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        module.codegen(&mut self.compiler.phase, &mut self.backend, &mut self.compiler.mir_phase)?;
-        self.compile_expr(&vec![name].into(), inline_code!(format!("{entry}()")))
+        self.prepare_module(&module)?;
+        Ok(module)
     }
 
     /// Compiles an entire **fracht** that compiles to a library.
@@ -273,6 +621,15 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         name: &str,
         supplier: &Src
     ) -> Result<(), anyhow::Error> {
+        let _module = self.load_lib(name, supplier)?;
+        Ok(())
+    }
+
+    pub fn load_lib<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src
+    ) -> Result<HirModule, anyhow::Error> {
         let module = match self.compiler.parse_lib(name, supplier) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -280,24 +637,222 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             }
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        module.codegen(&mut self.compiler.phase, &mut self.backend, &mut self.compiler.mir_phase)?;
-        Ok(())
+        self.prepare_module(&module)?;
+        Ok(module)
     }
 
-    pub fn compile_script<Src: SrcSupplier, R: Debug + 'static>(
+    pub fn run_test<Src: SrcSupplier>(
         &mut self,
         name: &str,
         supplier: &Src,
-        entry: &str,
-    ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
+        is_lib: bool,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Result<TestReport, anyhow::Error> {
+        let module = if is_lib {
+            self.load_lib(name, supplier)?
+        } else {
+            self.load_bin(name, supplier)?
+        };
+        self.prepare_module(&module)?;
+
+        let mut report = TestReport::default();
+        'outer: for (id, test, setup, teardown) in self
+            .get_test_cases(test_name, &module, path, "test")? {
+
+            for setup_fn in setup.into_iter() {
+                if let Err(err) = self.catch_unwind(setup_fn, ()) {
+                    report.insert(id, FnReport::SetupErr(err));
+                    continue 'outer;
+                }
+            }
+            match self.catch_unwind(test, ()) {
+                Ok(()) => (),
+                Err(err) => {
+                    report.insert(id, FnReport::Err(err));
+                    continue 'outer;
+                },
+            }
+            for teardown_fn in teardown.into_iter() {
+                if let Err(err) = self.catch_unwind(teardown_fn, ()) {
+                    report.insert(id, FnReport::TeardownError(err));
+                    continue 'outer;
+                }
+            }
+            report.insert(id, FnReport::Ok);
+        }
+        Ok(report)
+    }
+
+    pub fn run_bench<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+        is_lib: bool,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+        bencher: &mut impl JITBencher,
+    ) -> Result<TestReport, anyhow::Error> {
+        let module = if is_lib {
+            self.load_lib(name, supplier)?
+        } else {
+            self.load_bin(name, supplier)?
+        };
+        self.prepare_module(&module)?;
+
+        let mut report = TestReport::default();
+        for (id, bench, setup, teardown) in self
+            .get_test_cases(test_name, &module, path, "bench")? {
+
+            let full_name = self.compiler.phase.types.get_fn_qualifier(id)?
+                .as_ref()
+                .unwrap();
+            let n = bencher.start_bench(full_name);
+            let mut ok = true;
+            'outer: for _ in 0..n {
+                for setup_fn in setup.iter() {
+                    if let Err(err) = self.catch_unwind(*setup_fn, ()) {
+                        report.insert(id, FnReport::SetupErr(err));
+                        ok = false;
+                        break 'outer;
+                    }
+                }
+                bencher.start_round();
+                let res = self.catch_unwind(bench, ());
+                bencher.stop_round();
+                if let Err(err) = res {
+                    report.insert(id, FnReport::Err(err));
+                    ok = false;
+                    break 'outer;
+                }
+
+                for teardown_fn in teardown.iter() {
+                    if let Err(err) = self.catch_unwind(*teardown_fn, ()) {
+                        report.insert(id, FnReport::TeardownError(err));
+                        ok = false;
+                        break 'outer;
+                    }
+                }
+            }
+            if ok {
+                report.insert(id, FnReport::Ok);
+            }
+            bencher.end_bench();
+        }
+        Ok(report)
+    }
+
+    fn get_test_cases(
+        &mut self,
+        name: &Regex,
+        module: &HirModule,
+        path: Option<&QualifierName>,
+        ident_str: &str,
+    ) -> Result<Vec<(EdlTypeId, extern "C" fn(), Vec<extern "C" fn()>, Vec<extern "C" fn()>)>, anyhow::Error> {
+        let regex = Regex::new(&format!(
+            r"^{}{}",
+            ident_str,
+            r"(?:\(((?:\s*([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)\s*,?\s*)*)\))?"
+        ))?;
+        let key_value_regex = Regex::new(r"([a-zA-Z_]\w*)\s*=\s*([^,)\s]+)")?;
+        let setup_regex = Regex::new(r"^setup")?;
+        let teardown_regex = Regex::new(r"^teardown")?;
+
+        let Some(test_cases) = module.find_function_with_annotation(&regex, name, path) else {
+            return Ok(vec![]);
+        };
+        let mut test_cases_out = Vec::new();
+        for (test_function, annotation) in test_cases {
+            let Some(func) = self.get_surface_function(test_function)? else {
+                continue;
+            };
+
+            // get signature name
+            let full_name = self.compiler.phase.types
+                .get_fn_qualifier(test_function)?
+                .as_ref()
+                .and_then(|name| name.trim(1));
+
+            // capture setup and teardown
+            let mut setup_functions = Vec::new();
+            let mut teardown_functions = Vec::new();
+            if let Some(captures) = regex.captures(&annotation) {
+                if let Some(g1) = captures.get(1) {
+                    for (_, [key, value]) in key_value_regex
+                        .captures_iter(g1.as_str())
+                        .map(|c| c.extract()) {
+                        match key {
+                            "setup" => {
+                                let mut setup = self.get_surface_functions(
+                                    module,
+                                    &setup_regex,
+                                    full_name.as_ref(),
+                                    &Regex::new(value)?,
+                                )?;
+                                setup_functions.append(&mut setup);
+                            },
+                            "teardown" => {
+                                let mut teardown = self.get_surface_functions(
+                                    module,
+                                    &teardown_regex,
+                                    full_name.as_ref(),
+                                    &Regex::new(value)?,
+                                )?;
+                                teardown_functions.append(&mut teardown);
+                            },
+                            _ => (),
+                        }
+                    }
+                }
+            }
+
+            test_cases_out.push((
+                test_function,
+                func,
+                setup_functions,
+                teardown_functions,
+            ));
+        }
+        Ok(test_cases_out)
+    }
+
+    fn get_surface_function(&mut self, func: EdlTypeId) -> Result<Option<extern "C" fn()>, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(func)?;
+        let env = self.compiler.phase.types.get_env(sig.env).unwrap();
+        if sig.params.is_empty() && sig.ret.ty == edl_type::EDL_EMPTY && env.params.is_empty() {
+            let param = EdlParameterDef::new(env, sig.env);
+            let func: extern "C" fn() = self.get_function(func, param, None)?;
+            Ok(Some(func))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_surface_functions(
+        &mut self,
+        module: &HirModule,
+        regex: &Regex,
+        path: Option<&QualifierName>,
+        name: &Regex,
+    ) -> Result<Vec<extern "C" fn()>, anyhow::Error> {
+        let mut out = Vec::new();
+        let Some(setup_funcs) = module.find_function_with_annotation(regex, name, path) else {
+            return Ok(out);
+        };
+        for (func, _annotation) in setup_funcs {
+            if let Some(func) = self.get_surface_function(func)? {
+                out.push(func);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn compile_script<Src: SrcSupplier, R: MirLayout>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+        entry: ModuleSrc,
+    ) -> Result<extern "C" fn() -> R, anyhow::Error> {
         let module = match self.compiler.parse_script(name, supplier, name) {
             Ok(module) => Ok(module),
             Err(err) => {
@@ -305,82 +860,80 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 Err(err)
             },
         }?;
-        match self.compiler.prepare_mir() {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
-        module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
-        module.codegen(&mut self.compiler.phase, &mut self.backend, &mut self.compiler.mir_phase)?;
-        self.compile_expr(&vec![name].into(), inline_code!(format!("{entry}()")))
+        self.prepare_module(&module)?;
+        self.get_named_function(entry)
     }
 
-    fn compile_expr_mir(
+    /// Evaluates an expression inside the compiler internal VM.
+    pub fn quick_eval<T: 'static>(
         &mut self,
         module: &QualifierName,
-        src: ModuleSrc,
-    ) -> Result<MirExpr, anyhow::Error> {
-        /// Creates a HIR expression from source code
-        fn compile_to_hir(
-            compiler: &mut EdlCompiler,
-            module: &QualifierName,
-            src: ModuleSrc,
-        ) -> Result<HirExpression, CompilerError> {
-            compiler.prepare_module(module)?;
-            let code = src.get_src().unwrap();
-            let ast = AstExpr::parse(&mut compiler.create_parser(&code, src.clone()))
-                .in_file(src.clone())
-                .map_err(|err| compiler.report_ast_err(err))?;
-
-            let mut hir = ast.hir_repr(&mut compiler.phase)?;
-            // verification with compiler report
-            let prev_print_errs = compiler.phase.report_mode.print_errors;
-            let prev_print_warns = compiler.phase.report_mode.print_warnings;
-            compiler.phase.report_mode.print_errors = true;
-            compiler.phase.report_mode.print_warnings = true;
-
-            // Try to compile.
-            // If code transformation tails at any point, the error should really be reported
-            // through the verification function since that has proper error reporting.
-            hir.resolve_names(&mut compiler.phase)?;
-            let mut infer_state = InferState::new();
-            let node = infer_state.node_gen.gen_info(&SrcPos::default(), &src);
-            infer_state.insert_vars(&compiler.phase, node);
-            for _ in 0..1 {
-                hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
-                hir.resolve_fn(&mut compiler.phase)?;
-            }
-            hir.resolve_types(&mut compiler.phase, &mut infer_state)?;
-            hir.resolve_fn(&mut compiler.phase)?;
-            hir.finalize_types(&mut compiler.phase.infer_from(&mut infer_state));
-
-            if let Err(err) = hir.verify(&mut compiler.phase, &mut HirContext::new(ExecType::Runtime), &mut infer_state) {
-                compiler.phase.report_mode.print_errors = prev_print_errs;
-                compiler.phase.report_mode.print_warnings = prev_print_warns;
-                return Err(err.into());
-            }
-
-            compiler.phase.report_mode.print_errors = prev_print_errs;
-            compiler.phase.report_mode.print_warnings = prev_print_warns;
-            Ok(hir)
+        src: &ModuleSrc,
+        output_type: &EdlMaybeType,
+        context: Context,
+    ) -> Result<T, anyhow::Error> {
+        if !output_type.is_fully_resolved() {
+            return Err(anyhow!("output type must be fully resolved"));
+        }
+        let mir_ty = self.compiler.mir_phase.types
+            .mir_id(&output_type.clone().unwrap(), &self.compiler.phase.types)?;
+        if self.compiler.mir_phase.types.get_type_from_rust::<T>() != Some(mir_ty) {
+            return Err(anyhow!("output type does not match expected type"));
         }
 
-        let hir  = match compile_to_hir(&mut self.compiler, module, src) {
-            Ok(hir) => Ok(hir),
-            Err(err) => {
-                log::error!("{}", ErrorFormatter::new(&self.compiler, err.clone()));
-                Err(err)
-            }
-        }?;
+        let exec = match context {
+            Context::Runtime => ExecType::Runtime,
+            Context::Comptime => ExecType::Comptime(SrcPos::default()),
+            Context::MaybeComptime => ExecType::MaybeComptime(SrcPos::default()),
+        };
+        let hir = Self::compile_to_hir(&mut self.compiler, module, src, exec, output_type)?;
+        let parameters = [];
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            mir_ty,
+            context,
+            src.clone(),
+            DebugSymbols { pos: SrcPos::default() },
+            *hir.scope(),
+        );
+        let ret_value = body.create_temp_variable(mir_ty);
 
-        let mir = hir.mir_repr(
-            &mut self.compiler.phase,
-            &mut self.compiler.mir_phase,
-            &mut self.backend.func_reg.borrow_mut()
+        let mut var_mapper = VariableMapper::new();
+        let mut loop_mapper = LoopMapper::new();
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase: &mut self.compiler.mir_phase,
+                hir_phase: &mut self.compiler.phase,
+                mir_funcs: &mut self.backend.func_reg_mut(),
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_mapper,
+            };
+            hir.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
+        };
+        body.insert_return(current_block, ret_value, DebugSymbols { pos: SrcPos::default() });
+        body.seal();
+
+        let mut vm = ExecutorVM::new(24 * 1024 * 1024);
+        let options = CompileOptions::default();
+        let stack_frame = compile_expression(
+            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options
         )?;
-        Ok(mir)
+        self.backend.compile_associated_functions(
+            &mut self.compiler.mir_phase,
+            &mut self.compiler.phase,
+        )?;
+        vm.alloc_stack_frame(&stack_frame);
+        match body.execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+            Err(_err) => {
+                Err(anyhow!("failed to execute expression"))
+            },
+            Ok(val) => {
+                Ok(unsafe { val.into() })
+            }
+        }
     }
 
     pub fn compile_expr<R: Debug + 'static>(
@@ -388,7 +941,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         module: &QualifierName,
         src: ModuleSrc,
     ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
-        self.compile_expr_with_settings(module, src, OptSettings::default())
+        todo!()
     }
 
     pub fn compile_expr_untyped(
@@ -396,7 +949,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         module: &QualifierName,
         src: ModuleSrc,
     ) -> Result<Program<Runtime>, anyhow::Error> {
-        self.compile_expr_untyped_with_settings(module, src, OptSettings::default())
+        todo!()
     }
 
     pub fn compile_expr_with_settings<R: Debug + 'static>(
@@ -405,15 +958,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         src: ModuleSrc,
         settings: OptSettings,
     ) -> Result<TypedProgram<R, Runtime>, anyhow::Error> {
-        let mut mir = self.compile_expr_mir(module, src)?;
-        if settings.optimize {
-            mir.optimize(&mut self.compiler.mir_phase, &mut self.backend, &mut self.compiler.phase)?;
-        }
-
-        let program: TypedProgram<R, Runtime> = self.backend
-            .eval_expr(mir, &mut self.compiler.mir_phase, &mut self.compiler.phase)?;
-        self.backend.optimize_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
-        Ok(program)
+        todo!()
     }
 
     pub fn compile_expr_untyped_with_settings(
@@ -422,15 +967,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         src: ModuleSrc,
         settings: OptSettings,
     ) -> Result<Program<Runtime>, anyhow::Error> {
-        let mut mir = self.compile_expr_mir(module, src)?;
-        if settings.optimize {
-            mir.optimize(&mut self.compiler.mir_phase, &mut self.backend, &mut self.compiler.phase)?;
-        }
-
-        let program: Program<Runtime> = self.backend
-            .eval_expr_untyped(mir, &mut self.compiler.mir_phase, &mut self.compiler.phase)?;
-        self.backend.optimize_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
-        Ok(program)
+        todo!()
     }
 }
 
@@ -454,21 +991,30 @@ impl<Runtime: 'static> JitCompiler for CraneliftJIT<Runtime> {
 
 #[cfg(test)]
 mod test {
-    use std::slice;
+    use std::{any, slice};
+    use std::collections::HashMap;
+    use std::fmt::{Display, Formatter};
+    use std::marker::PhantomData;
     use std::path::Path;
+    use std::time::SystemTime;
     use edlc_core::inline_code;
-    use edlc_core::prelude::FileSupplier;
+    use edlc_core::prelude::{AmorphusDataCopy, FileSupplier};
     use edlc_core::prelude::mir_str::FatPtr;
-    use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, StructLayoutBuilder};
+    use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
-    use cranelift_module::Linkage;
     use log::{error, info};
-    use crate::compiler::{InsertFunctionPtr, JIT, TypedProgram};
-    use crate::executor::CraneliftJIT;
-    use crate::{jit_func, setup_logger};
+    use regex::Regex;
+    use edlc_core::prelude::ast_type_def::LayoutOptions;
+    use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
+    use edlc_core::prelude::mir_expr::Context;
+    use edlc_core::resolver::QualifierName;
+    use edlc_layout::MirLayout;
+    use crate::compiler::{TypedProgram};
+    use crate::executor::{CatchUnwind, CraneliftJIT, FunctionContainer, JITBencher};
+    use crate::{jit_func, jit_panic, setup_logger};
     use crate::expr_format;
     use crate::prelude::*;
-    use crate::prelude::func::JITCallGen;
+    use crate::unwind::{PanicData, PanicMessage, TrapHandler};
 
     #[derive(Debug)]
     #[repr(C)]
@@ -481,6 +1027,130 @@ mod test {
             builder.add("1".to_string(), types.f64(), types);
             builder.make::<Self>()
         }
+    }
+
+    #[test]
+    fn test_simple_vm() -> Result<(), anyhow::Error> {
+        let _ = crate::setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn println<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                info!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn println_i32<>(val: i32) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn println_bool<>(val: bool) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn println_bool<>(val: f64) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_bool<>(val: f32) -> () where; {
+                info!("{}", val);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), edlc_core::inline_code!(r#"
+use std::println;
+
+fn test() -> i32 {
+    println("This machine is my Temple");
+    println("each one a sacred Shrine.");
+    println("I name every piston Blessed");
+    println("and every gear Divine.");
+    13
+}
+        "#))?;
+
+        // execute in VM
+        let output_ty = compiler.compiler.phase.types.i32();
+        let output: i32 = compiler.quick_eval(
+            &vec!["test"].into(),
+            &inline_code!(r#"
+{
+    std::println("hello, world!");
+    test()
+}
+            "#),
+            &EdlMaybeType::Fixed(output_ty),
+            Context::Runtime,
+        )?;
+        assert_eq!(output, 13);
+        Ok(())
+    }
+
+    #[test]
+    fn test_simple_jit() -> Result<(), anyhow::Error> {
+        let _ = crate::setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn println<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                info!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn println_i32<>(val: i32) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn println_bool<>(val: bool) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn println_bool<>(val: f64) -> () where; {
+                info!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_bool<>(val: f32) -> () where; {
+                info!("{}", val);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), edlc_core::inline_code!(r#"
+use std::println;
+
+fn test() -> i32 {
+    println("This machine is my Temple");
+    println("each one a sacred Shrine.");
+    println("I name every piston Blessed");
+    println("and every gear Divine.");
+    13
+}
+        "#))?;
+
+        // execute in JIT compiler
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 13);
+        Ok(())
     }
 
     #[test]
@@ -552,65 +1222,17 @@ mod test {
                 inline_code!(r#"
                 /// Creates a new [MyData] instance.
                 ?comptime fn new(key: f64, repeat: f64) -> MyData"#),
-                inline_code!("?comptime fn get_buf(self: MyData) -> f64"),
-                inline_code!("?comptime fn get_key(self: MyData) -> f64"),
+                inline_code!("?comptime fn get_buf(self) -> f64"),
+                inline_code!("?comptime fn get_key(self) -> f64"),
             ],
             None
         )?;
 
-        // fn foo<Data: Copy + 'static>(compiler: &mut CraneliftJIT<()>, new: EdlTypeId) -> Result<(), anyhow::Error> {
-        //     jit_func!(for (&format!("MyData<{}>", any::type_name::<Data>())) impl compiler, fn(new),
-        //         const fn new_data<(T = Data),>(key: T, repeat: T) -> MyData<T>
-        //         where T: Copy,
-        //             T: 'static; {
-        //             MyData(key, repeat)
-        //         }
-        //     );
-        //     Ok(())
-        // }
-        //
-        // foo::<f32>(&mut compiler, new)?;
-        // foo::<f64>(&mut compiler, new)?;
-        // foo::<i32>(&mut compiler, new)?;
-
-
-        extern "C" fn asdf(key: f64, val: f64) -> MyData {
-            MyData(key, val)
-        }
-        <JIT<()> as InsertFunctionPtr<extern "C" fn(f64, f64) -> MyData>>::insert_function(
-            &mut compiler.backend, "asdf".to_string(), asdf,
+        jit_func!(for ("MyData") impl compiler, fn(new),
+            const fn new_data<>(key: f64, repeat: f64) -> MyData where; {
+                MyData(key, repeat)
+            }
         );
-        compiler.backend.func_reg.borrow_mut().register_intrinsic(
-            compiler.compiler.get_func_instance(new, inline_code!("<>"), Some(inline_code!("MyData<>")))?,
-            JITCallGen::external("asdf".to_string(), Linkage::Import),
-            true,
-            &compiler.compiler.mir_phase.types,
-            &compiler.compiler.phase.types,
-            "",
-        )?;
-
-        // jit_func!(for ("MyData<f32>") impl compiler, fn(get_buf),
-        //     fn data_get_buf<>(this: MyData<f32>) -> f32 where; {
-        //         this.1
-        //     }
-        // );
-        // jit_func!(for ("MyData<f32>") impl compiler, fn(get_key),
-        //     fn data_get_key<>(this: MyData<f32>) -> f32 where; {
-        //         this.0
-        //     }
-        // );
-        //
-        // jit_func!(for ("MyData<i32>") impl compiler, fn(get_buf),
-        //     fn data_get_buf<>(this: MyData<i32>) -> i32 where; {
-        //         this.1
-        //     }
-        // );
-        // jit_func!(for ("MyData<i32>") impl compiler, fn(get_key),
-        //     fn data_get_key<>(this: MyData<i32>) -> i32 where; {
-        //         this.0
-        //     }
-        // );
-        //
         jit_func!(for ("MyData<>") impl compiler, fn(get_buf),
             const fn data_get_buf<>(this: MyData) -> f64 where; {
                 this.1
@@ -634,7 +1256,6 @@ fn test() -> i32 {
     println(data.get_key());
     println(data.get_key() == 1234.0);
 
-
     assert(data.get_key() == 1234.0, "wrong key");
     let buf: f64 = data.get_buf();
     assert(buf == 1234.0, "wrong data at index 0");
@@ -647,9 +1268,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), edlc_core::inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -678,6 +1299,11 @@ fn test() -> i32 {
         );
         jit_func!((&mut compiler), fn<"f32";>(print_fs),
             fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
                 print!("{msg}");
             }
         );
@@ -712,7 +1338,7 @@ fn test() -> i32 {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
 
@@ -720,34 +1346,657 @@ fn test() -> i32 {
             "test_lib",
             &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
         )?;
-        let prog: TypedProgram<(), _> = compiler.compile_bin(
+        let prog: extern "C" fn() -> () = compiler.compile_bin(
             "test_bin",
             &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
-            "main"
+            inline_code!("main")
         )?;
 
-        prog.exec(&mut compiler.backend)?;
+        prog();
 
         // execute a more complex script that uses parts of the original program for execution
-        let script: TypedProgram<f32, _> = compiler.compile_expr(
-            &vec!["test_bin"].into(), inline_code!(r#"{
-                let x: f32 = foo::pi;
+        // let script: TypedProgram<f32, _> = compiler.compile_expr(
+        //     &vec!["test_bin"].into(), inline_code!(r#"{
+        //         let x: f32 = foo::pi;
+        //
+        //         let vec = SVector::new(1.0_f32, 2.0);
+        //         vec.print();
+        //         std::io::print("\n");
+        //
+        //         std::io::print(comptime { f32::cos(x) });
+        //         std::io::print("\n");
+        //         foo::pi.sin()
+        //     }"#),
+        // )?;
+        //
+        // println!();
+        // println!(" ## executing script: ");
+        // println!();
+        // let x = script.exec(&mut compiler.backend)?;
+        // println!("script result: {x}");
+        Ok(())
+    }
 
-                let vec = SVector::new(1.0_f32, 2.0);
-                vec.print();
-                std::io::print("\n");
+    #[test]
+    fn test_test_bin() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
 
-                std::io::print(comptime { f32::cos(x) });
-                std::io::print("\n");
-                foo::pi.sin()
-            }"#),
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
         )?;
 
-        println!();
-        println!(" ## executing script: ");
-        println!();
-        let x = script.exec(&mut compiler.backend)?;
-        println!("script result: {x}");
+        jit_func!((&mut compiler), fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                jit_panic!("{}", msg);
+            }
+        );
+
+        compiler.compile_lib(
+            "test_lib",
+            &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
+        )?;
+        let rep = compiler.run_test(
+            "test_bin",
+            &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
+            false,
+            &Regex::new(r".*").unwrap(),
+            None,
+        )?;
+        rep.print(&compiler.compiler.phase.types, &compiler.compiler.phase.vars);
+        Ok(())
+    }
+
+
+    #[test]
+    fn test_bench_bin() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
+        )?;
+
+        jit_func!((&mut compiler), fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"u64";>(print_fs),
+            fn print_u64<>(msg: u64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!((&mut compiler), fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                jit_panic!("{}", msg);
+            }
+        );
+
+        compiler.compile_lib(
+            "test_lib",
+            &FileSupplier::new(Path::new("test/test_lib/src/")).unwrap(),
+        )?;
+
+        struct SimpleBencher {
+            start_time: SystemTime,
+            end_time: SystemTime,
+            current_fn: Option<String>,
+            current_sum: u128,
+            averages: HashMap<String, u64>,
+        }
+
+        impl JITBencher for SimpleBencher {
+            fn start_bench(&mut self, name: &QualifierName) -> usize {
+                self.current_fn = Some(name.to_string());
+                self.current_sum = 0;
+                20
+            }
+
+            fn start_round(&mut self) {
+                self.start_time = SystemTime::now();
+            }
+
+            fn stop_round(&mut self) {
+                self.end_time = SystemTime::now();
+                self.current_sum += self.end_time.duration_since(self.start_time).unwrap().as_micros();
+            }
+
+            fn end_bench(&mut self) {
+                self.averages.insert(
+                    self.current_fn.as_ref().unwrap().to_string(),
+                    (self.current_sum / 20) as u64,
+                );
+            }
+        }
+
+        let mut bencher = SimpleBencher {
+            start_time: SystemTime::now(),
+            end_time: SystemTime::now(),
+            current_fn: None,
+            current_sum: 0,
+            averages: HashMap::new(),
+        };
+        let rep = compiler.run_bench(
+            "test_bin",
+            &FileSupplier::new(Path::new("test/test_bin/src/")).unwrap(),
+            false,
+            &Regex::new(r".*").unwrap(),
+            None,
+            &mut bencher,
+        )?;
+
+        rep.print(&compiler.compiler.phase.types, &compiler.compiler.phase.vars);
+        println!("benchmarking result:");
+        for (func, mu) in bencher.averages.iter() {
+            println!(" - {func}: {mu} µs");
+        }
+        Ok(())
+    }
+
+    fn setup_print<Runtime>(compiler: &mut CraneliftJIT<Runtime>) -> Result<(), anyhow::Error> {
+        compiler.compiler.prepare_module(&vec!["std", "io"].into())?;
+        let print_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// Prints to the default terminal output.
+            fn print<T>(msg: T)"#),
+        )?;
+
+        jit_func!(compiler, fn<"str";>(print_fs),
+            fn print_str<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(print_fs),
+            fn print_f32<>(msg: f32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(print_fs),
+            fn print_f64<>(msg: f64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(print_fs),
+            fn print_usize<>(msg: usize) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"u32";>(print_fs),
+            fn print_u32<>(msg: u32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"u64";>(print_fs),
+            fn print_u64<>(msg: u64) -> () where; {
+                print!("{msg}");
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(print_fs),
+            fn print_i32<>(msg: i32) -> () where; {
+                print!("{msg}");
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwind() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            fn panic(msg: str) -> !
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            fn panic<>(msg: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                    )
+                };
+                unsafe { jit_panic!(msg) }
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::panic;
+
+fn foo(i: usize) -> usize {
+    32 / i
+}
+
+fn test(i: usize) {
+    print("hello, world!\n");
+    let x = foo(i);
+}
+
+fn test_other() {
+    panic("this is an error message");
+}
+        "#))?;
+
+        let prog: extern "C" fn(usize) = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, (0,)).is_err());
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test_other"))?;
+        match compiler.catch_unwind(prog, ()) {
+            Ok(_) => panic!("that method should have paniced!"),
+            Err(err) => {
+                assert_eq!(err.msg.as_ref(), Some(&"this is an error message".to_string()));
+            }
+        }
+        println!("panic handling was a success!");
+        Ok(())
+    }
+
+    /// Test for non-trivial drop and copy implementations.
+    #[test]
+    fn test_drop_copy() -> Result<(), anyhow::Error> {
+        /// Rest runtime
+        struct Rt {
+            rc_data: Vec<(usize, f32)>,
+        }
+
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<Rt>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.backend.insert_runtime(0, "default", Rt {
+            rc_data: vec![],
+        })?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        compiler.compiler.define_type(inline_code!(r#"
+    type Rc<T> = struct;
+    "#), LayoutOptions {
+            can_init: false,
+            repr: EdlRepresentation::Rust,
+        })?;
+
+        #[derive(Debug)]
+        struct MockRc<T> {
+            index: usize,
+            _t: PhantomData<T>,
+        }
+
+        impl<T: MirLayout + 'static> MirLayout for MockRc<T> {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<usize>("counter".to_string(), types, std::mem::offset_of!(Self, index));
+                builder.add_type::<PhantomData<T>>("data".to_string(), types, std::mem::offset_of!(Self, _t));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.insert_type_instance::<MockRc<f32>>(inline_code!("std::Rc<f32>"))?;
+
+        let [new_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!(r#"
+                    fn new(val: T) -> Self
+                    "#)
+                ],
+                None,
+            )?;
+        let [copy_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!("fn copy(&self) -> Self"),
+                ],
+                Some((inline_code!("core::Copy"), inline_code!("<Rc<T>>"))),
+            )?;
+        let [drop_rc] = compiler.compiler
+            .parse_impl(
+                inline_code!("<T>"),
+                inline_code!("std::Rc<T>"),
+                [
+                    inline_code!("fn drop(self)")
+                ],
+                Some((inline_code!("core::Drop"), inline_code!("<Rc<T>>"))),
+            )?;
+
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(new_rc), 0,
+            fn new_rc_<>(runtime: Rt, val: f32) -> MockRc<f32> where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
+                let index = runtime.rc_data.len();
+                runtime.rc_data.push((1, val));
+                MockRc {
+                    index,
+                    _t: PhantomData,
+                }
+            }
+        );
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(copy_rc), 0,
+            fn copy_rc_<>(runtime: Rt, val: *const MockRc<f32>) -> MockRc<f32> where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
+                let rc = unsafe { &*val };
+                let index = rc.index;
+                let old_num = runtime.rc_data[index].0;
+                runtime.rc_data[index].0 += 1;
+                println!("copied rc: {}", old_num);
+                MockRc {
+                    index,
+                    _t: PhantomData,
+                }
+            }
+        );
+        jit_func!(for ("std::Rc<f32>") impl (&mut compiler), fn(drop_rc), 0,
+            fn drop_rc_<>(runtime: Rt, val: MockRc<f32>) -> () where; {
+                let mut runtime = unsafe { &*runtime }
+                    .as_ref().unwrap().write().unwrap();
+                let index = val.index;
+                runtime.rc_data[index].0 -= 1;
+                let instances = runtime.rc_data[index].0;
+                println!("dropping rc: {:?} -> there are {} left", index, instances);
+                if instances == 0 {
+                    println!("rc is dropped for good!");
+                }
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::Rc;
+
+fn test() {
+    let rc: Rc<f32> = Rc::new(3.14);
+    foo(rc);
+    print("hello, world!\n");
+    foo(rc);
+}
+
+fn foo(rc: Rc<f32>) {
+    print("hello from foo!\n");
+}
+        "#))?;
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, ()).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_sync_logic() -> Result<(), anyhow::Error> {
+        /// Rest runtime
+        struct Rt {
+            queue: Vec<Event>,
+            event_counter: usize,
+        }
+
+        impl Rt {
+            fn new() -> Self {
+                Rt {
+                    queue: vec![],
+                    event_counter: 0,
+                }
+            }
+
+            fn record_event(&mut self) -> Event {
+                let id = self.event_counter;
+                self.event_counter = self.event_counter.wrapping_add(1);
+                let ev = Event(id);
+                self.queue.push(ev);
+                println!("recorded event {ev} into work queue");
+                ev
+            }
+
+            fn sync_event(&mut self, ev: Event) {
+                if let Some(idx) = self.queue.iter().position(|s| s == &ev) {
+                    println!("synchronized event {ev} from work queue");
+                    self.queue.remove(idx);
+                } else {
+                    jit_panic!("tried to sync on event that does not exit");
+                }
+            }
+        }
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, MirLayout)]
+        struct Event(usize);
+
+        impl Display for Event {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Event({:x})", self.0)
+            }
+        }
+
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<Rt>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.backend.insert_runtime(0, "default", Rt::new())?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        compiler.compiler.define_type(inline_code!(r#"
+type Event = struct;
+        "#), LayoutOptions {
+            can_init: false,
+            repr: EdlRepresentation::Rust,
+        })?;
+        compiler.compiler.register_event_type::<Event>(inline_code!("Event"))?;
+
+        let [record, sync] = compiler.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!("Event"),
+            [
+                inline_code!(r#"
+                fn record() -> Self"#),
+                inline_code!(r#"
+                fn synchronize(self)
+                "#),
+            ],
+            Some((inline_code!("core::Event"), inline_code!("<Event>"))),
+        )?;
+        jit_func!(for ("Event") impl compiler, fn(record), 0,
+            fn record_ev_<>(
+                runtime: Rt,
+            ) -> Event where; {
+                let mut runtime = unsafe { &*runtime }.as_ref().unwrap().write().unwrap();
+                runtime.record_event()
+            }
+        );
+        jit_func!(for ("Event") impl compiler, fn(sync), 0,
+            fn synchronize_ev_<>(
+                runtime: Rt,
+                ev: Event
+            ) -> () where; {
+                let mut runtime = unsafe { &*runtime }.as_ref().unwrap().write().unwrap();
+                runtime.sync_event(ev);
+            }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+
+// create dummy field
+type Field = struct {};
+type BoundaryField = struct {};
+type DevicePointer<T> = struct { ptr: usize };
+
+impl Field {
+    comptime fn new() -> Self {
+        Field {}
+    }
+
+    fn as_device_ptr(async self) -> async DevicePointer<Self> {
+        DevicePointer { ptr: 0 }
+    }
+}
+
+impl BoundaryField {
+    comptime fn new() -> Self {
+        BoundaryField {}
+    }
+
+    fn as_device_ptr(async self) -> async DevicePointer<Self> {
+        DevicePointer { ptr: 0 }
+    }
+
+    fn field_as_ptr(async self) -> async DevicePointer<Field> {
+        DevicePointer { ptr: 0 }
+    }
+}
+
+// -- mock device stubs; these would be implemented as callbacks usually
+async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
+async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
+async fn init_field(field: DevicePointer<Field>) {}
+
+// -- simplified higher-level functions
+impl BoundaryField {
+    async fn gradient(self, async dst: Field) {
+        gradient(self.as_device_ptr(), dst.as_device_ptr());
+    }
+
+    async fn laplace(self, async dst: Field) {
+        laplace(self.as_device_ptr(), dst.as_device_ptr());
+    }
+}
+
+// -- create global fields
+let p = BoundaryField::new();
+let u = BoundaryField::new();
+let grad_p = BoundaryField::new();
+let scalar_field = Field::new();
+
+fn test() {
+    print("starting synchronization tests...\n");
+    gradient(p.as_device_ptr(), grad_p.field_as_ptr());
+    print("gradient calculation dispatched\n");
+    init_field(u.field_as_ptr());
+    print("velocity field init dispatched\n");
+
+    // since we use the pressure gradient here, there should be a sync event
+    grad_p.laplace(scalar_field);
+    print("laplace calculation dispatched\n");
+}
+        "#))?;
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, ()).is_ok());
         Ok(())
     }
 }

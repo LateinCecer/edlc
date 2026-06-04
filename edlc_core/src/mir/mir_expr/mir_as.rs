@@ -1,88 +1,210 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use log::info;
-use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
-use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExpr, MirTreeWalker};
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_type::MirTypeId;
-use crate::resolver::ScopeId;
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
 
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirAs {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub ty: MirTypeId,
-    pub val: Box<MirExpr>,
+    pub val: MirValue,
 }
 
-impl From<MirAs> for MirExpr {
-    fn from(value: MirAs) -> Self {
-        MirExpr::As(value)
-    }
-}
+// TODO type casts may case panics; catch those and emit an error when they occur
+macro_rules! cast_and_write(
+    ($vm:expr, $stack_frame:expr, $target:expr, $reg:expr, $val:expr, $loc:expr) => {{
+        let target_ty = $stack_frame.get_offset($target, $vm).unwrap().1;
+        match target_ty {
+            t if t == $reg.u8() => {
+                $vm.write(*$target, $val as u8, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.u16() => {
+                $vm.write(*$target, $val as u16, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.u32() => {
+                $vm.write(*$target, $val as u32, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.u64() => {
+                $vm.write(*$target, $val as u64, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.u128() => {
+                $vm.write(*$target, $val as u128, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.usize() => {
+                $vm.write(*$target, $val as usize, $stack_frame, $reg);
+                Ok(())
+            }
 
-impl<B: Backend> IsConstExpr<B> for MirAs {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        self.val.is_const_expr(phase, funcs)
-    }
-}
+            t if t == $reg.i8() => {
+                $vm.write(*$target, $val as i8, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.i16() => {
+                $vm.write(*$target, $val as i16, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.i32() => {
+                $vm.write(*$target, $val as i32, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.i64() => {
+                $vm.write(*$target, $val as i64, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.i128() => {
+                $vm.write(*$target, $val as i128, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.isize() => {
+                $vm.write(*$target, $val as isize, $stack_frame, $reg);
+                Ok(())
+            }
+
+            t if t == $reg.f32() => {
+                $vm.write(*$target, $val as f32, $stack_frame, $reg);
+                Ok(())
+            }
+            t if t == $reg.f64() => {
+                $vm.write(*$target, $val as f64, $stack_frame, $reg);
+                Ok(())
+            }
+
+            t if t == $reg.char() => {
+                $vm.write(*$target, $val as u8 as char, $stack_frame, $reg);
+                Ok(())
+            }
+            _ => {
+                panic!("invalid cast target type");
+            }
+        }
+    }};
+);
 
 impl MirAs {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        self.val.verify(phase, funcs, hir_phase)
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+        _loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
+        let (_src_range, src_ty) = stack_frame.get_offset(&self.val, vm).unwrap();
+        match src_ty {
+            t if t == reg.u8() => {
+                let val: u8 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.u16() => {
+                let val: u16 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.u32() => {
+                let val: u32 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.u64() => {
+                let val: u64 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.u128() => {
+                let val: u128 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.usize() => {
+                let val: usize = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+
+            t if t == reg.i8() => {
+                let val: i8 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.i16() => {
+                let val: i16 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.i32() => {
+                let val: i32 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.i64() => {
+                let val: i64 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.i128() => {
+                let val: i128 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.isize() => {
+                let val: isize = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+
+            t if t == reg.f32() => {
+                let val: f32 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+            t if t == reg.f64() => {
+                let val: f64 = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val, loc)
+            }
+
+            t if t == reg.char() => {
+                let val: char = vm.read(self.val, stack_frame, reg).unwrap();
+                cast_and_write!(vm, stack_frame, target, reg, val as u8, loc)
+            }
+            _ => panic!("invalid cast target type")
+        }
     }
 
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        info!("Optimizing MIR as expression...");
-        self.val.optimize(phase, backend, hir_phase)
+    pub(super) fn is_avail(
+        &self,
+        frame: &ConstFrame,
+        graph: &BorrowGraph,
+    ) -> bool {
+        frame.is_avail(&self.val, graph)
     }
 }
 
-impl<B: Backend> MirTreeWalker<B> for MirAs {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk(filter, task)
+impl MirGraphElement for MirAs {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![self.val]
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        self.val.walk_mut(filter, task)
+    fn uses_var(&self, val: &MirValue) -> bool {
+        &self.val == val
+    }
+
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        if &self.val == var {
+            self.val = *repl;
+        }
     }
 }
+

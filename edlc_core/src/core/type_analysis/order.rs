@@ -1,27 +1,25 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+use crate::core::edl_error::EdlError;
+use crate::core::type_analysis::NodeId;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use edlc_analysis::graph::LatticeElement;
-use crate::core::edl_error::EdlError;
-use crate::core::edl_param_env::{EdlGenericParamValue, EdlParameterDef};
-use crate::core::edl_type::EdlTypeInstance;
-use crate::core::edl_value::EdlConstValue;
-use crate::core::type_analysis::NodeId;
 
 #[derive(Debug, Clone)]
 pub struct TypeAnalysisError {
@@ -37,83 +35,3 @@ impl Display for TypeAnalysisError {
 
 impl Error for TypeAnalysisError {}
 
-
-impl LatticeElement for EdlTypeInstance {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlParameterDef {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlGenericParamValue {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}
-
-impl LatticeElement for EdlConstValue {
-    type Conflict = TypeAnalysisError;
-
-    fn lower(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn upper(self, _other: Self) -> Result<Self, Self::Conflict> {
-        todo!()
-    }
-
-    fn is_lower_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_upper_bound(&self, _other: &Self) -> bool {
-        todo!()
-    }
-}

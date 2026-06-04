@@ -1,291 +1,253 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
-use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue};
+use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
-use crate::prelude::{AggregateValue, SSARepr};
+use crate::prelude::SSARepr;
+use cranelift_codegen::ir;
+use cranelift_codegen::ir::InstBuilder;
+use edlc_core::lexer::SrcPos;
 use edlc_core::prelude::mir_expr::mir_as::MirAs;
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::mir_type::MirTypeId;
 use edlc_core::prelude::{MirError, MirPhase};
-use cranelift_codegen::ir::InstBuilder;
+use std::cmp::Ordering;
 
 impl<Runtime> Compilable<Runtime> for MirAs {
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        let input = self.val.get_type(&backend.func_reg.borrow(), phase);
+        phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
+        target: &MirValue,
+        _expr_id: &MirExprId,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
+        let reg = &phase.types;
+        let input = *backend.layout.get_ty(&self.val).unwrap();
         let output = self.ty;
+        let value = backend.layout.load_pod(
+            &self.val, &backend.ir_values, &mut backend.builder, &phase.types).unwrap();
 
-        // compile value
-        let value = self.val.compile(backend, phase)?;
-
-        // check for char conversion
-        if input == phase.types.char() {
-            return if phase.types.is_i_type(output) || phase.types.is_u_type(output) {
-                convert_char_2_int(input, output, value, backend, phase)
+        let output: ir::Value = if reg.is_i_type(input) || reg.is_u_type(input) {
+            if reg.is_i_type(output) || reg.is_u_type(output) {
+                convert_int_2_int(input, output, value, backend, phase)
+            } else if reg.is_f_type(output) {
+                convert_int_2_float(input, output, value, backend, phase)
+            } else if output == reg.char() {
+                convert_int_2_char(input, output, value, backend, phase)
             } else {
-                Err(MirError::IllegalConversion {
-                    pos: self.pos,
-                    input,
-                    output,
-                })
-            }
-        }
-        if output == phase.types.char() {
-            if phase.types.is_i_type(input) || phase.types.is_u_type(input) {
-                return convert_int_2_char(input, output, value, backend, phase);
-            } else if input == phase.types.i8() {
                 return Err(MirError::IllegalConversion {
-                    pos: self.pos,
+                    pos: SrcPos::default(),
                     input,
                     output,
                 });
             }
-        }
-
-        // check which conversion should be implemented
-        if phase.types.is_i_type(input) || phase.types.is_u_type(input) {
-            return if phase.types.is_i_type(output) || phase.types.is_u_type(output) {
-                convert_int_2_int(input, output, value, backend, phase)
-            } else if phase.types.is_f_type(output) {
-                convert_int_2_float(input, output, value, backend, phase)
-            } else {
-                Err(MirError::IllegalConversion {
-                    pos: self.pos,
-                    input,
-                    output,
-                })
-            };
-        }
-        if phase.types.is_f_type(input) {
-            return if phase.types.is_i_type(output) || phase.types.is_u_type(output) {
+        } else if reg.is_f_type(input) {
+            if reg.is_i_type(output) || reg.is_u_type(output) {
                 convert_float_2_int(input, output, value, backend, phase)
-            } else if phase.types.is_f_type(output) {
+            } else if reg.is_f_type(output) {
                 convert_float_2_float(input, output, value, backend, phase)
-            } else {
-                Err(MirError::IllegalConversion {
-                    pos: self.pos,
+            } else if output == reg.char() {
+                return Err(MirError::IllegalConversion {
+                    pos: SrcPos::default(),
                     input,
                     output,
-                })
-            };
-        }
+                });
+            } else {
+                return Err(MirError::IllegalConversion {
+                    pos: SrcPos::default(),
+                    input,
+                    output,
+                });
+            }
+        } else if input == reg.char() {
+            if reg.is_i_type(output) || reg.is_u_type(output) {
+                convert_char_2_int(input, output, value, backend, phase)
+            } else if reg.is_f_type(output) {
+                return Err(MirError::IllegalConversion {
+                    pos: SrcPos::default(),
+                    input,
+                    output,
+                });
+            } else if output == reg.char() {
+                value
+            } else {
+                return Err(MirError::IllegalConversion {
+                    pos: SrcPos::default(),
+                    input,
+                    output,
+                });
+            }
+        } else {
+            return Err(MirError::IllegalConversion {
+                pos: SrcPos::default(),
+                input,
+                output,
+            });
+        };
 
-        Err(MirError::IllegalConversion {
-            pos: self.pos,
-            input,
-            output,
-        })
+        backend.layout.store_pod(
+            output, target, &mut backend.ir_values, &mut backend.builder, &phase.types);
+        Ok(())
     }
 }
 
 fn convert_int_2_int<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // if input bits > output bits -> ireduce
     // if input bits < output bits -> uextend / sextend
-    let raw = value.raw_values(code_ctx!(backend, phase))?;
-    assert_eq!(raw.len(), 1);
-    if phase.types.byte_size(input) == phase.types.byte_size(output) {
-        let val = value.raw_values(code_ctx!(backend, phase))?.into_vec();
-        return AggregateValue::from_values(&val, output, code_ctx!(backend, phase));
+    assert!(phase.types.is_i_type(input) || phase.types.is_u_type(input));
+    assert!(phase.types.is_i_type(output) || phase.types.is_u_type(output));
+
+    let ir_out = SSARepr::pod(&output, &phase.types).unwrap();
+    match usize::cmp(&phase.types.byte_size(input).unwrap(), &phase.types.byte_size(output).unwrap()) {
+        Ordering::Greater => backend.builder.ins().ireduce(ir_out, value),
+        Ordering::Less => {
+            if phase.types.is_i_type(input) {
+                backend.builder.ins().sextend(ir_out, value)
+            } else {
+                backend.builder.ins().uextend(ir_out, value)
+            }
+        }
+        Ordering::Equal => value,
     }
-
-    let input_ssa = SSARepr::abi_repr(input, backend.abi.clone(), &phase.types)?;
-    let output_ssa = SSARepr::abi_repr(output, backend.abi.clone(), &phase.types)?;
-    assert_eq!(input_ssa.members.len(), 1);
-    assert_eq!(output_ssa.members.len(), 1);
-
-    AggregateValue::from_comp_value(
-        if phase.types.byte_size(input) > phase.types.byte_size(output) {
-            backend.builder
-                .ins()
-                .ireduce(output_ssa.members[0], raw[0].unwrap())
-        } else if phase.types.is_i_type(input) {
-            // in this case, we do sign extension
-            backend.builder
-                .ins()
-                .sextend(output_ssa.members[0], raw[0].unwrap())
-        } else {
-            // in this case, we do zero-extension
-            backend.builder
-                .ins()
-                .uextend(output_ssa.members[0], raw[0].unwrap())
-        }.into_value(output),
-        code_ctx!(backend, phase)
-    )
 }
 
 fn convert_int_2_float<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // for unsigned integers -> fcvt_from_uint
     // for   signed integers -> fcvt_from_sint
-    let raw = value.raw_values(code_ctx!(backend, phase))?;
-    assert_eq!(raw.len(), 1);
+    assert!(phase.types.is_i_type(input) || phase.types.is_u_type(input));
+    assert!(phase.types.is_f_type(output));
 
-    let input_ssa = SSARepr::abi_repr(input, backend.abi.clone(), &phase.types)?;
-    let output_ssa = SSARepr::abi_repr(output, backend.abi.clone(), &phase.types)?;
-    assert_eq!(input_ssa.members.len(), 1);
-    assert_eq!(output_ssa.members.len(), 1);
-
-    AggregateValue::from_comp_value(
-        if phase.types.is_u_type(input) {
-            backend.builder
-                .ins()
-                .fcvt_from_uint(output_ssa.members[0], raw[0].unwrap())
-        } else {
-            backend.builder
-                .ins()
-                .fcvt_from_sint(output_ssa.members[0], raw[0].unwrap())
-        }.into_value(output),
-        code_ctx!(backend, phase)
-    )
+    let ir_out = SSARepr::pod(&output, &phase.types).unwrap();
+    if phase.types.is_u_type(input) {
+        backend.builder.ins().fcvt_from_uint(ir_out, value)
+    } else {
+        backend.builder.ins().fcvt_from_sint(ir_out, value)
+    }
 }
 
 fn convert_float_2_int<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // for unsigned integers -> fcvt_to_uint
     // for   signed integers -> fcvt_to_sint
-    let raw = value.raw_values(code_ctx!(backend, phase))?;
-    assert_eq!(raw.len(), 1);
+    assert!(phase.types.is_f_type(input));
+    assert!(phase.types.is_i_type(output) || phase.types.is_u_type(output));
 
-    let input_ssa = SSARepr::abi_repr(input, backend.abi.clone(), &phase.types)?;
-    let output_ssa = SSARepr::abi_repr(output, backend.abi.clone(), &phase.types)?;
-    assert_eq!(input_ssa.members.len(), 1);
-    assert_eq!(output_ssa.members.len(), 1);
-
-    AggregateValue::from_comp_value(
-        if phase.types.is_u_type(output) {
-            backend.builder
-                .ins()
-                .fcvt_to_uint(output_ssa.members[0], raw[0].unwrap())
-        } else {
-            backend.builder
-                .ins()
-                .fcvt_to_sint(output_ssa.members[0], raw[0].unwrap())
-        }.into_value(output),
-        code_ctx!(backend, phase)
-    )
+    let ir_out = SSARepr::pod(&output, &phase.types).unwrap();
+    if phase.types.is_u_type(output) {
+        backend.builder.ins().fcvt_to_uint(ir_out, value)
+    } else {
+        backend.builder.ins().fcvt_to_sint(ir_out, value)
+    }
 }
 
 fn convert_float_2_float<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // if input bits > output bits -> fdemote
     // if input bits < output bits -> fpromote
-    let raw = value.raw_values(code_ctx!(backend, phase))?;
-    assert_eq!(raw.len(), 1);
-    assert_ne!(phase.types.byte_size(input), phase.types.byte_size(output));
+    assert!(phase.types.is_f_type(input));
+    assert!(phase.types.is_f_type(output));
 
-    let input_ssa = SSARepr::abi_repr(input, backend.abi.clone(), &phase.types)?;
-    let output_ssa = SSARepr::abi_repr(output, backend.abi.clone(), &phase.types)?;
-    assert_eq!(input_ssa.members.len(), 1);
-    assert_eq!(output_ssa.members.len(), 1);
-
-    AggregateValue::from_comp_value(
-        if phase.types.byte_size(input) > phase.types.byte_size(output) {
-            backend.builder
-                .ins()
-                .fdemote(output_ssa.members[0], raw[0].unwrap())
-        } else {
-            backend.builder
-                .ins()
-                .fpromote(output_ssa.members[0], raw[0].unwrap())
-        }.into_value(output),
-        code_ctx!(backend, phase)
-    )
+    let ir_out = SSARepr::pod(&output, &phase.types).unwrap();
+    match usize::cmp(&phase.types.byte_size(input).unwrap(), &phase.types.byte_size(output).unwrap()) {
+        Ordering::Greater => backend.builder.ins().fdemote(ir_out, value),
+        Ordering::Less => backend.builder.ins().fpromote(ir_out, value),
+        Ordering::Equal => value,
+    }
 }
 
 fn convert_char_2_int<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // chars are naturally represented as 32-bit integer values.
     // thus, convert from ir::types::I32 and treat the rest of the conversion as implicit
-    let raw = value.raw_values(code_ctx!(backend, phase))?;
-    assert_eq!(raw.len(), 1);
-
-    let input_ssa = SSARepr::abi_repr(input, backend.abi.clone(), &phase.types)?;
-    let output_ssa = SSARepr::abi_repr(output, backend.abi.clone(), &phase.types)?;
-    assert_eq!(input_ssa.members.len(), 1);
-    assert_eq!(output_ssa.members.len(), 1);
-
-    AggregateValue::from_comp_value(
-        if phase.types.byte_size(input) > phase.types.byte_size(output) {
-            backend.builder
-                .ins()
-                .ireduce(output_ssa.members[0], raw[0].unwrap())
-        } else if phase.types.byte_size(input) < phase.types.byte_size(output) {
-            // for char -> int or int -> char conversion, we always to zero-extension
-            backend.builder
-                .ins()
-                .uextend(output_ssa.members[0], raw[0].unwrap())
-        } else {
-            raw[0].unwrap()
-        }.into_value(output),
-        code_ctx!(backend, phase)
-    )
+    assert_eq!(input, phase.types.char());
+    assert!(phase.types.is_i_type(output) || phase.types.is_u_type(output));
+    convert_int_zero_extend(input, output, value, backend, phase)
 }
 
 fn convert_int_2_char<Runtime>(
     input: MirTypeId,
     output: MirTypeId,
-    value: AggregateValue,
+    value: ir::Value,
     backend: &mut FunctionTranslator<Runtime>,
     phase: &mut MirPhase,
-) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
+) -> ir::Value {
     // chars are naturally represented as 32-bit integer values.
     // thus, convert to ir::types::I32 and treat the rest of the conversion as implicit
     // since char -> int & int -> char conversions are, at heart, just integer conversions, the
     // conversion is commutative
-    convert_char_2_int(input, output, value, backend, phase)
+    assert!(phase.types.is_i_type(input) || phase.types.is_u_type(input));
+    assert_eq!(output, phase.types.char());
+    convert_int_zero_extend(input, output, value, backend, phase)
+}
+
+fn convert_int_zero_extend<Runtime>(
+    input: MirTypeId,
+    output: MirTypeId,
+    value: ir::Value,
+    backend: &mut FunctionTranslator<Runtime>,
+    phase: &mut MirPhase,
+) -> ir::Value {
+    let ir_out = SSARepr::pod(&output, &phase.types).unwrap();
+    match usize::cmp(&phase.types.byte_size(input).unwrap(), &phase.types.byte_size(output).unwrap()) {
+        Ordering::Greater => backend.builder.ins().ireduce(ir_out, value),
+        Ordering::Less => {
+            backend.builder.ins().uextend(ir_out, value)
+        }
+        Ordering::Equal => value,
+    }
 }
 
 
 
 #[cfg(test)]
 mod test {
-    use std::slice;
-    use edlc_core::inline_code;
-    use edlc_core::prelude::mir_str::FatPtr;
     use crate::prelude::*;
     use crate::{jit_func, setup_logger};
+    use edlc_core::inline_code;
+    use edlc_core::prelude::mir_str::FatPtr;
+    use std::slice;
 
     fn setup_compiler() -> Result<CraneliftJIT<()>, anyhow::Error> {
         let _ = setup_logger();
@@ -368,7 +330,7 @@ mod test {
                         std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
                     )
                 };
-                jit_intrinsic_panic!(msg);
+                panic!("{}", msg);
             }
         );
         Ok(compiler)

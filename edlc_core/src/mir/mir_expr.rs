@@ -1,520 +1,426 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
-use crate::lexer::SrcPos;
+use crate::mir::debug::DebugInformation;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
 use crate::mir::mir_expr::mir_assign::MirAssign;
-use crate::mir::mir_expr::mir_block::MirBlock;
-use crate::mir::mir_expr::mir_break::MirBreak;
 use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
-use crate::mir::mir_expr::mir_continue::MirContinue;
 use crate::mir::mir_expr::mir_data::MirData;
-use crate::mir::mir_expr::mir_if::MirIf;
 use crate::mir::mir_expr::mir_literal::MirLiteral;
-use crate::mir::mir_expr::mir_loop::MirLoop;
-use crate::mir::mir_expr::mir_return::MirReturn;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
-use crate::mir::mir_expr::mir_variable::{IntoOffset, MirOffset, MirOffsetSrc, MirVariable};
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_let::MirLet;
+use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::resolver::ScopeId;
+use crate::mir::MirUid;
 
 pub mod mir_array_init;
 pub mod mir_as;
-pub mod mir_block;
 pub mod mir_call;
 pub mod mir_literal;
 pub mod mir_variable;
 pub mod mir_constant;
 pub mod mir_assign;
 pub mod mir_data;
-pub mod mir_if;
-pub mod mir_condition;
-pub mod mir_loop;
-pub mod mir_break;
-pub mod mir_continue;
-pub mod mir_return;
-mod mir_switch;
-mod mir_jump;
-mod mir_esacpe;
 pub mod mir_type_init;
+mod mir_graph;
+pub mod mir_ref;
 
-pub trait MirTreeWalker<B: Backend> {
-    /// Walks through the MIR source tree and performs a specific task on all elements that pass the
-    /// specified filter.
-    /// The results of all operations are collected into a vector and returned.
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>;
-
-    /// Like `walk` mut mutable.
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>;
-}
+pub use crate::mir::mir_expr::mir_graph::*;
+pub use crate::mir::mir_expr::mir_ref::{MirDeref, MirDowncastRef, MirRef};
+use crate::prelude::ExecutorVM;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct MirExprUid(usize);
 
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MirExpr {
-    ArrayInit(MirArrayInit),
-    As(MirAs),
-    Block(MirBlock),
-    Call(MirCall),
-    Literal(MirLiteral),
-    Variable(MirVariable),
-    Constant(MirConstant),
-    Assign(MirAssign),
-    Let(MirLet),
-    Data(MirData),
-    Offset(MirOffset),
-    If(MirIf),
-    Loop(MirLoop),
-    Break(MirBreak),
-    Continue(MirContinue),
-    Return(MirReturn),
-    Init(MirTypeInit),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MirExprId {
+    id: usize,
+    pub ty: MirExprVariant,
 }
 
-impl<B: Backend> MirTreeWalker<B> for MirExpr {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = Vec::new();
-        if filter(self) {
-            vals.push(task(self)?);
-        }
-
-        // filter children
-        match self {
-            MirExpr::ArrayInit(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::As(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Block(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Call(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Literal(_) => (),
-            MirExpr::Variable(_) => (),
-            MirExpr::Constant(_) => (),
-            MirExpr::Assign(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Let(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Data(_) => (),
-            MirExpr::Offset(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::If(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Loop(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Break(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Continue(_) => (),
-            MirExpr::Return(val) => vals.append(&mut val.walk(filter, task)?),
-            MirExpr::Init(val) => vals.append(&mut val.walk(filter, task)?),
-        }
-        Ok(vals)
-    }
-
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = Vec::new();
-        if filter(self) {
-            vals.push(task(self)?);
-        }
-
-        // filter children
-        match self {
-            MirExpr::ArrayInit(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::As(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Block(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Call(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Literal(_) => (),
-            MirExpr::Variable(_) => (),
-            MirExpr::Constant(_) => (),
-            MirExpr::Assign(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Let(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Data(_) => (),
-            MirExpr::Offset(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::If(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Loop(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Break(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Continue(_) => (),
-            MirExpr::Return(val) => vals.append(&mut val.walk_mut(filter, task)?),
-            MirExpr::Init(val) => vals.append(&mut val.walk_mut(filter, task)?),
-        }
-        Ok(vals)
+impl MirExprId {
+    /// You can use the ordinal of an expression id as unique identifier for that expr id *within*
+    /// the expression variant of that expression id.
+    /// Please *do not* assume that the ordinal is the index into the internal expression buffer
+    /// of the [MirExprContainer].
+    pub fn ordinal(&self) -> usize {
+        self.id
     }
 }
+
+/// Defines a printer trait that can be used to print out MIR code.
+pub trait MirPrinter {
+    type Error;
+
+    /// Prints the MIR flow graph using the printer implementation.
+    /// How the printer actually operates is left to the specific implementation.
+    fn print(&mut self, graph: &MirFlowGraph) -> Result<(), Self::Error>;
+}
+
+/// Variants of expressions.
+/// This is necessary, since we flatten MIR expressions into a flat container for efficiency
+/// reasons.
+/// Notice that several of the old expression types are missing; if-expressions, loops, breaks,
+/// continues and early returns.
+/// All of these expressions are effectively de-sugared into control flow graph edges and don't
+/// really exist as a concept in the MIR representation as of
+/// (issue #3)[https://github.com/LateinCecer/edlc/issues/3#issue-3595330650].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MirExprVariant {
+    ArrayInit,
+    As,
+    Call,
+    Literal,
+    Variable,
+    Constant,
+    Assign,
+    Data,
+    Init,
+    Ref,
+    Deref,
+    DowncastRef,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MirExprContainer {
+    array_inits: Vec<MirArrayInit>,
+    ases: Vec<MirAs>,
+    call: Vec<MirCall>,
+    literals: Vec<MirLiteral>,
+    variables: Vec<MirGlobalVar>,
+    constants: Vec<MirConstant>,
+    assigns: Vec<MirAssign>,
+    data: Vec<MirData>,
+    type_inits: Vec<MirTypeInit>,
+    refs: Vec<MirRef>,
+    derefs: Vec<MirDeref>,
+    downcasts: Vec<MirDowncastRef>,
+}
+
+
+pub trait MirGraphElement {
+    fn collect_vars(&self) -> Vec<MirValue>;
+    fn uses_var(&self, val: &MirValue) -> bool;
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue);
+}
+
+macro_rules! impl_getter(
+    (fn $name:ident() -> $t:ty, $variant:ident, $field:ident) => (
+pub fn $name(&self, id: MirExprId) -> &$t {
+    assert_eq!(id.ty, MirExprVariant::$variant);
+    &self.$field[id.id]
+}
+    );
+);
+
+impl MirExprContainer {
+    pub fn collect_debug_info<B: Backend>(
+        &self,
+        expr: &MirExprId,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+        backend: &B
+    ) -> bool {
+        match expr.ty {
+            MirExprVariant::Ref => {
+                self.refs[expr.id].collect_debug_info(info, loc)
+            },
+            MirExprVariant::Call => {
+                self.call[expr.id].collect_debug_info(info, loc, &*backend.func_reg())
+            },
+            _ => false,
+        }
+    }
+
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        expr: MirExprId,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+        loc: &MirLoc,
+    ) -> Result<(), ExecutionError> {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::As => self.ases[expr.id].execute(vm, stack_frame, target, reg, loc),
+            MirExprVariant::Call => self.call[expr.id].execute(vm, stack_frame, Some(target), reg, backend,loc),
+            MirExprVariant::Literal => self.literals[expr.id].execute(vm, stack_frame, target, reg, backend),
+            MirExprVariant::Variable => self.variables[expr.id].execute(vm, stack_frame, target, reg, backend),
+            MirExprVariant::Constant => self.constants[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Assign => self.assigns[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Data => self.data[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Init => self.type_inits[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::Ref => self.refs[expr.id].execute(vm, stack_frame, target, reg, loc),
+            MirExprVariant::Deref => self.derefs[expr.id].execute(vm, stack_frame, target, reg),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].execute(vm, stack_frame, target, reg),
+        }
+    }
+
+    fn is_avail(
+        &self,
+        expr: MirExprId,
+        backend: &impl Backend,
+        frame: &ConstFrame,
+        graph: &BorrowGraph,
+    ) -> bool {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].is_avail(frame, graph),
+            MirExprVariant::As => self.ases[expr.id].is_avail(frame, graph),
+            MirExprVariant::Call => self.call[expr.id].is_avail(backend, frame, graph),
+            MirExprVariant::Literal => self.literals[expr.id].is_avail(),
+            MirExprVariant::Variable => self.variables[expr.id].is_avail(),
+            MirExprVariant::Constant => self.constants[expr.id].is_avail(),
+            MirExprVariant::Assign => self.assigns[expr.id].is_avail(frame, graph),
+            MirExprVariant::Data => self.data[expr.id].is_avail(),
+            MirExprVariant::Init => self.type_inits[expr.id].is_avail(frame, graph),
+            MirExprVariant::Ref => self.refs[expr.id].is_avail(frame, graph),
+            MirExprVariant::Deref => self.derefs[expr.id].is_avail(frame, graph),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].is_avail(frame, graph),
+        }
+    }
+
+    /// Collects all values that are used by the expression.
+    pub fn collect_vars(&self, expr: MirExprId) -> Vec<MirValue> {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].collect_vars(),
+            MirExprVariant::As => self.ases[expr.id].collect_vars(),
+            MirExprVariant::Call => self.call[expr.id].collect_vars(),
+            MirExprVariant::Literal => self.literals[expr.id].collect_vars(),
+            MirExprVariant::Variable => self.variables[expr.id].collect_vars(),
+            MirExprVariant::Constant => self.constants[expr.id].collect_vars(),
+            MirExprVariant::Assign => self.assigns[expr.id].collect_vars(),
+            MirExprVariant::Data => self.data[expr.id].collect_vars(),
+            MirExprVariant::Init => self.type_inits[expr.id].collect_vars(),
+            MirExprVariant::Ref => self.refs[expr.id].collect_vars(),
+            MirExprVariant::Deref => self.derefs[expr.id].collect_vars(),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].collect_vars(),
+        }
+    }
+
+    pub fn uses_var(&self, expr: MirExprId, val: &MirValue) -> bool {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].uses_var(val),
+            MirExprVariant::As => self.ases[expr.id].uses_var(val),
+            MirExprVariant::Call => self.call[expr.id].uses_var(val),
+            MirExprVariant::Literal => self.literals[expr.id].uses_var(val),
+            MirExprVariant::Variable => self.variables[expr.id].uses_var(val),
+            MirExprVariant::Constant => self.constants[expr.id].uses_var(val),
+            MirExprVariant::Assign => self.assigns[expr.id].uses_var(val),
+            MirExprVariant::Data => self.data[expr.id].uses_var(val),
+            MirExprVariant::Init => self.type_inits[expr.id].uses_var(val),
+            MirExprVariant::Ref => self.refs[expr.id].uses_var(val),
+            MirExprVariant::Deref => self.derefs[expr.id].uses_var(val),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].uses_var(val),
+        }
+    }
+
+    /// Replaces a value in the expression with another value.
+    /// This is used mainly for splitting non-SSA values into SSA values.
+    pub fn replace_var(&mut self, expr: MirExprId, var: &MirValue, repl: &MirValue) {
+        match &expr.ty {
+            MirExprVariant::ArrayInit => self.array_inits[expr.id].replace_var(var, repl),
+            MirExprVariant::As => self.ases[expr.id].replace_var(var, repl),
+            MirExprVariant::Call => self.call[expr.id].replace_var(var, repl),
+            MirExprVariant::Literal => self.literals[expr.id].replace_var(var, repl),
+            MirExprVariant::Variable => self.variables[expr.id].replace_var(var, repl),
+            MirExprVariant::Constant => self.constants[expr.id].replace_var(var, repl),
+            MirExprVariant::Assign => self.assigns[expr.id].replace_var(var, repl),
+            MirExprVariant::Data => self.data[expr.id].replace_var(var, repl),
+            MirExprVariant::Init => self.type_inits[expr.id].replace_var(var, repl),
+            MirExprVariant::Ref => self.refs[expr.id].replace_var(var, repl),
+            MirExprVariant::Deref => self.derefs[expr.id].replace_var(var, repl),
+            MirExprVariant::DowncastRef => self.downcasts[expr.id].replace_var(var, repl),
+        }
+    }
+
+    impl_getter!(fn get_array_init() -> MirArrayInit, ArrayInit, array_inits);
+    impl_getter!(fn get_as() -> MirAs, As, ases);
+    impl_getter!(fn get_call() -> MirCall, Call, call);
+    impl_getter!(fn get_literal() -> MirLiteral, Literal, literals);
+    impl_getter!(fn get_variable() -> MirGlobalVar, Variable, variables);
+    impl_getter!(fn get_constant() -> MirConstant, Constant, constants);
+    impl_getter!(fn get_assign() -> MirAssign, Assign, assigns);
+    impl_getter!(fn get_data() -> MirData, Data, data);
+    impl_getter!(fn get_init() -> MirTypeInit, Init, type_inits);
+    impl_getter!(fn get_ref() -> MirRef, Ref, refs);
+    impl_getter!(fn get_deref() -> MirDeref, Deref, derefs);
+    impl_getter!(fn get_downcast_ref() -> MirDowncastRef, DowncastRef, downcasts);
+
+    pub fn insert_downcast(&mut self, expr: MirDowncastRef) -> MirExprId {
+        self.downcasts.push(expr);
+        MirExprId {
+            id: self.downcasts.len() - 1,
+            ty: MirExprVariant::DowncastRef,
+        }
+    }
+
+    pub fn insert_ref(&mut self, expr: MirRef) -> MirExprId {
+        self.refs.push(expr);
+        MirExprId {
+            id: self.refs.len() - 1,
+            ty: MirExprVariant::Ref,
+        }
+    }
+
+    pub fn insert_deref(&mut self, expr: MirDeref) -> MirExprId {
+        self.derefs.push(expr);
+        MirExprId {
+            id: self.derefs.len() - 1,
+            ty: MirExprVariant::Deref,
+        }
+    }
+
+    pub fn insert_array_init(&mut self, expr: MirArrayInit) -> MirExprId {
+        self.array_inits.push(expr);
+        MirExprId {
+            id: self.array_inits.len() - 1,
+            ty: MirExprVariant::ArrayInit,
+        }
+    }
+
+    pub fn insert_as(&mut self, expr: MirAs) -> MirExprId {
+        self.ases.push(expr);
+        MirExprId {
+            id: self.ases.len() - 1,
+            ty: MirExprVariant::As,
+        }
+    }
+
+    pub fn insert_call(&mut self, expr: MirCall) -> MirExprId {
+        self.call.push(expr);
+        MirExprId {
+            id: self.call.len() - 1,
+            ty: MirExprVariant::Call,
+        }
+    }
+
+    pub fn insert_literal(&mut self, expr: MirLiteral) -> MirExprId {
+        self.literals.push(expr);
+        MirExprId {
+            id: self.literals.len() - 1,
+            ty: MirExprVariant::Literal,
+        }
+    }
+
+    pub fn insert_variable(&mut self, expr: MirGlobalVar) -> MirExprId {
+        self.variables.push(expr);
+        MirExprId {
+            id: self.variables.len() - 1,
+            ty: MirExprVariant::Variable,
+        }
+    }
+
+    pub fn insert_constants(&mut self, expr: MirConstant) -> MirExprId {
+        self.constants.push(expr);
+        MirExprId {
+            id: self.constants.len() - 1,
+            ty: MirExprVariant::Constant,
+        }
+    }
+
+    pub fn insert_assign(&mut self, expr: MirAssign) -> MirExprId {
+        self.assigns.push(expr);
+        MirExprId {
+            id: self.assigns.len() - 1,
+            ty: MirExprVariant::Assign,
+        }
+    }
+
+    pub fn insert_data(&mut self, expr: MirData) -> MirExprId {
+        self.data.push(expr);
+        MirExprId {
+            id: self.data.len() - 1,
+            ty: MirExprVariant::Data,
+        }
+    }
+
+    pub fn insert_type_init(&mut self, expr: MirTypeInit) -> MirExprId {
+        self.type_inits.push(expr);
+        MirExprId {
+            id: self.type_inits.len() - 1,
+            ty: MirExprVariant::Init,
+        }
+    }
+
+    pub fn insert_empty(
+        &mut self,
+        reg: &MirTypeRegistry,
+    ) -> MirExprId {
+        self.insert_type_init(MirTypeInit {
+            ty: reg.empty(),
+            id: MirUid::default(),
+            inits: vec![],
+        })
+    }
+
+    pub fn get_type(&self, expr: MirExprId, reg: &MirTypeRegistry) -> MirTypeId {
+        match expr.ty {
+            MirExprVariant::ArrayInit => {
+                self.array_inits[expr.id].ty
+            }
+            MirExprVariant::As => {
+                self.ases[expr.id].ty
+            }
+            MirExprVariant::Call => {
+                self.call[expr.id].ret
+            }
+            MirExprVariant::Literal => {
+                self.literals[expr.id].ty
+            }
+            MirExprVariant::Variable => {
+                self.variables[expr.id].ty
+            }
+            MirExprVariant::Constant => {
+                self.constants[expr.id].ty
+            }
+            MirExprVariant::Assign => {
+                reg.empty()
+            }
+            MirExprVariant::Data => {
+                self.data[expr.id].ty
+            }
+            MirExprVariant::Init => {
+                self.type_inits[expr.id].ty
+            }
+            MirExprVariant::Ref => {
+                self.refs[expr.id].ty
+            }
+            MirExprVariant::Deref => {
+                self.derefs[expr.id].ty
+            }
+            MirExprVariant::DowncastRef => {
+                self.downcasts[expr.id].ty
+            }
+        }
+    }
+}
+
+trait MirElement {
+    fn variant() -> MirExprVariant;
+}
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirDestination {
     Variable(MirLiteral),
-}
-
-impl MirExpr {
-    pub fn get_type<B: Backend>(
-        &self,
-        _funcs: &MirFuncRegistry<B>,
-        phase: &MirPhase
-    ) -> MirTypeId {
-        match self {
-            MirExpr::ArrayInit(val) => {
-                val.ty
-            }
-            MirExpr::As(val) => {
-                val.ty
-            }
-            MirExpr::Block(val) => {
-                val.ty
-            }
-            MirExpr::Call(val) => {
-                val.ret
-            }
-            MirExpr::Literal(val) => {
-                val.ty
-            }
-            MirExpr::Variable(val) => {
-                val.ty
-            }
-            MirExpr::Constant(con) => {
-                con.ty
-            }
-            MirExpr::Assign(_) => {
-                phase.types.empty()
-            }
-            MirExpr::Let(_) => {
-                phase.types.empty()
-            }
-            MirExpr::Data(val) => {
-                val.ty
-            }
-            MirExpr::Offset(val) => {
-                val.ty
-            }
-            MirExpr::If(val) => {
-                val.ty
-            }
-            MirExpr::Loop(val) => {
-                val.ty
-            }
-            MirExpr::Break(_) => phase.types.never(),
-            MirExpr::Continue(_) => phase.types.never(),
-            MirExpr::Return(_) => phase.types.never(),
-            MirExpr::Init(val) => {
-                val.ty
-            }
-        }
-    }
-
-    pub fn get_pos(&self) -> &SrcPos {
-        match self {
-            MirExpr::ArrayInit(val) => &val.pos,
-            MirExpr::As(val) => &val.pos,
-            MirExpr::Block(val) => &val.pos,
-            MirExpr::Call(val) => &val.pos,
-            MirExpr::Literal(val) => &val.pos,
-            MirExpr::Variable(val) => &val.pos,
-            MirExpr::Constant(val) => &val.pos,
-            MirExpr::Assign(val) => &val.pos,
-            MirExpr::Let(val) => &val.pos,
-            MirExpr::Data(val) => &val.pos,
-            MirExpr::Offset(val) => &val.pos,
-            MirExpr::If(val) => &val.pos,
-            MirExpr::Loop(val) => &val.pos,
-            MirExpr::Break(val) => &val.pos,
-            MirExpr::Continue(val) => &val.pos,
-            MirExpr::Return(val) => &val.pos,
-            MirExpr::Init(val) => &val.pos,
-        }
-    }
-
-    pub fn get_scope(&self) -> &ScopeId {
-        match self {
-            MirExpr::ArrayInit(val) => &val.scope,
-            MirExpr::As(val) => &val.scope,
-            MirExpr::Block(val) => &val.scope,
-            MirExpr::Call(val) => &val.scope,
-            MirExpr::Literal(val) => &val.scope,
-            MirExpr::Variable(val) => &val.scope,
-            MirExpr::Constant(val) => &val.scope,
-            MirExpr::Assign(val) => &val.scope,
-            MirExpr::Let(val) => &val.scope,
-            MirExpr::Data(val) => &val.scope,
-            MirExpr::Offset(val) => &val.scope,
-            MirExpr::If(val) => &val.scope,
-            MirExpr::Loop(val) => &val.scope,
-            MirExpr::Break(val) => &val.scope,
-            MirExpr::Continue(val) => &val.scope,
-            MirExpr::Return(val) => &val.scope,
-            MirExpr::Init(val) => &val.scope,
-        }
-    }
-
-    pub fn get_src(&self) -> &ModuleSrc {
-        match self {
-            MirExpr::ArrayInit(val) => &val.src,
-            MirExpr::As(val) => &val.src,
-            MirExpr::Block(val) => &val.src,
-            MirExpr::Call(val) => &val.src,
-            MirExpr::Literal(val) => &val.src,
-            MirExpr::Variable(val) => &val.src,
-            MirExpr::Constant(val) => &val.src,
-            MirExpr::Assign(val) => &val.src,
-            MirExpr::Let(val) => &val.src,
-            MirExpr::Data(val) => &val.src,
-            MirExpr::Offset(val) => &val.src,
-            MirExpr::If(val) => &val.src,
-            MirExpr::Loop(val) => &val.src,
-            MirExpr::Break(val) => &val.src,
-            MirExpr::Continue(val) => &val.src,
-            MirExpr::Return(val) => &val.src,
-            MirExpr::Init(val) => &val.src,
-        }
-    }
-
-    pub fn get_uid(&self) -> &MirUid {
-        match self {
-            MirExpr::ArrayInit(val) => &val.id,
-            MirExpr::As(val) => &val.id,
-            MirExpr::Block(val) => &val.id,
-            MirExpr::Call(val) => &val.id,
-            MirExpr::Literal(val) => &val.id,
-            MirExpr::Variable(val) => &val.id,
-            MirExpr::Constant(val) => &val.id,
-            MirExpr::Assign(val) => &val.id,
-            MirExpr::Let(val) => &val.id,
-            MirExpr::Data(val) => &val.id,
-            MirExpr::Offset(val) => &val.id,
-            MirExpr::If(val) => &val.id,
-            MirExpr::Loop(val) => &val.uid,
-            MirExpr::Break(val) => &val.id,
-            MirExpr::Continue(val) => &val.id,
-            MirExpr::Return(val) => &val.id,
-            MirExpr::Init(val) => &val.id,
-        }
-    }
-
-    /// Returns `true` if the expression terminates code execution in the block.
-    /// This is true for any instructions that change the execution order.
-    /// Usual examples for this are expressions that result in any of these instructions:
-    ///
-    /// - `JMP`
-    /// - `RET`
-    pub fn terminates<B: Backend>(&self, types: &MirTypeRegistry) -> Result<bool, MirError<B>> {
-        match self {
-            MirExpr::Break(_) | MirExpr::Continue(_) | MirExpr::Return(_) => Ok(true),
-            MirExpr::Block(val) => val.terminates(types),
-            MirExpr::If(val) => val.terminates(types),
-            MirExpr::Loop(val) => val.terminates(),
-            MirExpr::Call(val) => val.early_returns(types),
-            MirExpr::Init(val) => val.terminates(types),
-            _ => Ok(false),
-        }
-    }
-
-    pub fn early_returns<B: Backend>(&self, types: &MirTypeRegistry) -> Result<bool, MirError<B>> {
-        match self {
-            MirExpr::Block(val) => val.early_returns(types),
-            MirExpr::Call(val) => val.early_returns(types),
-            MirExpr::If(val) => val.early_returns(types),
-            MirExpr::Loop(val) => val.early_returns(),
-            MirExpr::Return(_) => Ok(true),
-            MirExpr::Init(val) => val.early_returns(types),
-            _ => Ok(false),
-        }
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirExpr {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        match self {
-            MirExpr::ArrayInit(val) => val.is_const_expr(phase, funcs),
-            MirExpr::As(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Block(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Call(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Literal(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Variable(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Constant(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Assign(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Let(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Data(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Offset(val) => val.is_const_expr(phase, funcs),
-            MirExpr::If(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Loop(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Break(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Continue(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Return(val) => val.is_const_expr(phase, funcs),
-            MirExpr::Init(val) => val.is_const_expr(phase, funcs),
-        }
-    }
-}
-
-impl MirExpr {
-    /// Checks if the expression can be interpreted as a constant boolean expression and return the
-    /// constant boolean value of the expression if true.
-    pub fn is_const_bool<B: Backend>(
-        &self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<Option<bool>, MirError<B>> {
-        if !self.is_const_expr(phase, &backend.func_reg())? {
-            return Ok(None);
-        }
-        if self.get_type(&backend.func_reg(), phase) != phase.types.bool() {
-            return Ok(None);
-        }
-
-        let bytes = backend.eval_const_bytes(self.clone(), phase, hir_phase)?;
-        assert!(!bytes.is_empty(), "a constant boolean must contain at least one byte");
-        Ok(Some(bytes[0] != 0))
-    }
-
-    /// Performs final checks on the generated code.
-    /// This will:
-    ///
-    /// - Verify types
-    /// - Check lifetimes
-    /// - Perform borrow checking
-    ///
-    /// Every bit of code that makes it to this stage **should** be 100% save and ready for
-    /// codegen.
-    /// For potential future linters this means: we can compile the source code up until this
-    /// point and then bail just before the codegen step.
-    /// If this succeeds codegen must also succeed unless there is an issue with the compiler
-    /// itself.
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        match self {
-            MirExpr::ArrayInit(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::As(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Block(val) => val.verify(phase, backend, hir_phase, false),
-            MirExpr::Call(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Literal(_) => Ok(()),
-            MirExpr::Variable(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Constant(_) => Ok(()),
-            MirExpr::Assign(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Let(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Data(_) => Ok(()),
-            MirExpr::Offset(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::If(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Loop(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Break(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Continue(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Return(val) => val.verify(phase, backend, hir_phase),
-            MirExpr::Init(val) => val.verify(phase, backend, hir_phase),
-        }
-    }
-
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        if let MirExpr::Block(block) = self {
-            if block.comptime {
-                // Evaluate comptime blocks at compile time.
-                // Note: This code does not get called on function bodies of comptime functions
-                // because the optimization code of functions calls the optimization function of
-                // [MirBlock] directly, without taking the detour over this function.
-                *self = phase.eval_const_block(hir_phase, backend, block)?.clone();
-            }
-        }
-
-        if self.is_const_expr(phase, &backend.func_reg())?
-            && !matches!(self, MirExpr::Call(call) if backend.is_generating_symbol(&call.func)) {
-            // Note: if the backend is currently generating symbols for the function that would be
-            // call by this expression (provided that this is a function call) then we cannot
-            // evaluate the value for this function call at compiletime, as the symbol cannot
-            // be generated at this point.
-            *self = backend.eval_const_expr(self.clone(), phase, hir_phase)?;
-        } else {
-            match self {
-                MirExpr::ArrayInit(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::As(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Block(val) => {
-                    assert!(!val.comptime, "unevaluated comptime block detected!");
-                    val.optimize(phase, backend, hir_phase, false)?
-                },
-                MirExpr::Call(val) => {
-                    if let Some(mut inline) = val.inline(phase, backend, hir_phase)? {
-                        inline.optimize(phase, backend, hir_phase)?;
-                        *self = inline;
-                    } else {
-                        val.optimize(phase, backend, hir_phase)?;
-                    }
-                },
-                MirExpr::Assign(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Let(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Offset(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::If(val) => {
-                    val.optimize(phase, backend, hir_phase)?;
-                    if val.can_reduce() {
-                        if let Some(reduce) = val.clone().try_reduce() {
-                            *self = reduce;
-                        }
-                    }
-                },
-                MirExpr::Loop(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Break(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Continue(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Return(val) => val.optimize(phase, backend, hir_phase)?,
-                MirExpr::Init(val) => val.optimize(phase, backend, hir_phase)?,
-                _ => (),
-            }
-        }
-        Ok(())
-    }
-
-    pub fn into_offset<B: Backend>(
-        self,
-        phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>
-    ) -> Result<MirOffset, MirError<B>> {
-        match self {
-            MirExpr::Variable(var) => {
-                var.into_offset(phase, funcs)
-            },
-            MirExpr::Offset(off) => Ok(off),
-            tmp => Ok(MirOffset {
-                pos: *tmp.get_pos(),
-                scope: *tmp.get_scope(),
-                src: tmp.get_src().clone(),
-                id: phase.new_id(),
-                const_offset: 0,
-                bounds_checks: Vec::new(),
-                runtime_offset: None,
-                ty: tmp.get_type(funcs, phase),
-                var: MirOffsetSrc::Tmp(Box::new(tmp)),
-            }),
-        }
-    }
 }
 
 pub trait MirTyped {

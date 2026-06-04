@@ -24,3 +24,24 @@ const TEST: usize = 10;
 fn print_pi() {
     test_lib::println(pi);
 }
+
+#[test]
+fn failing_test() {
+    std::panic("this must fail")
+}
+
+let tau: f64 = 6.283185307179586;
+
+#[bench]
+fn e_digits() {
+    let n = 13;
+    test_lib::println(fib(n));
+}
+
+fn fib(n: u64) -> u64 {
+    if n == 1 {
+        1
+    } else {
+        n * fib(n - 1)
+    }
+}

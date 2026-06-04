@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::cmp::Ordering;
@@ -50,6 +52,7 @@ const KEY_IN: &str = "in";
 const KEY_SELF_TYPE: &str = "Self";
 const KEY_SELF_PARAMETER: &str = "self";
 const KEY_SYNC: &str = "sync";
+const KEY_ASYNC: &str = "async";
 
 
 pub const CORE_BOOL: &str = "bool";
@@ -260,6 +263,7 @@ pub enum KeyWord {
     SelfType,
     SelfParameter,
     Sync,
+    Async,
 }
 
 impl Display for KeyWord {
@@ -293,6 +297,7 @@ impl Display for KeyWord {
             KeyWord::SelfType => write!(f, "{}", KEY_SELF_TYPE),
             KeyWord::SelfParameter => write!(f, "{}", KEY_SELF_PARAMETER),
             KeyWord::Sync => write!(f, "{}", KEY_SYNC),
+            KeyWord::Async => write!(f, "{}", KEY_ASYNC),
         }
     }
 }
@@ -1275,8 +1280,9 @@ impl<'a> Lexer<'a> {
             s if s == KEY_TRAIT => Ok(Token::Key(KeyWord::Trait).localize(pos, KEY_TRAIT.len())),
             s if s == KEY_IN => Ok(Token::Key(KeyWord::In).localize(pos, KEY_IN.len())),
             s if s == KEY_SELF_TYPE => Ok(Token::Key(KeyWord::SelfType).localize(pos, KEY_SELF_TYPE.len())),
-            // s if s == KEY_SELF_PARAMETER => Ok(Token::Key(KeyWord::SelfParameter).localize(pos, KEY_SELF_PARAMETER.len())),   todo stabilize
+            s if s == KEY_SELF_PARAMETER => Ok(Token::Key(KeyWord::SelfParameter).localize(pos, KEY_SELF_PARAMETER.len())),  // todo stabilize
             s if s == KEY_SYNC => Ok(Token::Key(KeyWord::Sync).localize(pos, KEY_SYNC.len())),
+            s if s == KEY_ASYNC => Ok(Token::Key(KeyWord::Async).localize(pos, KEY_ASYNC.len())),
             s => {
                 let len = s.len();
                 Ok(Token::Ident(s).localize(pos, len))
@@ -1332,6 +1338,8 @@ mod test {
         assert_eq!(Lexer::new("mut").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Mut)));
         assert_eq!(Lexer::new("where").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Where)));
         assert_eq!(Lexer::new("use").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::Use)));
+        assert_eq!(Lexer::new("Self").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::SelfType)));
+        assert_eq!(Lexer::new("self").next_token().map(|t| t.token), Ok(Token::Key(KeyWord::SelfParameter)));
 
         assert_eq!(Lexer::new("+").next_token().map(|t| t.token), Ok(Token::Punct(Punct::Plus)));
         assert_eq!(Lexer::new("-").next_token().map(|t| t.token), Ok(Token::Punct(Punct::Minus)));

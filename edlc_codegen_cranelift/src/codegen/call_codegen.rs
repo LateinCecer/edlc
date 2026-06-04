@@ -1,48 +1,58 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
-use edlc_core::prelude::mir_expr::mir_call::MirCall;
-use edlc_core::prelude::{MirError, MirPhase};
-use log::info;
-use crate::codegen::{Compilable, FunctionTranslator};
-use crate::codegen::variable::AggregateValue;
+use crate::codegen::{Compilable, FunctionTranslator, HeadlessCompilable};
 use crate::compiler::JIT;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::{HeadlessId, MirExprId, MirFlowGraph, MirValue};
+use edlc_core::prelude::{MirError, MirPhase};
+use edlc_core::prelude::mir_funcs::CallSrc;
 
 impl<Runtime> Compilable<Runtime> for MirCall {
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        info!("translating function call at position {} ...", self.pos);
-
-        // format call args
-        let mut values = Vec::new();
-        for arg in self.args.into_iter() {
-            values.push(arg.compile(backend, phase)?);
-        }
-        values.into_iter().for_each(|value| backend.add_call_arg(value));
-
-        backend.put_call_return(self.ret, self.pos);
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        target: &MirValue,
+        expr_id: &MirExprId,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
         // build the function call using the code generator defined in the function registry
-        backend.func_reg.clone()
+        backend.func_reg
+            .clone()
             .borrow_mut()
-            .generate_call_code(self.func, backend, phase)?;
-        // unwrapping this is safe, since the value must always be available at runtime of the
-        // compiler works correctly.
-        Ok(backend.get_call_result().unwrap())
+            .generate_call_code(self.func, backend, phase, cfg, self, Some(target), &CallSrc::Expr(*expr_id))?;
+        Ok(())
+    }
+}
+
+impl<Runtime> HeadlessCompilable<Runtime> for MirCall {
+    fn compile_headless(
+        &self,
+        backend: &mut FunctionTranslator<Runtime>,
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        target: Option<&MirValue>,
+        id: &HeadlessId,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
+        backend.func_reg
+            .clone()
+            .borrow_mut()
+            .generate_call_code(self.func, backend, phase, cfg, self, target, &CallSrc::Headless(id.clone()))?;
+        Ok(())
     }
 }

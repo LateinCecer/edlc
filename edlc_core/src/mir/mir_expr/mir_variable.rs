@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 //! # About Variables
@@ -28,34 +30,99 @@
 //! itself.
 //! This can make things a little more complicated.
 
-use log::info;
+use crate::core::edl_type::EdlTypeRegistry;
+use crate::core::edl_var::EdlVarRegistry;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
-use crate::issue;
-use crate::issue::SrcError;
 use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
 use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExpr, MirTyped};
-use crate::mir::mir_expr::mir_call::MirCall;
-use crate::mir::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_type::{MemberOffset, MirTypeId, MirTypeLayout};
-use crate::prelude::mir_expr::MirTreeWalker;
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::{MirError, MirPhase, MirUid};
+use crate::prelude::ExecutorVM;
 use crate::resolver::ScopeId;
 
+/// This MIR expression can be used to access global variables.
+/// Local variables and function parameters are encoded as [MirValue]s directly so it is not
+/// necessary to use an expression to access those (and indeed not possible).
+/// The type of this expression must be a shared or mutable reference as access to global variables
+/// is always evaluated as a reference to the global data point at which the global var is stored.
+/// Most of the time this reference is immediately dereferenced by the compiler through a
+/// [super::MirDeref] so this quirk is not exposed on a language level and only present in MIR.
 #[derive(Debug, Clone, PartialEq)]
-pub struct MirVariable {
+pub struct MirGlobalVar {
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub src: ModuleSrc,
     pub id: MirUid,
     pub var: EdlVarId,
+    /// The MIR type of the variable access.
+    ///
+    /// # Internal References
+    ///
+    /// The [MirGlobalVar] expression is used only to access global variables.
+    /// As such, the variable does not actually exist as a plane MIR value in the code flow graph.
+    /// Accessing a global variable is always a read operation to a global data point.
+    /// We thus always evaluate a read or write operation to a global var as a reference.
+    /// With this, this type *must* be a shared or mutable reference type.
     pub ty: MirTypeId,
 }
 
-impl MirVariable {
+impl MirGlobalVar {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<(), ExecutionError> {
+        let global_var_offset = backend.global_var(self.var)
+            .expect("global variable missing");
+        unsafe { vm.write_ptr(*target, global_var_offset.as_ptr() as *const _, stack_frame, reg) };
+        Ok(())
+    }
+
+    /// For now, we will say that globals are always available at compile time.
+    #[inline(always)]
+    pub fn is_avail(
+        &self,
+    ) -> bool {
+        true
+    }
+
+    /// Performs some basic assertion checks on the types of this MIR expression.
+    /// The type of the expression itself must be a reference type and the base type inside of that
+    /// reference must match the type of the global variable.
+    pub fn assert_check(
+        &self,
+        mir_types: &mut MirTypeRegistry,
+        vars: &EdlVarRegistry,
+        types: &EdlTypeRegistry,
+    ) {
+        let var_ty = vars.get_var_type(self.var).unwrap();
+        let var_ty = mir_types.mir_id(var_ty, types).unwrap();
+        let base = mir_types.get_ref_type(&self.ty)
+            .expect("return type of global var access mut be a reference in MIR!");
+        assert_eq!(base, var_ty, "variable type does not match return type of var access");
+    }
+}
+
+impl MirGraphElement for MirGlobalVar {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
+    }
+
+    fn uses_var(&self, _val: &MirValue) -> bool {
+        false
+    }
+
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
+}
+
+impl MirGlobalVar {
     pub fn verify<B: Backend>(
         &mut self,
         _phase: &mut MirPhase,
@@ -66,249 +133,57 @@ impl MirVariable {
     }
 }
 
-impl From<MirVariable> for MirExpr {
-    fn from(value: MirVariable) -> Self {
-        MirExpr::Variable(value)
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirVariable {
-    fn is_const_expr(&self, phase: &MirPhase, _funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        phase.is_var_const_expr(self.var)
-    }
-}
-
-impl MirTyped for MirVariable {
-    fn get_type(&self) -> MirTypeId {
-        self.ty
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum OffsetParent {
-    Var(MirVariable),
+    Var(MirGlobalVar),
     Off(MirOffset),
-}
-
-impl<B: Backend> MirTreeWalker<B> for OffsetParent {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        match self {
-            OffsetParent::Var(_data) => Ok(Vec::new()),
-            OffsetParent::Off(data) => data.walk(filter, task)
-        }
-    }
-
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        match self {
-            OffsetParent::Var(_data) => Ok(Vec::new()),
-            OffsetParent::Off(data) => data.walk_mut(filter, task),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeOffset {
-    pub index: Box<MirExpr>,
+    pub index: MirValue,
 }
 
-impl<B: Backend> MirTreeWalker<B> for RuntimeOffset {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        self.index.walk(filter, task)
+impl MirGraphElement for RuntimeOffset {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![self.index]
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        self.index.walk_mut(filter, task)
-    }
-}
-
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum BoundsValue {
-    Comptime(usize),
-    Runtime(MirExpr),
-}
-
-impl<B: Backend> MirTreeWalker<B> for BoundsValue {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        if let BoundsValue::Runtime(data) = self {
-            data.walk(filter, task)
-        } else {
-            Ok(Vec::new())
-        }
+    fn uses_var(&self, val: &MirValue) -> bool {
+        &self.index == val
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        if let BoundsValue::Runtime(data) = self {
-            data.walk_mut(filter, task)
-        } else {
-            Ok(Vec::new())
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        if &self.index == var {
+            self.index = *repl;
         }
     }
 }
+
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundsCheck {
     pub pos: SrcPos,
     pub src: ModuleSrc,
-    pub max: BoundsValue,
-    pub idx: BoundsValue,
+    pub max: MirValue,
+    pub idx: MirValue,
 }
 
-impl<B: Backend> MirTreeWalker<B> for BoundsCheck {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = self.max.walk(filter, task)?;
-        vals.append(&mut self.idx.walk(filter, task)?);
-        Ok(vals)
+impl MirGraphElement for BoundsCheck {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![self.max, self.idx]
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = self.max.walk_mut(filter, task)?;
-        vals.append(&mut self.idx.walk_mut(filter, task)?);
-        Ok(vals)
-    }
-}
-
-impl BoundsCheck {
-    fn verify<B: Backend>(
-        &mut self,
-        mir_phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        self.idx.verify(mir_phase, funcs, hir_phase)?;
-        self.max.verify(mir_phase, funcs, hir_phase)?;
-        Ok(())
+    fn uses_var(&self, val: &MirValue) -> bool {
+        &self.max == val || &self.idx == val
     }
 
-    fn optimize<B: Backend>(
-        &mut self,
-        mir_phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        self.idx.optimize(mir_phase, backend, hir_phase)?;
-        self.max.optimize(mir_phase, backend, hir_phase)?;
-
-        match (&self.idx, &self.max) {
-            (BoundsValue::Comptime(idx), BoundsValue::Comptime(max)) => {
-                if idx < max {
-                    Ok(())
-                } else {
-                    hir_phase.report_error(
-                        issue::format_type_args!(
-                            format_args!("array out of bounds!")
-                        ),
-                        &[
-                            SrcError::Single {
-                                pos: self.pos.into(),
-                                src: self.src.clone(),
-                                error: issue::format_type_args!(
-                                    format_args!("length is {max} but index is {idx}")
-                                )
-                            }
-                        ],
-                        None,
-                    );
-
-                    Err(MirError::IndexOutOfBounds {
-                        pos: self.pos,
-                        idx: *idx,
-                        max: *max,
-                    })
-                }
-            },
-            _ => Ok(())
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        if &self.max == var {
+            self.max = *repl;
         }
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for BoundsCheck {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        self.idx.is_const_expr(phase, funcs)
-            .and_then(|d| self.max.is_const_expr(phase, funcs).map(|res| d & res))
-    }
-}
-
-impl BoundsValue {
-    fn verify<B: Backend>(
-        &mut self,
-        mir_phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        match self {
-            BoundsValue::Comptime(_) => Ok(()),
-            BoundsValue::Runtime(val) => {
-                val.verify(mir_phase, funcs, hir_phase)?;
-                Ok(())
-            }
-        }
-    }
-
-    fn optimize<B: Backend>(
-        &mut self,
-        mir_phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        match self {
-            BoundsValue::Comptime(_) => (), // this cannot be optimized any further
-            BoundsValue::Runtime(val) => {
-                val.optimize(mir_phase, backend, hir_phase)?;
-                if val.is_const_expr(mir_phase, &backend.func_reg())? {
-                    match val {
-                        MirExpr::Literal(lit) => {
-                            *self = BoundsValue::Comptime(lit.value.as_usize());
-                        },
-                        MirExpr::Data(data) => {
-                            *self = BoundsValue::Comptime(data.as_usize(mir_phase)?);
-                        },
-                        _ => (),
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for BoundsValue {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        match self {
-            BoundsValue::Comptime(_) => Ok(true),
-            BoundsValue::Runtime(val) => val.is_const_expr(phase, funcs)
+        if &self.idx == var {
+            self.idx = *repl;
         }
     }
 }
@@ -316,31 +191,32 @@ impl<B: Backend> IsConstExpr<B> for BoundsValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirOffsetSrc {
     Var(EdlVarId),
-    Tmp(Box<MirExpr>),
+    Tmp(MirValue),
 }
 
-impl<B: Backend> MirTreeWalker<B> for MirOffsetSrc {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        if let MirOffsetSrc::Tmp(data) = self {
-            data.walk(filter, task)
-        } else {
-            Ok(Vec::new())
+impl MirGraphElement for MirOffsetSrc {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        match self {
+            MirOffsetSrc::Var(_) => vec![],
+            MirOffsetSrc::Tmp(var) => vec![*var],
         }
     }
 
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        if let MirOffsetSrc::Tmp(data) = self {
-            data.walk_mut(filter, task)
-        } else {
-            Ok(Vec::new())
+    fn uses_var(&self, val: &MirValue) -> bool {
+        match self {
+            MirOffsetSrc::Var(_) => false,
+            MirOffsetSrc::Tmp(var) => var == val
+        }
+    }
+
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        match self {
+            MirOffsetSrc::Var(_) => (),
+            MirOffsetSrc::Tmp(src) => {
+                if src == var {
+                    *src = *repl;
+                }
+            }
         }
     }
 }
@@ -358,287 +234,30 @@ pub struct MirOffset {
     pub bounds_checks: Vec<BoundsCheck>,
 }
 
-impl<B: Backend> MirTreeWalker<B> for MirOffset {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = self.var.walk(filter, task)?;
-        if let Some(off) = self.runtime_offset.as_ref() {
-            vals.append(&mut off.walk(filter, task)?);
+impl MirGraphElement for MirOffset {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        let mut els = self.var.collect_vars();
+        if let Some(offset) = self.runtime_offset.as_ref() {
+            els.append(&mut offset.collect_vars());
         }
-        for check in self.bounds_checks.iter() {
-            vals.append(&mut check.walk(filter, task)?);
+        self.bounds_checks.iter()
+            .for_each(|bc| els.append(&mut bc.collect_vars()));
+        els
+    }
+
+    fn uses_var(&self, val: &MirValue) -> bool {
+        self.var.uses_var(val)
+            || self.runtime_offset.as_ref().map(|ro| ro.uses_var(val)).unwrap_or(false)
+            || self.bounds_checks.iter().any(|bc| bc.uses_var(val))
+    }
+
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        self.var.replace_var(var, repl);
+        if let Some(offset) = self.runtime_offset.as_mut() {
+            offset.replace_var(var, repl);
         }
-        Ok(vals)
-    }
-
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut vals = Vec::new();
-        if let Some(off) = self.runtime_offset.as_mut() {
-            vals.append(&mut off.walk_mut(filter, task)?);
-        }
-        for check in self.bounds_checks.iter_mut() {
-            vals.append(&mut check.walk_mut(filter, task)?);
-        }
-        Ok(vals)
-    }
-}
-
-impl MirOffset {
-    /// Adds an index operation into the offset.
-    /// The index operation is built by creating a new base offset into the already existing offset.
-    /// Additionally, a bounds check is automatically added to the offset, and will be compiled
-    /// into the generated output of the MIR expression during codegen.
-    /// The bounds check stands as a guard against indices that try to access data outside of the
-    /// bounds of an array.
-    pub fn add_index_operation<B: Backend>(
-        &mut self,
-        pos: SrcPos,
-        idx: BoundsValue,
-        bounds: BoundsValue,
-        ty: MirTypeId,
-        phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        match idx.clone() {
-            BoundsValue::Comptime(off) => {
-                self.const_offset += off;
-            }
-            BoundsValue::Runtime(off) => {
-                let runtime_offset = RuntimeOffset::new(off, ty, phase, funcs)?;
-                if let Some(own_offset) = &mut self.runtime_offset {
-                    own_offset.add_offset(runtime_offset, phase, funcs)?;
-                } else {
-                    self.runtime_offset = Some(runtime_offset);
-                }
-            }
-        }
-
-        self.bounds_checks.push(BoundsCheck { idx, max: bounds, pos, src: self.src.clone() });
-        self.ty = ty;
-        Ok(())
-    }
-
-    pub fn add_array_index<B: Backend>(
-        &mut self,
-        pos: SrcPos,
-        idx: BoundsValue,
-        phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        // get layout
-        let layout = phase.types.get_layout(self.ty)
-            .ok_or(MirError::UnknownType(self.ty))?;
-        let MirTypeLayout::Array(layout) = layout else {
-            return Err(MirError::WrongLayout {
-                exp: "Array".to_string(),
-                got: "Struct or Unknown".to_string(),
-            });
-        };
-        self.add_index_operation(
-            pos, idx, BoundsValue::Comptime(layout.array_length), layout.element_type, phase, funcs)
-    }
-
-    /// Adds a constant offset to the offset value.
-    /// Since the offset is now no longer at the beginning of the original memory position, the
-    /// type of the `MirOffset` must also change in accordance.
-    /// The parameter `ty` replaces the return type of this offset.
-    /// This is useful for things like field operators
-    pub fn add_const_offset(&mut self, off: MemberOffset, ty: MirTypeId) {
-        self.const_offset += off.0;
-        self.ty = ty;
-    }
-
-    pub fn is_assignable(&self) -> bool {
-        matches!(self.var, MirOffsetSrc::Var(_))
-    }
-}
-
-impl IntoOffset for MirOffset {
-    fn into_offset<B: Backend>(
-        self,
-        _phase: &mut MirPhase,
-        _funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<MirOffset, MirError<B>> {
-        Ok(self)
-    }
-}
-
-impl RuntimeOffset {
-    pub fn new<B: Backend>(
-        mut index: MirExpr,
-        stride_ty: MirTypeId,
-        mir_phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self, MirError<B>> {
-        let stride = mir_phase.types.byte_size(stride_ty)
-            .ok_or(MirError::UnknownType(stride_ty))?;
-
-        // adjust with stride if necessary
-        if stride != 1 {
-            let pos = *index.get_pos();
-            let scope = *index.get_scope();
-            let src = index.get_src().clone();
-            let id = *index.get_uid();
-            index = MirCall::mul_usize(index, MirLiteral {
-                pos,
-                scope,
-                src,
-                id,
-                ty: mir_phase.types.usize(),
-                value: MirLiteralValue::Usize(stride),
-            }.into(), mir_phase, funcs)?.into();
-        }
-        Ok(RuntimeOffset {
-            index: Box::new(index),
-        })
-    }
-
-    pub fn add_offset<B: Backend>(
-        &mut self,
-        off: Self,
-        mir_phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        self.index = Box::new(MirCall::add_usize(
-            self.index.as_ref().clone(),
-            *off.index,
-            mir_phase,
-            funcs,
-        )?.into());
-        Ok(())
-    }
-}
-
-impl IntoOffset for MirVariable {
-    fn into_offset<B: Backend>(
-        self,
-        _phase: &mut MirPhase,
-        _funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<MirOffset, MirError<B>> {
-        Ok(MirOffset {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src,
-            id: self.id,
-            var: MirOffsetSrc::Var(self.var),
-            runtime_offset: None,
-            const_offset: 0,
-            ty: self.ty,
-            bounds_checks: Vec::new(),
-        })
-    }
-}
-
-pub trait IntoOffset {
-    fn into_offset<B: Backend>(
-        self,
-        phase: &mut MirPhase,
-        funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<MirOffset, MirError<B>>;
-}
-
-impl From<MirOffset> for MirExpr {
-    fn from(value: MirOffset) -> Self {
-        MirExpr::Offset(value)
-    }
-}
-
-impl From<MirVariable> for OffsetParent {
-    fn from(value: MirVariable) -> Self {
-        OffsetParent::Var(value)
-    }
-}
-
-impl MirTyped for MirOffset {
-    fn get_type(&self) -> MirTypeId {
-        self.ty
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for OffsetParent {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        match self {
-            OffsetParent::Off(off) => off.is_const_expr(phase, funcs),
-            OffsetParent::Var(var) => var.is_const_expr(phase, funcs),
-        }
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirOffsetSrc {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        match self {
-            MirOffsetSrc::Var(var) => phase.is_var_const_expr(*var),
-            MirOffsetSrc::Tmp(val) => val.is_const_expr(phase, funcs),
-        }
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirOffset {
-    fn is_const_expr(&self, phase: &MirPhase, funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        let mut is_const = self.var.is_const_expr(phase, funcs)?;
-        if let Some(runtime_offset) = &self.runtime_offset {
-            is_const &= runtime_offset.index.is_const_expr(phase, funcs)?;
-        }
-        for bounds_check in self.bounds_checks.iter() {
-            is_const &= bounds_check.is_const_expr(phase, funcs)?;
-        }
-        Ok(is_const)
-    }
-}
-
-impl MirOffset {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        funcs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        if let Some(runtime_offset) = &mut self.runtime_offset {
-            runtime_offset.index.verify(phase, funcs, hir_phase)?;
-        }
-        for bounds_check in self.bounds_checks.iter_mut() {
-            bounds_check.verify(phase, funcs, hir_phase)?;
-        }
-        Ok(())
-    }
-
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        info!("Optimizing variable offset...");
-
-        if let Some(runtime_offset) = &mut self.runtime_offset {
-            runtime_offset.index.optimize(phase, backend, hir_phase)?;
-            if runtime_offset.index.is_const_expr(phase, &backend.func_reg())? {
-                // if the runtime offset is known at compile time, swap it out for a constant offset
-                match runtime_offset.index.as_ref() {
-                    MirExpr::Literal(lit) => {
-                        self.const_offset += lit.value.as_usize();
-                        self.runtime_offset = None;
-                    },
-                    MirExpr::Data(data) => {
-                        self.const_offset += data.as_usize(phase)?;
-                        self.runtime_offset = None;
-                    },
-                    _ => (),
-                }
-            }
-        }
-        // optimizes the bounds checks. This can potentially through errors of the bounds checks can
-        // be resolved at comptime and are out of bounds
-        for bounds_check in self.bounds_checks.iter_mut() {
-            bounds_check.optimize(phase, backend, hir_phase)?;
-        }
-        Ok(())
+        self.bounds_checks
+            .iter_mut()
+            .for_each(|bc| bc.replace_var(var, repl));
     }
 }

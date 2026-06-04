@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::ast::ItemDoc;
 use crate::core::edl_error::EdlError;
@@ -22,16 +24,11 @@ use crate::core::type_analysis::*;
 use crate::documentation::{ConstDoc, DocCompilerState, DocElement, Modifiers};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirType;
-use crate::hir::hir_expr::HirExpression;
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpression, SourceObject};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, IntoEdl, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, TypeArguments};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_const::MirConstDef;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ResolveError, ScopeId};
 
 
@@ -40,6 +37,8 @@ struct CompilerInfo {
     node: NodeId,
     const_uid: ExtConstUid,
     type_uid: TypeUid,
+    /// Take a wild fucking guess
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,10 +114,15 @@ impl ResolveTypes for HirConst {
             inferer.at(node)
                 .eq(&const_uid, &EdlConstValue::Const(self.finalized_const.as_ref().unwrap().id))
                 .unwrap();
+
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 type_uid,
                 const_uid,
+                mutable,
             });
             type_uid
         }
@@ -130,6 +134,11 @@ impl ResolveTypes for HirConst {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         Some(self.info.as_ref().unwrap().const_uid)
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -281,45 +290,11 @@ impl HirConst {
             )
         )
     }
-}
 
-impl IntoMir for HirConst {
-    type MirRepr = MirConstDef;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let info = self.finalized_const.as_ref().ok_or(HirTranslationError::HirError(
-            HirError {
-                pos: self.pos,
-                ty: Box::new(HirErrorType::ConstantUnresolved(self.name.clone()))
-            }
-        ))?;
-
-        let ty = mir_phase.types.get_const_type(info.id)
-            .ok_or(HirError {
-                pos: self.pos,
-                ty: Box::new(HirErrorType::EdlError(EdlError::E014(info.id))),
-            })?;
-        let val = self.value.mir_repr(phase, mir_phase, mir_funcs)?;
-
-        Ok(MirConstDef {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            const_id: info.id,
-            ty,
-            val: Box::new(val),
-        })
+    pub fn id(&self) -> Option<&EdlConstId> {
+        self.finalized_const.as_ref().map(|info| &info.id)
     }
 }
-
-
 
 #[cfg(test)]
 mod test {

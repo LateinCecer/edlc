@@ -1,29 +1,27 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::core::edl_type::EdlConstId;
 use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
-use crate::mir::{MirError, MirUid};
-use crate::mir::MirPhase;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_comptime::MirComptimeEval;
 use crate::mir::mir_type::MirTypeId;
-use crate::prelude::mir_funcs::MirFuncRegistry;
+use crate::mir::MirUid;
 use crate::resolver::ScopeId;
 
 
@@ -35,27 +33,5 @@ pub struct MirConstDef {
     pub id: MirUid,
     pub const_id: EdlConstId,
     pub ty: MirTypeId,
-    pub val: Box<MirExpr>,
-}
-
-impl MirConstDef {
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        regs: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        let val_ty = self.val.get_type(regs, phase);
-        if val_ty != self.ty {
-            return Err(MirError::TypeMismatch {
-                exp: self.ty,
-                got: val_ty,
-            });
-        }
-
-        phase.ctx_mut().push().set_comptime(self.pos)?;
-        self.val.verify(phase, regs, hir_phase)?;
-        phase.ctx_mut().pop()?;
-        Ok(())
-    }
+    pub val: MirComptimeEval,
 }

@@ -1,36 +1,40 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
+use crate::core::edl_type;
 use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_return::MirReturn;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::prelude::{report_infer_error, ResolveTypes};
 use crate::resolver::ScopeId;
 use std::error::Error;
+use crate::hir::hir_expr::hir_ref::HirRef;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
@@ -38,6 +42,7 @@ struct CompilerInfo {
     own_uid: TypeUid,
     return_uid: TypeUid,
     finalized_return: EdlMaybeType,
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +159,10 @@ impl ResolveTypes for HirReturn {
         // insert constraints
         let ret_ty = self.info.as_ref().unwrap().return_uid;
         if let Some(val) = self.value.as_mut() {
+            // try auto-ref
+            HirRef::auto(val, phase, infer_state, ret_ty)?;
+            infer = phase.infer_from(infer_state);
+
             let val_ty = val.get_type_uid(&mut infer);
             if let Err(err) = infer.at(node).eq(&val_ty, &ret_ty) {
                 return Err(report_infer_error(err, infer_state, phase));
@@ -177,6 +186,11 @@ impl ResolveTypes for HirReturn {
             info.own_uid
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer
+                .at(node)
+                .eq(&mutable, &EdlConstValue::from_bool(false))
+                .unwrap();
 
             // create own return type and init as `!`
             let own_uid = inferer.new_type(node);
@@ -192,6 +206,7 @@ impl ResolveTypes for HirReturn {
                 own_uid,
                 return_uid,
                 finalized_return: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -208,6 +223,11 @@ impl ResolveTypes for HirReturn {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -261,13 +281,6 @@ impl HirExpr for HirReturn {
 impl EdlFnArgument for HirReturn {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     fn const_expr(
         &self,
         _state: &Self::CompilerState
@@ -276,31 +289,55 @@ impl EdlFnArgument for HirReturn {
     }
 }
 
-impl IntoMir for HirReturn {
-    type MirRepr = MirReturn;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirReturn {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
         let value = if let Some(val) = self.value.as_ref() {
-            Some(Box::new(val.mir_repr(phase, mir_phase, mir_funcs)?))
+            let value_ty = val.mir_deref_type(graph)?;
+            let value = graph.graph.create_temp_variable(value_ty);
+            val.write_to_graph(graph, value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // value exists early
+            }
+            value
         } else {
-            None
+            let value_ty = graph.mir_phase.types.empty();
+            let value = graph.graph.create_temp_variable(value_ty);
+            let empty_id = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(
+                graph.current_block,
+                value,
+                empty_id,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+            value
         };
 
-        Ok(MirReturn {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
+        let target_ty = graph.graph.get_var_type(&target);
+        assert_eq!(target_ty, &graph.mir_phase.types.empty());
+
+        // NOTE: we do not need to write to target, as the return seals the block
+        graph.graph.insert_return(
+            graph.current_block,
             value,
-        })
+            DebugSymbols { pos: self.pos },
+        );
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
 

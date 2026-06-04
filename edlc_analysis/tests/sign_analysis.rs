@@ -1,4 +1,22 @@
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashNodeState, Lattice, LatticeElement, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn};
+/*
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
+ *
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
+ *
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
+ *
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+use edlc_analysis::graph::{CfgGraphState, CfgNodeState, CfgNodeStateMut, CfgValueGenerator, CfgValueId, ConstraintLattice, GraphBuilder, HashGraphState, HashNodeState, Lattice, LatticeElement, LatticeId, LogicSolver, NoopNode, PropagationWorkListForward, TransferFn, WorkListFixpointForward};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -62,6 +80,14 @@ impl LatticeElement for Sign {
             (_, _) => false,
         }
     }
+
+    fn bottom() -> Self {
+        Self::Invalid
+    }
+
+    fn top() -> Self {
+        Self::Unknown
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
@@ -109,6 +135,7 @@ enum Operator {
     Div,
 }
 
+#[derive(Debug)]
 enum Expr {
     Literal(i32),
     Var(CfgValueId),
@@ -122,7 +149,7 @@ enum Expr {
 
 impl Expr {
     /// Evaluates the sign of an expression.
-    fn eval(&self, state: &HashNodeState<Sign>, pool: &ExprPool) -> Sign {
+    fn eval(&self, state: &HashNodeState<CfgValueId, Sign>, pool: &ExprPool) -> Sign {
         match self {
             Expr::Literal(v) if *v > 0 => Sign::Positive,
             Expr::Literal(v) if *v < 0 => Sign::Negative,
@@ -133,6 +160,7 @@ impl Expr {
             Expr::Operator { op: Operator::Add, lhs, rhs } => {
                 let lhs = pool[*lhs].eval(state, pool);
                 let rhs = pool[*rhs].eval(state, pool);
+                println!("{:?}    with  lhs = {lhs:?}  and  rhs = {rhs:?}", self);
 
                 match lhs {
                     Sign::Invalid => Sign::Invalid,
@@ -282,18 +310,24 @@ impl Display for SignTransferFn {
     }
 }
 
-impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign> for SignTransferFn {
-    fn transfer(&self, mut input: HashNodeState<Sign>, cfg: &ConstraintLattice<ExprPool, Self>) -> Result<HashNodeState<Sign>, SignConflict> {
+impl TransferFn<ConstraintLattice<ExprPool, Self>, Sign, HashGraphState<LatticeId, Sign, ()>> for SignTransferFn {
+    fn transfer(&self, input: &mut HashNodeState<CfgValueId, Sign>, ctx: &mut (), cfg: &ConstraintLattice<ExprPool, Self>) -> Result<bool, SignConflict> {
         match self {
             SignTransferFn::Assign(id, expr_id) => {
-                *input.element_value_mut(id) = cfg.state[*expr_id].eval(&input, &cfg.state);
+                let y = input.element_value(id);
+                let x = cfg.state[*expr_id].eval(input, &cfg.state);
+                *input.element_value_mut(id) = x;
+                println!("eval output: {x:?}");
+                println!("and in state: {:?}", input.element_value(id));
+                Ok(x != y)
             }
             SignTransferFn::Declare(id) => {
+                let prev = input.element_value(id);
                 *input.element_value_mut(id) = Sign::Invalid;
+                Ok(prev != Sign::Invalid)
             }
-            SignTransferFn::Other => (), // nothing to do here
+            SignTransferFn::Other => Ok(false), // nothing to do here
         }
-        Ok(input)
     }
 }
 
@@ -320,7 +354,7 @@ fn join() {
 
 #[test]
 fn solve_sign() {
-    let mut graph_state = HashMap::default();
+    let mut graph_state = HashGraphState::new(());
 
     let gen_state = CfgValueGenerator::default();
     let a = gen_state.generate();
@@ -388,7 +422,7 @@ fn solve_sign() {
 
     println!("done building CFG test program.");
     // worklist solver
-    PropagationWorkListForward.solve(&cfg, &mut graph_state).unwrap();
+    WorkListFixpointForward.solve(&cfg, &mut graph_state, Sign::upper).unwrap();
     println!("done analysing program.");
 
     // print info
@@ -396,7 +430,7 @@ fn solve_sign() {
     let states = [v1, v2_1, v2_2, v2_3, v3, v4, v5, v6, v7, v8];
     for state in states {
         let node_name = format!("{state}");
-        let node_state = &graph_state.get(&state);
+        let node_state = &graph_state.node_state(&state);
         println!("  ° <{node_name:<8}>");
         if let Some(node_state) = *node_state {
             println!("    {node_state:?}");
@@ -451,17 +485,17 @@ fn solve_sign_builder() {
     println!("{}", cfg.lattice);
 
     // worklist solver
-    let mut graph_state = HashMap::default();
-    PropagationWorkListForward.solve(&cfg, &mut graph_state).unwrap();
+    let mut graph_state = HashGraphState::new(());
+    WorkListFixpointForward.solve(&cfg, &mut graph_state, Sign::upper).unwrap();
     println!("done analysing program.");
 
     // print info
     println!(" --- SIGN ANALYSIS OUTPUT --- ");
-    let mut keys = graph_state.keys().collect::<Vec<_>>();
+    let mut keys = graph_state.map.keys().collect::<Vec<_>>();
     keys.sort();
     for state in keys {
         let node_name = format!("{state}");
-        let node_state = &graph_state.get(state);
+        let node_state = &graph_state.node_state(state);
         println!("  ° <{node_name:<8}>");
         if let Some(node_state) = *node_state {
             println!("    {node_state:?}");

@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 
@@ -76,11 +78,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             Some(edlc_core::inline_code!($base)),
@@ -98,11 +100,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             Some(edlc_core::inline_code!($base)),
@@ -165,11 +167,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             Some(edlc_core::inline_code!($base)),
@@ -187,11 +189,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             Some(edlc_core::inline_code!($base)),
@@ -256,11 +258,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             None,
@@ -278,11 +280,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!("<>"),
             None,
@@ -345,11 +347,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             None,
@@ -367,11 +369,11 @@ macro_rules! jit_func {
     ) => {{
         #[allow(improper_ctypes_definitions)]
         #[allow(unused_parens)]
-        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: &Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
+        extern "C" fn $name<$($t,)* $(const $n: $nt),*>($runtime: *const Option<RwLock<$Runtime>>, $($a: $A),*) -> $Ret
         where $($t_: $clause),* { $body }
 
         #[allow(improper_ctypes_definitions)]
-        $exec.insert_runtime_extern::<extern "C" fn(&Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
+        $exec.insert_runtime_extern::<extern "C" fn(*const Option<RwLock<$Runtime>>, $($a: _),*) -> _, _>(
             $fn_id,
             edlc_core::inline_code!(&format!("<{}>", expr_format!($($param),*))),
             None,
@@ -392,16 +394,16 @@ mod test {
     use std::{any, fs, mem, slice};
     use edlc_core::prelude::mir_str::FatPtr;
     use log::info;
-    use crate::executor::CraneliftJIT;
+    use crate::executor::{CraneliftJIT, FunctionContainer};
     use crate::prelude::TypedProgram;
     use std::sync::RwLock;
     use edlc_core::inline_code;
-    use edlc_core::prelude::edl_type::{EdlRepresentation, EdlTypeId};
-    use edlc_core::prelude::{DocGenerator, Item};
+    use edlc_core::prelude::edl_type::{EdlMaybeType, EdlRepresentation, EdlTypeId};
+    use edlc_core::prelude::{DocGenerator, Item, JitCompiler};
     use edlc_core::prelude::ast_type_def::LayoutOptions;
+    use edlc_core::prelude::mir_expr::Context;
     use edlc_core::prelude::mir_type::layout::{Layout, MirLayout, OffsetStructLayoutBuilder, StructLayoutBuilder};
     use edlc_core::prelude::mir_type::MirTypeRegistry;
-    use crate::{jit_intrinsic_panic};
 
     #[test]
     fn test() -> Result<(), anyhow::Error> {
@@ -430,9 +432,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -459,9 +461,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -478,13 +480,12 @@ fn test() -> i32 {
             fn println<>(runtime: i32, line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
-                println!("`{}` from runtime {}", msg, runtime.as_ref().unwrap().read().unwrap());
+                println!("`{}` from runtime {}", msg, unsafe { &*runtime }.as_ref().unwrap().read().unwrap());
 
-                *runtime.as_ref().unwrap()
-                    .write()
-                    .unwrap() = 69;
+                let s = unsafe { &*runtime }.as_ref().unwrap();
+                *s.write().unwrap() = 69;
             }
         );
 
@@ -497,9 +498,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
 
         let rt = *compiler.backend.get_runtime(0.into())?
             .read().unwrap();
@@ -540,9 +541,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -557,12 +558,14 @@ fn test() -> i32 {
         let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
         jit_func!(compiler, fn<"str";>(fn_id), 0,
             fn println_str<>(runtime: i32, line: FatPtr) -> () where; {
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
 
-                println!("`{}` in runtime `{}`", msg, runtime.as_ref().unwrap().read().unwrap());
+                println!("`{}` in runtime `{}`", msg, runtime.read().unwrap());
             }
         );
         jit_func!(compiler, fn<"i32";>(fn_id),
@@ -591,9 +594,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -624,13 +627,18 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
         );
         jit_func!(compiler, fn<"i32";>(fn_id),
             fn println_i32<>(val: i32) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_f32<>(val: f32) -> () where; {
                 println!("{}", val);
             }
         );
@@ -647,7 +655,7 @@ fn test() -> i32 {
             const fn assert<>(val: bool, msg: FatPtr) -> () where; {
                 if !val {
                     let msg = unsafe { std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)) };
+                        slice::from_raw_parts(msg.ptr.0, msg.size)) };
                     eprintln!("assertion failed: {msg}");
                 }
             }
@@ -664,16 +672,16 @@ fn test() -> i32 {
             inline_code!("<T>"),
             inline_code!("MyData<T>"),
             [
-                inline_code!("fn new(key: i32, repeat: T) -> MyData<T>"),
-                inline_code!("fn get_buf(self: MyData<T>) -> [T; 16]"),
-                inline_code!("fn get_key(self: MyData<T>) -> i32"),
+                inline_code!("?comptime fn new(key: i32, repeat: T) -> MyData<T>"),
+                inline_code!("fn get_buf(self) -> [T; 16]"),
+                inline_code!("fn get_key(self) -> i32"),
             ],
             None
         )?;
 
         fn foo<Data: Copy + 'static>(compiler: &mut CraneliftJIT<()>, new: EdlTypeId) -> Result<(), anyhow::Error> {
             jit_func!(for (&format!("MyData<{}>", any::type_name::<Data>())) impl compiler, fn(new),
-                fn new_data<(T = Data), const (N = 16): usize>(key: i32, repeat: T) -> MyData<T>
+                const fn new_data<(T = Data), const (N = 16): usize>(key: i32, repeat: T) -> MyData<T>
                 where T: Copy,
                     T: 'static; {
                     info!("mem::size_of::<[{}; {}]>() = {}", any::type_name::<T>(), N, mem::size_of::<[T; N]>());
@@ -713,7 +721,7 @@ fn print_mantra() {
 
 fn test() -> i32 {
     println("creating `MyData` instance...");
-    let data: MyData<f32> = MyData::new(1234, 1.234_f32);
+    let data: MyData = MyData::new(1234, 1.234_f32);
     println("asserting key...");
     println(data.get_key());
     println(data.get_key() == 1234);
@@ -721,6 +729,9 @@ fn test() -> i32 {
 
     assert(data.get_key() == 1234, "wrong key");
     let buf: [f32; 16] = data.get_buf();
+    let mut a: [f32; 16] = [42.0f32; 16];
+    a[0] = buf[0];
+    println(a[0]);
     assert(buf[0usize] == 1.234f32, "wrong data at index 0");
     assert(buf[3usize] == 1.234f32, "wrong data at index 3");
     assert(buf[7usize] == 1.234f32, "wrong data at index 7");
@@ -732,9 +743,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), edlc_core::inline_code!("test()"))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -756,7 +767,7 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
@@ -785,13 +796,13 @@ fn test() -> i32 {
             inline_code!("<>"),
             inline_code!("MyData"),
             [
-                inline_code!("fn new() -> MyData"),
+                inline_code!("fn new() -> Self"),
                 inline_code!(r#"
-                fn test(this: MyData, domain: usize, msg1: str, msg2: str);
+                fn test(self, domain: usize, msg1: str, msg2: str);
                 "#),
 
                 inline_code!(r#"
-                fn test2(this: MyData, domain: usize, msg1: str, msg2: str, test: i32);
+                fn test2(self, domain: usize, msg1: str, msg2: str, test: i32);
                 "#),
 
                 inline_code!(r#"
@@ -813,17 +824,18 @@ fn test() -> i32 {
                 dims: [usize; 3],       // -> R8?
                 name: FatPtr            // -> stack spill
             ) -> [usize; 3] where; {
-                let runtime = runtime.as_ref().unwrap().read().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let runtime = runtime.read().unwrap();
                 println!("Running test function...");
                 println!("Runtime: {runtime:?}");
                 let fields = fields.map(|s| unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(s.ptr.0 as *const u8, s.size)
+                        std::slice::from_raw_parts(s.ptr.0, s.size)
                     )
                 });
                 let name = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(name.ptr.0 as *const u8, name.size)
+                        std::slice::from_raw_parts(name.ptr.0, name.size)
                     )
                 };
                 println!("foo ({name}):");
@@ -851,12 +863,12 @@ fn test() -> i32 {
                 info!("test: runtime = {runtime:?}, data = {data}, domain = {domain}");
                 let msg1_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg1.ptr.0 as *const u8, msg1.size)
+                        std::slice::from_raw_parts(msg1.ptr.0, msg1.size)
                     )
                 };
                 let msg2_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg2.ptr.0 as *const u8, msg2.size)
+                        std::slice::from_raw_parts(msg2.ptr.0, msg2.size)
                     )
                 };
                 println!("msg1 = {msg1:?} equal msg1 = {msg1_str}");
@@ -875,12 +887,12 @@ fn test() -> i32 {
                 println!("test: runtime = {runtime:?}, data = {data}, domain = {domain}");
                 let msg1_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg1.ptr.0 as *const u8, msg1.size)
+                        std::slice::from_raw_parts(msg1.ptr.0, msg1.size)
                     )
                 };
                 let msg2_str = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg2.ptr.0 as *const u8, msg2.size)
+                        std::slice::from_raw_parts(msg2.ptr.0, msg2.size)
                     )
                 };
                 println!("msg1 = {msg1:?} equal msg1 = {msg1_str}");
@@ -903,15 +915,15 @@ fn test() -> i32 {
     let buffers = [0usize, 1usize, 2usize];
     let dims = [2usize, 1usize, 2usize];
     println("...");
-    let test: [usize; 3] = MyData::foo(fields, buffers, dims, "rino!");
+    let test: [usize; 3] = MyData::foo(fields, buffers, dims, "bar!");
     println("done testing foo!");
     0
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -935,7 +947,7 @@ fn test() -> i32 {
             fn println<>(line: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                        slice::from_raw_parts(line.ptr.0, line.size))
                 };
                 println!("{}", msg);
             }
@@ -958,20 +970,20 @@ fn test() -> i32 {
             inline_code!("<>"),
             inline_code!("Resource"),
             [
-                inline_code!("comptime fn new(val: str) -> Resource"),
-                inline_code!("fn print(self: Resource)")
+                inline_code!("comptime fn new(val: str) -> Self"),
+                inline_code!("fn print(self)")
             ],
             None,
         )?;
 
         jit_func!(for ("Resource") impl &mut compiler, fn(fs[0]), 0,
             const fn new<>(runtime: MyRuntime, value: FatPtr) -> usize where; {
-                let mut runtime = runtime.as_ref().unwrap()
-                    .write().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let mut runtime = runtime.write().unwrap();
                 let id = runtime.res.len();
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(value.ptr.0 as *const u8, value.size)
+                        std::slice::from_raw_parts(value.ptr.0, value.size)
                     )
                 };
                 runtime.res.push(msg.to_string());
@@ -980,10 +992,10 @@ fn test() -> i32 {
         );
         jit_func!(for ("Resource") impl &mut compiler, fn(fs[1]), 0,
             fn print_res<>(runtime: MyRuntime, this: usize) -> () where; {
-                let runtime = runtime.as_ref().unwrap()
-                    .read().unwrap();
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let runtime = runtime.read().unwrap();
                 if this > runtime.res.len() {
-                    jit_intrinsic_panic!(&format!("invalid resource with id `{this}`"));
+                    panic!("invalid resource with id `{this}`");
                 }
                 println!("{}", runtime.res[this]);
             }
@@ -1147,37 +1159,10 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
-        assert_eq!(11, compiler.backend.get_runtime(0.into())?.read().unwrap().res.len());
-
-        // test documentation function
-        struct SimpleDocPrinter {}
-
-        impl DocGenerator for SimpleDocPrinter {
-            type Error = ();
-            fn insert_definition(&mut self, item: &Item) -> Result<(), ()> {
-                println!("{item}");
-                Ok(())
-            }
-        }
-
-        println!("documentation:");
-        compiler.compiler.generate_docs(&mut SimpleDocPrinter {});
-
-        if !fs::exists("test")? {
-            fs::create_dir("test")?;
-        }
-        if !fs::exists("test/docs")? {
-            fs::create_dir("test/docs")?;
-        }
-
-        println!("\ngenerating docs...\n");
-        // let mut html_gen = edl_docs::HtmlGenerator::new(
-        //     BufWriter::new(File::create("test/docs/index.html")?));
-        // compiler.compiler.generate_docs(&mut html_gen);
-        // html_gen.finish()?;
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
+        assert_eq!(compiler.backend.get_runtime(0.into())?.read().unwrap().res.len(), 9);
         Ok(())
     }
 
@@ -1251,9 +1236,9 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
         Ok(())
     }
 
@@ -1327,9 +1312,9 @@ fn single_iter(i: f64, comptime j: f64) -> usize {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
         Ok(())
     }
 
@@ -1375,9 +1360,9 @@ fn test() -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test()"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn() -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(), 0);
         Ok(())
     }
 
@@ -1602,7 +1587,7 @@ type BoundaryCondition<T, const N: usize, const DIM: usize> = struct {
 };
 
 impl<T, const N: usize, const DIM: usize> BoundaryField<T, N, DIM> {
-    fn set_bc(self: Self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
+    fn set_bc(self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
         print("setting boundary for BoundaryField<");
         print(N);
         print(", ");
@@ -1625,7 +1610,7 @@ impl<T, const N: usize, const DIM: usize> BoundaryCondition<T, N, DIM> {
 
 
 impl MyData {
-    fn print(self: Self) {
+    fn print(self) {
         println(self.a);
         println(self.b);
     }
@@ -1636,7 +1621,7 @@ impl<T> PhyNum<T> {
         PhyNum { val, unit }
     }
 
-    fn print(self: Self) {
+    fn print(self) {
         print(self.val);
         print(" ");
         println(self.unit);
@@ -1667,7 +1652,7 @@ type PrintArray<T, const N: usize> = struct {
 };
 
 impl<T, const N: usize> PrintArray<T, N> {
-    fn print(self: Self) {
+    fn print(self) {
         print_array(self.data)
     }
 }
@@ -1725,19 +1710,656 @@ fn test(f: f64) -> i32 {
 }
         "#))?;
 
-        let program: TypedProgram<i32, _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"test(3.14)"#))?;
-        assert_eq!(0, program.exec(&mut compiler.backend)?);
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_function_resolve_bug_debug() -> Result<(), anyhow::Error> {
+        let _ = crate::setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn println<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                println!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn println_i32<>(val: i32) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn println_usize<>(val: usize) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn println_bool<>(val: bool) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn println_f64<>(val: f64) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_f32<>(val: f32) -> () where; {
+                println!("{}", val);
+            }
+        );
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn print<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn print<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                print!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn print_i32<>(val: i32) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn print_usize<>(val: usize) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn print_bool<>(val: bool) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn print_f64<>(val: f64) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn print_f32<>(val: f32) -> () where; {
+                print!("{}", val);
+            }
+        );
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct PhyNum<T> {
+            val: T,
+            unit: FatPtr,
+        }
+
+        impl<T: MirLayout + 'static> MirLayout for PhyNum<T> {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<T>("val".to_string(), types, mem::offset_of!(Self, val));
+                builder.add_type::<FatPtr>("unit".to_string(), types, mem::offset_of!(Self, unit));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type PhyNum<T> = struct {
+            val: T,
+            unit: str,
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<PhyNum<f64>>(inline_code!("PhyNum<f64>"))?;
+        compiler.compiler.insert_type_instance::<PhyNum<f32>>(inline_code!("PhyNum<f32>"))?;
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct SVector<T, const N: usize> {
+            data: [T; N],
+        }
+
+        impl<T: MirLayout + 'static, const N: usize> MirLayout for SVector<T, N>
+        where [T; N]: MirLayout + 'static {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<[T; N]>("data".to_string(), types, mem::offset_of!(Self, data));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type SVector<T, const N: usize> = struct {
+            data: [T; N],
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 1>>(inline_code!("SVector<f64, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 2>>(inline_code!("SVector<f64, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 3>>(inline_code!("SVector<f64, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 4>>(inline_code!("SVector<f64, 4>"))?;
+
+        compiler.compiler.insert_type_instance::<SVector<f32, 1>>(inline_code!("SVector<f32, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 2>>(inline_code!("SVector<f32, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 3>>(inline_code!("SVector<f32, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 4>>(inline_code!("SVector<f32, 4>"))?;
+
+        let env = compiler.compiler.parse_fn_signature(inline_code!("?comptime fn env<T>(name: str, def: T) -> T"))?;
+        jit_func!(compiler, fn<"PhyNum<f64>";>(env),
+            const fn env_num_f64<>(_name: FatPtr, def: PhyNum<f64>) -> PhyNum<f64> where; {
+                PhyNum {
+                    unit: def.unit,
+                    val: std::f64::consts::PI + def.val,
+                }
+            }
+        );
+
+        trait Zero {
+            fn zero() -> Self;
+        }
+
+        impl Zero for f32 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        impl Zero for f64 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        let zero_gradient = compiler.compiler
+            .parse_fn_signature(inline_code!(r#"
+            ?comptime fn zero_gradient<T, const N: usize, const DIM: usize>() -> [SVector<T, N>; DIM]
+            "#))?;
+
+        fn impl_grad<T: Zero + Copy + 'static, const N: usize, const DIM: usize>(
+            comp: &mut CraneliftJIT<()>,
+            zero_gradient: EdlTypeId,
+        ) -> Result<(), anyhow::Error> {
+            jit_func!(comp, fn<any::type_name::<T>(), &format!("{N}"), &format!("{DIM}");>(zero_gradient),
+                const fn zero_gradient_<(T_=T), const (N_=N): usize, const (DIM_=DIM): usize>()
+                -> [SVector<T_, N_>; DIM_] where T_: Zero, T_: Copy; {
+                    [0; DIM_].map(|_| SVector { data: [T_::zero(); N_] })
+                }
+            );
+            Ok(())
+        }
+        impl_grad::<f32, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f32, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 4>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 4>(&mut compiler, zero_gradient)?;
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::println;
+use std::print;
+use std::PhyNum;
+use std::SVector;
+
+/// Time step size
+let time_step: PhyNum<f64> = PhyNum { val: 1.0e-3, unit: "ns" };
+
+type MyData = struct {
+    a: i32,
+    b: i32,
+};
+
+type BoundaryField<T, const N: usize, const DIM: usize> = struct {
+    element: SVector<T, N>,
+};
+
+type BoundaryCondition<T, const N: usize, const DIM: usize> = struct {
+    name: str,
+    gradient: [SVector<T, N>; DIM],
+};
+
+impl<T, const N: usize, const DIM: usize> BoundaryField<T, N, DIM> {
+    fn set_bc(self, id: usize, bc: BoundaryCondition<T, N, DIM>) {
+        print("setting boundary for BoundaryField<");
+        print(N);
+        print(", ");
+        print(DIM);
+        print("> with id ");
+        println(id);
+        // print(" to condition ");
+        // PrintArray { data: self.element.data }.print();
+    }
+}
+
+impl<T, const N: usize, const DIM: usize> BoundaryCondition<T, N, DIM> {
+    ?comptime fn von_neumann(grad: [SVector<T, N>; DIM]) -> Self {
+        BoundaryCondition {
+            name: "von-neumann",
+            gradient: grad,
+        }
+    }
+}
+
+
+impl MyData {
+    fn print(self) {
+        println(self.a);
+        println(self.b);
+    }
+}
+
+impl<T> PhyNum<T> {
+    fn new(val: T, unit: str) -> Self {
+        PhyNum { val, unit }
+    }
+
+    fn print(self) {
+        print(self.val);
+        print(" ");
+        println(self.unit);
+    }
+}
+
+fn non_dim<T>(val: PhyNum<T>) -> T {
+    val.val
+}
+
+fn add_vec<const N: usize>(mut array: [f32; N], val: f32) -> [f32; N] {
+    let mut i: usize = 0;
+    loop {
+        if i >= N { break; }
+        array[i] += val;
+        i += 1;
+    }
+    array
+}
+
+fn test_array<T, const N: usize>(array: [T; N], val: T) -> [T; N] {
+    println("test_array");
+    array
+}
+
+type PrintArray<T, const N: usize> = struct {
+    data: [T; N],
+};
+
+impl<T, const N: usize> PrintArray<T, N> {
+    fn print(self) {
+        print_array(self.data)
+    }
+}
+
+fn print_array<T, const N: usize>(val: [T; N]) {
+    let mut i: usize = 0;
+    print("[");
+    loop {
+        if i >= N { break }
+        if i != 0 {
+            print(", ");
+        }
+        print(val[i]);
+        i += 1;
+    }
+    println("]");
+}
+
+fn test(f: f64) -> i32 {
+    println("starting test");
+    let num = PhyNum::new(0.32_f64, "s");
+    println(num.val);
+    num.print();
+
+    println(non_dim(PhyNum::new(42.0_f64, "m")));
+    let tmp: PhyNum<f64> = std::env("T", PhyNum::new(3.0_f64, "s"));
+    println(non_dim(std::env("test", PhyNum::new(0.0_f64, "m"))));
+    tmp.print();
+
+    let val = add_vec([0.0, 0.0, 1.0, 2.0], 0.1415);
+    print_array(val);
+
+    let val = test_array([0.0; 3], 1.0_f32);
+    PrintArray { data: val }.print();
+
+    MyData {
+        a: 42,
+        b: 23,
+    }.print();
+
+
+    // test some deeper going type inference
+    println("");
+    println("-----------------------------------------------------");
+    println("");
+    let grad: [SVector<f32, 3>; 3] = std::zero_gradient();
+    let vec = grad[1];
+    let arr = vec.data;
+    print_array(arr);
+    print_array(grad[1].data);
+
+    let field: BoundaryField<f64, 3, 3> = BoundaryField {
+        element: SVector { data: [0.0; 3] },
+    };
+
+    let grad = std::zero_gradient::<f32, 3, 3>();
+    field.set_bc(1, BoundaryCondition::von_neumann(std::zero_gradient()));
+    0
+}
+        "#))?;
+
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
 
         // test external script insert
-        let script: TypedProgram<(), _> = compiler
-            .compile_expr(&vec!["test"].into(), inline_code!(r#"{
-            println(" -------------------------------- ");
-            println(" -> externally compiled script <- ");
-            println("----------------------------------");
-            time_step.print();
-        }"#))?;
-        script.exec(&mut compiler.backend)?;
+        // let output_type = compiler.compiler.phase.types.empty();
+        // let script: TypedProgram<(), _> = compiler
+        //     .quick_eval(&vec!["test"].into(), &inline_code!(r#"{
+        //     println(" -------------------------------- ");
+        //     println(" -> externally compiled script <- ");
+        //     println("----------------------------------");
+        //     time_step.print();
+        // }"#), &EdlMaybeType::Fixed(output_type), Context::Runtime)?;
+        // script.exec(&mut compiler.backend)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_generic_resolve_issue() -> Result<(), anyhow::Error> {
+        let _ = crate::setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn println<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn println<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                println!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn println_i32<>(val: i32) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn println_usize<>(val: usize) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn println_bool<>(val: bool) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn println_f64<>(val: f64) -> () where; {
+                println!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn println_f32<>(val: f32) -> () where; {
+                println!("{}", val);
+            }
+        );
+
+        let fn_id = compiler.compiler.parse_fn_signature(inline_code!("fn print<T>(val: T)"))?;
+        jit_func!(compiler, fn<"str";>(fn_id),
+            fn print<>(line: FatPtr) -> () where; {
+                let msg = unsafe {
+                    std::str::from_utf8_unchecked(
+                        slice::from_raw_parts(line.ptr.0 as *const u8, line.size))
+                };
+                print!("{}", msg);
+            }
+        );
+        jit_func!(compiler, fn<"i32";>(fn_id),
+            fn print_i32<>(val: i32) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"usize";>(fn_id),
+            fn print_usize<>(val: usize) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"bool";>(fn_id),
+            fn print_bool<>(val: bool) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f64";>(fn_id),
+            fn print_f64<>(val: f64) -> () where; {
+                print!("{}", val);
+            }
+        );
+        jit_func!(compiler, fn<"f32";>(fn_id),
+            fn print_f32<>(val: f32) -> () where; {
+                print!("{}", val);
+            }
+        );
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct PhyNum<T> {
+            val: T,
+            unit: FatPtr,
+        }
+
+        impl<T: MirLayout + 'static> MirLayout for PhyNum<T> {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<T>("val".to_string(), types, mem::offset_of!(Self, val));
+                builder.add_type::<FatPtr>("unit".to_string(), types, mem::offset_of!(Self, unit));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type PhyNum<T> = struct {
+            val: T,
+            unit: str,
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<PhyNum<f64>>(inline_code!("PhyNum<f64>"))?;
+        compiler.compiler.insert_type_instance::<PhyNum<f32>>(inline_code!("PhyNum<f32>"))?;
+
+        let mut options = LayoutOptions::default();
+        options.can_init = true;
+        options.repr = EdlRepresentation::C;
+
+        #[repr(C)]
+        struct SVector<T, const N: usize> {
+            data: [T; N],
+        }
+
+        impl<T: MirLayout + 'static, const N: usize> MirLayout for SVector<T, N>
+        where [T; N]: MirLayout + 'static {
+            fn layout(types: &MirTypeRegistry) -> Layout {
+                let mut builder = OffsetStructLayoutBuilder::default();
+                builder.add_type::<[T; N]>("data".to_string(), types, mem::offset_of!(Self, data));
+                builder.make::<Self>(types)
+            }
+        }
+
+        compiler.compiler.define_type(inline_code!(r#"type SVector<T, const N: usize> = struct {
+            data: [T; N],
+        };"#), options)?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 1>>(inline_code!("SVector<f64, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 2>>(inline_code!("SVector<f64, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 3>>(inline_code!("SVector<f64, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f64, 4>>(inline_code!("SVector<f64, 4>"))?;
+
+        compiler.compiler.insert_type_instance::<SVector<f32, 1>>(inline_code!("SVector<f32, 1>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 2>>(inline_code!("SVector<f32, 2>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 3>>(inline_code!("SVector<f32, 3>"))?;
+        compiler.compiler.insert_type_instance::<SVector<f32, 4>>(inline_code!("SVector<f32, 4>"))?;
+
+        let env = compiler.compiler.parse_fn_signature(inline_code!("?comptime fn env<T>(name: str, def: T) -> T"))?;
+        jit_func!(compiler, fn<"PhyNum<f64>";>(env),
+            const fn env_num_f64<>(_name: FatPtr, def: PhyNum<f64>) -> PhyNum<f64> where; {
+                PhyNum {
+                    unit: def.unit,
+                    val: std::f64::consts::PI + def.val,
+                }
+            }
+        );
+
+        trait Zero {
+            fn zero() -> Self;
+        }
+
+        impl Zero for f32 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        impl Zero for f64 {
+            fn zero() -> Self {
+                0.0
+            }
+        }
+
+        let zero_gradient = compiler.compiler
+            .parse_fn_signature(inline_code!(r#"
+            ?comptime fn zero_gradient<T, const N: usize, const DIM: usize>() -> [SVector<T, N>; DIM]
+            "#))?;
+
+        fn impl_grad<T: Zero + Copy + 'static, const N: usize, const DIM: usize>(
+            comp: &mut CraneliftJIT<()>,
+            zero_gradient: EdlTypeId,
+        ) -> Result<(), anyhow::Error> {
+            jit_func!(comp, fn<any::type_name::<T>(), &format!("{N}"), &format!("{DIM}");>(zero_gradient),
+                const fn zero_gradient_<(T_=T), const (N_=N): usize, const (DIM_=DIM): usize>()
+                -> [SVector<T_, N_>; DIM_] where T_: Zero, T_: Copy; {
+                    [0; DIM_].map(|_| SVector { data: [T_::zero(); N_] })
+                }
+            );
+            Ok(())
+        }
+        impl_grad::<f32, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f32, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f32, 4, 4>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 1, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 2, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 1>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 1>(&mut compiler, zero_gradient)?;
+
+        impl_grad::<f64, 2, 2>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 3, 3>(&mut compiler, zero_gradient)?;
+        impl_grad::<f64, 4, 4>(&mut compiler, zero_gradient)?;
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::println;
+use std::print;
+use std::PhyNum;
+
+/// Time step size
+let time_step: PhyNum<f64> = PhyNum { val: 1.0e-3, unit: "ns" };
+
+impl<T> PhyNum<T> {
+    fn new(val: T, unit: str) -> Self {
+        PhyNum { val, unit }
+    }
+
+    fn print(self) {
+        let value: T = self.val;
+        print(self.val);
+        print(" ");
+        println(self.unit);
+    }
+}
+
+impl core::Add<PhyNum<f64>, PhyNum<f64>> for PhyNum<f64> {
+    fn add(self, rhs: Self) -> Self {
+        PhyNum { val: self.val + rhs.val, unit: self.unit }
+    }
+}
+
+fn test(f: f64) -> i32 {
+    println("starting test");
+    let num: PhyNum<f64> = PhyNum::new(0.32_f64, "s");
+    num.print();
+    let val = time_step.val;
+
+    let other: PhyNum<f64> = PhyNum::new(10.0_f64, "s");
+    let res = num + other;
+    res.print();
+
+    let names = ["a", "b", "c", "d"];
+    let matrix: [[f64; 4]; 4] = [
+        [0.0, 0.1, 0.2, 0.3],
+        [1.0, 1.1, 1.2, 1.3],
+        [2.0, 2.1, 2.2, 2.3],
+        [3.0, 3.1, 3.2, 3.3],
+    ];
+
+    // print some matrix is an example of nested loops, because that apparently lead to some issues
+    // previously
+    let mut i = 0usize;
+    loop {
+        if i >= 4 { break }
+        let mut j = 0usize;
+        print(names[i]);
+        print("  [");
+        loop {
+            if j >= 4 { break }
+            if j > 0 {
+                print(", ");
+            }
+
+            print("(");
+            let mut k = 0usize;
+            loop {
+                if k >= 2 { break }
+                if k > 0 {
+                    print(", ");
+                }
+                print(matrix[i][j] + k as f64 * 100.0);
+                k += 1;
+            }
+            print(")");
+            j += 1;
+        }
+        println("]");
+        i += 1;
+    }
+    0
+}
+        "#))?;
+
+        let program: extern "C" fn(f64) -> i32 = compiler
+            .get_named_function(inline_code!("test"))?;
+        assert_eq!(program(3.14), 0);
         Ok(())
     }
 }

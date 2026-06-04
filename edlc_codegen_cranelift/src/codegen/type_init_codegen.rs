@@ -1,47 +1,49 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use edlc_core::prelude::mir_expr::mir_type_init::MirTypeInit;
-use edlc_core::prelude::{MirError, MirPhase};
-use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
-use crate::codegen::{code_ctx, Compilable, FunctionTranslator};
+use crate::codegen::{Compilable, FunctionTranslator};
 use crate::compiler::JIT;
-use crate::prelude::AggregateValue;
+use edlc_core::prelude::mir_expr::mir_type_init::{MirInitAssign, MirTypeInit};
+use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
+use edlc_core::prelude::{MirError, MirPhase};
 
 impl<Runtime> Compilable<Runtime> for MirTypeInit {
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        let size = phase.types.byte_size(self.ty)
-            .ok_or(MirError::UnknownType(self.ty))?;
-        let align = phase.types.byte_alignment(self.ty)
-            .ok_or(MirError::UnknownType(self.ty))?;
-
-        let slot = backend.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size as u32,
-            align as u8,
-        ));
-        // write member data
-        for member in self.inits.into_iter() {
-            let value = member.val.compile(backend, phase)?;
-            value.store_to_stack(slot, member.off as i32, code_ctx!(backend, phase))?;
+        phase: &mut MirPhase,
+        _cfg: &MirFlowGraph,
+        target: &MirValue,
+        _expr_id: &MirExprId,
+    ) -> Result<(), MirError<JIT<Runtime>>> {
+        let target_ty = *backend.layout.get_ty(target).unwrap();
+        assert_eq!(target_ty, self.ty);
+        for MirInitAssign { off, val } in &self.inits {
+            backend.layout.cpy_offset(
+                val,
+                target,
+                *off as i32,
+                &mut backend.ir_values,
+                &mut backend.builder,
+                &phase.types,
+                &backend.abi,
+            );
         }
-        AggregateValue::from_slot(slot, self.ty, code_ctx!(backend, phase))
+        Ok(())
     }
 }

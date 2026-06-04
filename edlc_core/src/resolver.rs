@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 mod namespace;
@@ -19,7 +21,7 @@ mod namespace;
 use std::collections::{HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
-use rand::{Rng, thread_rng};
+use rand::Rng;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use crate::core::edl_error::EdlError;
@@ -30,7 +32,10 @@ use crate::core::edl_type::{EdlAliasId, EdlConstId, EdlEnvId, EdlTraitInstance, 
 use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::file::ModuleSrc;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
+use crate::report::ReportableError;
 use crate::resolver::namespace::Namespace;
 
 
@@ -184,6 +189,27 @@ impl Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
+impl ReportableError for ResolveError {
+    fn report_err(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc) {
+        // TODO implement this properly
+        phase.report_error(
+            TypeArguments::new(&[
+                TypeArgument::new_display(&"name resolver error"),
+            ]),
+            &[
+                SrcError::Single {
+                    src: src.clone(),
+                    pos: pos.clone().into(),
+                    error: TypeArguments::new(&[
+                        TypeArgument::new_display(&"error message not fully implemented yet"),
+                    ])
+                }
+            ],
+            None,
+        );
+    }
+}
+
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StructType {
@@ -212,8 +238,8 @@ pub struct ScopeId(usize, usize);
 
 impl ScopeId {
     pub fn rand() -> Self {
-        let mut rng = thread_rng();
-        ScopeId(rng.gen(), rng.gen())
+        let mut rng = rand::rng();
+        ScopeId(rng.next_u64() as usize, rng.next_u64() as usize)
     }
 }
 
@@ -1776,6 +1802,8 @@ mod test {
                     scope: *resolver.current_scope().unwrap(),
                     comptime: false,
                     comptime_only: false,
+                    async_: false,
+                    async_return: false,
                     ret: reg.empty(),
                     params: vec![],
                 },

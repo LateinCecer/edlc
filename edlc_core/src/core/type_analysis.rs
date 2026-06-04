@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 mod order;
@@ -23,7 +25,7 @@ use std::collections::HashMap;
 use std::error::Error;
 pub use constraints::EnvConstraint;
 pub use constraints::EnvConstraintStack;
-pub use fn_constraint::SigConstraint;
+pub use fn_constraint::{SigConstraint, AutoRefState, AutoReference};
 
 use crate::core::edl_error::EdlError;
 use crate::core::edl_param_env::{EdlGenericParamValue, EdlGenericParamVariant, EdlParameterDef};
@@ -159,9 +161,35 @@ struct ConstInfo {
 struct ExternalConstInfo(InternalConstUid);
 
 #[derive(Debug, Clone)]
+pub enum InferErrorCtx {
+    TypeEq(TypeUid, TypeUid),
+    TypeInstance(TypeUid, Box<EdlTypeInstance>),
+    ConstEq(ExtConstUid, ExtConstUid),
+    ConstInstance(ExtConstUid, Box<EdlConstValue>),
+    InternalConstEq(InternalConstUid, InternalConstUid),
+    InternalConstInstance(InternalConstUid, Box<EdlConstValue>),
+    GenericEq(GenericsUid, GenericsUid),
+    GenericInstance(GenericsUid, Box<EdlParameterDef>),
+    ForceFloat,
+    ForceInteger,
+    Internal(&'static str),
+}
+
+#[derive(Debug, Clone)]
 pub struct InferError {
     pub pos: NodeId,
     pub err: EdlError,
+    pub ctx: InferErrorCtx,
+}
+
+impl InferError {
+    fn replace_ctx(self, ctx: InferErrorCtx) -> InferError {
+        InferError {
+            pos: self.pos,
+            err: self.err,
+            ctx,
+        }
+    }
 }
 
 impl Display for InferError {
@@ -173,25 +201,26 @@ impl Display for InferError {
 impl Error for InferError {}
 
 pub trait WrapInferError {
-    fn at(self, pos: NodeId) -> InferError;
+    fn at(self, pos: NodeId, ctx: InferErrorCtx) -> InferError;
 }
 
 pub trait WrapInferResult<R> {
-    fn at(self, pos: NodeId) -> Result<R, InferError>;
+    fn at(self, pos: NodeId, ctx: InferErrorCtx) -> Result<R, InferError>;
 }
 
 impl WrapInferError for EdlError {
-    fn at(self, pos: NodeId) -> InferError {
+    fn at(self, pos: NodeId, ctx: InferErrorCtx) -> InferError {
         InferError {
             pos,
             err: self,
+            ctx,
         }
     }
 }
 
 impl<R, E: WrapInferError> WrapInferResult<R> for Result<R, E> {
-    fn at(self, pos: NodeId) -> Result<R, InferError> {
-        self.map_err(|err| err.at(pos))
+    fn at(self, pos: NodeId, ctx: InferErrorCtx) -> Result<R, InferError> {
+        self.map_err(|err| err.at(pos, ctx))
     }
 }
 
@@ -370,6 +399,7 @@ impl InferState {
                 Err(InferError {
                     pos: node,
                     err: EdlError::E074,
+                    ctx: InferErrorCtx::ForceFloat,
                 })
             }
         }
@@ -393,6 +423,7 @@ impl InferState {
                 Err(InferError {
                     pos: node,
                     err: EdlError::E074,
+                    ctx: InferErrorCtx::ForceInteger,
                 })
             }
         }
@@ -423,7 +454,7 @@ impl InferState {
         }
     }
 
-    fn find_type(&self, uid: TypeUid, reg: &EdlTypeRegistry) -> EdlMaybeType {
+    pub(crate) fn find_type(&self, uid: TypeUid, reg: &EdlTypeRegistry) -> EdlMaybeType {
         let base = self.types[uid.0].base;
         let Some(base_ty) = self.base_types[base.0] else {
             return EdlMaybeType::Unknown;
@@ -480,12 +511,12 @@ impl InferState {
         Some(env_instance)
     }
 
-    fn find_const(&self, uid: InternalConstUid) -> Option<EdlConstValue> {
+    pub(crate) fn find_const(&self, uid: InternalConstUid) -> Option<EdlConstValue> {
         self.consts.get(uid.0)
             .and_then(|val| val.value.clone())
     }
 
-    fn find_ext_const(&self, uid: ExtConstUid) -> Option<EdlConstValue> {
+    pub(crate) fn find_ext_const(&self, uid: ExtConstUid) -> Option<EdlConstValue> {
         self.external_consts.get(uid.0)
             .and_then(|val| self.find_const(val.0))
     }
@@ -574,7 +605,7 @@ impl InferState {
         uid: GenericsUid,
         base: BaseUid,
         reg: &EdlTypeRegistry,
-        node_id: NodeId
+        node_id: NodeId,
     ) {
         let Some(base) = self.base_types[base.0] else {
             assert!(self.generics[uid.0].is_none());
@@ -611,7 +642,8 @@ impl InferState {
                             EdlGenericParamVariant::Const(ty) => Some(*ty),
                             _ => None,
                         })) {
-                    self.eq_base_ty(self.consts[got.0].ty, exp).at(node_id).unwrap();
+                    self.eq_base_ty(self.consts[got.0].ty, exp)
+                        .at(node_id, InferErrorCtx::Internal("enforce generic")).unwrap();
                 }
                 return;
             }
@@ -673,20 +705,25 @@ impl InferState {
         if let EdlType::Generic { env_id, index } = reg.get_type(rhs.ty).unwrap() {
             if let Some(stack) = stack.as_ref() {
                 if let Some(replacement) = stack.get_type(*env_id, *index) {
-                    return self.eq_type(lhs, replacement, node, reg);
+                    return self.eq_type(lhs, replacement, node, reg)
+                        .map_err(|err| err
+                            .replace_ctx(InferErrorCtx::TypeInstance(lhs, Box::new(rhs.clone()))));
                 }
             }
         }
 
-        let lhs = &self.types[lhs.0];
-        let lhs_ty = lhs.base;
-        let lhs_generics = lhs.generics;
+        let lhs_info = &self.types[lhs.0];
+        let lhs_ty = lhs_info.base;
+        let lhs_generics = lhs_info.generics;
         self.eq_base_ty(lhs_ty, rhs.ty)
             .map_err(|err| InferError {
                 pos: node,
                 err,
+                ctx: InferErrorCtx::TypeInstance(lhs, Box::new(rhs.clone())),
             })?;
         self.eq_generics_def(lhs_generics, &rhs.param, stack, node, reg)
+            .map_err(|err| err
+                .replace_ctx(InferErrorCtx::TypeInstance(lhs, Box::new(rhs.clone()))))
     }
 
     fn try_eq_type(
@@ -718,10 +755,13 @@ impl InferState {
             .map_err(|err| InferError {
                 pos: node,
                 err,
+                ctx: InferErrorCtx::TypeEq(lhs, rhs),
             })?;
         self.enforce_generic(self.types[lhs.0].generics, self.types[lhs.0].base, reg, node);
         self.enforce_generic(self.types[rhs.0].generics, self.types[rhs.0].base, reg, node);
-        ok.join(self.eq_generics(self.types[lhs.0].generics, self.types[rhs.0].generics, node, reg)?);
+        ok.join(self
+            .eq_generics(self.types[lhs.0].generics, self.types[rhs.0].generics, node, reg)
+            .map_err(|err| err.replace_ctx(InferErrorCtx::TypeEq(lhs, rhs)))?);
         Ok(ok)
     }
 
@@ -848,7 +888,8 @@ impl InferState {
             match param {
                 EdlGenericParamValue::Type(ty) => {
                     let id = self.generics[lhs.0].as_ref().unwrap().generics[type_id];
-                    ok.join(self.eq_type_instance(id, ty, stack, node, reg)?);
+                    ok.join(self.eq_type_instance(id, ty, stack, node, reg)
+                        .map_err(|err| err.replace_ctx(InferErrorCtx::GenericInstance(lhs, Box::new(def.clone()))))?);
                     type_id += 1;
                 }
                 EdlGenericParamValue::ElicitType => {
@@ -860,13 +901,15 @@ impl InferState {
                         if let Some(stack) = stack.as_ref() {
                             if let Some(c) = stack.get_const(*param, *index) {
                                 let c = self.get_internal_const(c).unwrap();
-                                ok.join(self.eq_const(id, c)?);
+                                ok.join(self.eq_const(id, c)
+                                    .map_err(|err| err.replace_ctx(InferErrorCtx::GenericInstance(lhs, Box::new(def.clone()))))?);
                                 const_id += 1;
                                 continue;
                             }
                         }
                     }
-                    ok.join(self.eq_const_value(id, c.clone())?);
+                    ok.join(self.eq_const_value(id, c.clone())
+                        .map_err(|err| err.replace_ctx(InferErrorCtx::GenericInstance(lhs, Box::new(def.clone()))))?);
                     const_id += 1;
                 }
                 EdlGenericParamValue::ElicitConst(ty) => {
@@ -876,6 +919,7 @@ impl InferState {
                         .map_err(|err| InferError {
                             pos: node,
                             err,
+                            ctx: InferErrorCtx::GenericInstance(lhs, Box::new(def.clone())),
                         })?);
                     const_id += 1;
                 }
@@ -966,12 +1010,14 @@ impl InferState {
         let mut checking_ok = InferOk::default();
         assert_eq!(lhs_generics.len(), rhs_generics.len());
         for (lhs_ty, rhs_ty) in lhs_generics.into_iter().zip(rhs_generics.into_iter()) {
-            checking_ok.join(self.eq_type(lhs_ty, rhs_ty, node, reg)?);
+            checking_ok.join(self.eq_type(lhs_ty, rhs_ty, node, reg)
+                .map_err(|err| err.replace_ctx(InferErrorCtx::GenericEq(lhs, rhs)))?);
         }
         // compare consts
         assert_eq!(lhs_consts.len(), rhs_consts.len());
         for (lhs_c, rhs_c) in lhs_consts.into_iter().zip(rhs_consts.into_iter()) {
-            checking_ok.join(self.eq_const(lhs_c, rhs_c)?);
+            checking_ok.join(self.eq_const(lhs_c, rhs_c)
+                .map_err(|err| err.replace_ctx(InferErrorCtx::GenericEq(lhs, rhs)))?);
         }
         // compare regions
         assert_eq!(lhs_regions.len(), rhs_regions.len());
@@ -980,6 +1026,7 @@ impl InferState {
                 .map_err(|err| InferError {
                     pos: node,
                     err,
+                    ctx: InferErrorCtx::GenericEq(lhs, rhs),
                 })?);
         }
 
@@ -1075,8 +1122,8 @@ impl InferState {
         } else {
             Err(EdlError::E006 {
                 exp: Box::new(lhs_c.get().value.as_ref().unwrap().clone()),
-                got: Box::new(value),
-            }.at(lhs_c.get().node_id))
+                got: Box::new(value.clone()),
+            }.at(lhs_c.get().node_id, InferErrorCtx::InternalConstInstance(lhs, Box::new(value))))
         }
     }
 
@@ -1101,7 +1148,7 @@ impl InferState {
         let lhs_ty = self.consts[lhs.0].ty;
         let rhs_ty = self.consts[rhs.0].ty;
         let node_id = self.consts[lhs.0].node_id;
-        self.eq_base(lhs_ty, rhs_ty).map_err(|err| err.at(node_id))?;
+        self.eq_base(lhs_ty, rhs_ty).map_err(|err| err.at(node_id, InferErrorCtx::InternalConstEq(lhs, rhs)))?;
 
         let lhs_c = &self.consts[lhs.0];
         let rhs_c = &self.consts[rhs.0];
@@ -1134,7 +1181,7 @@ impl InferState {
             Err(EdlError::E006 {
                 exp: Box::new(lhs_c.value.as_ref().cloned().unwrap()),
                 got: Box::new(rhs_c.value.as_ref().cloned().unwrap()),
-            }.at(lhs_c.node_id))
+            }.at(lhs_c.node_id, InferErrorCtx::InternalConstEq(lhs, rhs)))
         }
     }
 
@@ -1280,6 +1327,24 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         self.state.get_or_insert_var(var_id, node)
     }
 
+    pub fn new_reference_type(&mut self, ref_of: TypeUid, node: NodeId, mutable: Option<bool>) -> TypeUid {
+        let uid = self.new_type(node);
+        let ref_ty = self.type_reg
+            .new_ref(EdlMaybeType::Unknown, mutable.map(EdlConstValue::from_bool))
+            .unwrap();
+
+        <InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(
+            &mut self.at(node),
+            &uid,
+            &ref_ty,
+        ).unwrap();
+        let x = self.get_generic_type(uid, 0).unwrap();
+        self.at(node)
+            .eq(&x.uid, &ref_of)
+            .unwrap();
+        uid
+    }
+
     /// Extracts an EDL type from the type inferer, based on the provided type UID.
     /// If no type with that ID exists, or if no information about that type is present in the
     /// inferer, `EdlMaybeType::Unknown` is returned.
@@ -1416,6 +1481,9 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         Some(env_id)
     }
 
+    /// Gets the generic type at the given index from the parameter environment of the type.
+    /// The index corresponds to the index of the generic parameter in the environment directly;
+    /// don't overthink it ;)
     pub fn get_generic_type(&mut self, base: TypeUid, index: usize) -> Option<GenericType> {
         let env_id = self.get_base_type_env(base)?;
         let flat_index = GenericType::flat_index(index, env_id, &self.type_reg);
@@ -1427,6 +1495,9 @@ impl<'reg, 'state> Infer<'reg, 'state> {
         })
     }
 
+    /// Gets the generic constant at the given index from the parameter environment of the type.
+    /// The index corresponds to the index of the generic parameter in the environment directly;
+    /// don't overthink it ;)
     pub fn get_generic_const(&mut self, base: TypeUid, index: usize) -> Option<GenericConst> {
         let env_id = self.get_base_type_env(base)?;
         let flat_index = GenericConst::flat_index(index, env_id, &self.type_reg);
@@ -1642,8 +1713,7 @@ pub struct InferAt<'a, 'reg, 'state> {
 
 impl<'a, 'reg, 'state> InferAt<'a, 'reg, 'state> {
     pub fn auto_deference(&mut self, value: TypeUid) -> (TypeUid, bool) {
-        if matches!(self.ctx.find_type(value), EdlMaybeType::Fixed(ty)
-            if ty.ty == edl_type::EDL_REF || ty.ty == edl_type::EDL_MUT_REF) {
+        if matches!(self.ctx.find_type(value), EdlMaybeType::Fixed(ty) if ty.ty == edl_type::EDL_REF) {
             (self.ctx.get_generic_type(value, 0).unwrap().uid, true)
         } else {
             (value, false)
@@ -1709,7 +1779,7 @@ impl<'a, 'reg, 'state> InferAt<'a, 'reg, 'state> {
         }
 
         let ty = c_value.get_type(self.ctx.type_reg)
-            .map_err(|err| err.at(self.id))?;
+            .map_err(|err| err.at(self.id, InferErrorCtx::Internal("insert external const")))?;
         let c = self.ctx.new_ext_const_with_type(self.id, ty);
         self.eq(&c, c_value)?;
         Ok(c)
@@ -1719,7 +1789,7 @@ impl<'a, 'reg, 'state> InferAt<'a, 'reg, 'state> {
         let c = self.ctx.state.get_internal_const(c).unwrap();
         let lhs = self.ctx.state.consts[c.0].ty;
         let rhs = self.ctx.state.types[ty.0].base;
-        self.ctx.state.eq_base(lhs, rhs).at(self.id)
+        self.ctx.state.eq_base(lhs, rhs).at(self.id, InferErrorCtx::Internal("insert constant type"))
     }
 }
 
@@ -1808,14 +1878,18 @@ impl<'a> InferEq<ExtConstUid, EdlConstValue> for InferAt<'a, '_, '_> {
 
         let base = self.ctx.find_const_from_ext(*lhs).unwrap();
         let rhs_ty = rhs.get_type(&self.ctx.type_reg)
-            .map_err(|err| err.at(self.ctx.state.consts[base.0].node_id))?;
+            .map_err(|err| err.at(
+                self.ctx.state.consts[base.0].node_id,
+                InferErrorCtx::ConstInstance(*lhs, Box::new(rhs.clone()))
+            ))?;
         let base_uid = self.ctx.state.consts[base.0].ty;
         let node_id = self.ctx.state.consts[base.0].node_id;
         self.ctx.state
             .eq_base_ty(base_uid, rhs_ty)
-            .at(node_id)?;
+            .at(node_id, InferErrorCtx::ConstInstance(*lhs, Box::new(rhs.clone())))?;
         self.ctx.state
             .eq_const_value(base, rhs.clone())
+            .map_err(|err| err.replace_ctx(InferErrorCtx::ConstInstance(*lhs, Box::new(rhs.clone()))))
     }
 }
 
@@ -1831,7 +1905,10 @@ impl<'a> InferTryEq<ExtConstUid, EdlConstValue> for InferAt<'a, '_, '_> {
 
         let base = self.ctx.find_const_from_ext(*lhs).unwrap();
         let rhs_ty = rhs.get_type(&self.ctx.type_reg)
-            .map_err(|err| err.at(self.ctx.state.consts[base.0].node_id))
+            .map_err(|err| err.at(
+                self.ctx.state.consts[base.0].node_id,
+                InferErrorCtx::ConstInstance(*lhs, Box::new(rhs.clone()))
+            ))
             .unwrap();
         let base_uid = self.ctx.state.consts[base.0].ty;
         if !self.ctx.state
@@ -1952,6 +2029,12 @@ impl GenericType {
     }
 }
 
+impl From<GenericType> for TypeUid {
+    fn from(value: GenericType) -> Self {
+        value.uid
+    }
+}
+
 impl GenericConst {
     pub fn new(uid: ExtConstUid, index: usize, env_id: EdlEnvId, reg: &EdlTypeRegistry) -> Self {
         let index = Self::flat_index(index, env_id, reg);
@@ -1961,6 +2044,8 @@ impl GenericConst {
         }
     }
 
+    /// Transforms the index of a generic parameter in the parameter environment of a type to the
+    /// index of a generic constant.
     fn flat_index(index: usize, env_id: EdlEnvId, reg: &EdlTypeRegistry) -> usize {
         let env = reg.get_env(env_id).unwrap();
         assert!(matches!(&env.params[index].variant, EdlGenericParamVariant::Const(_)));
@@ -1971,6 +2056,12 @@ impl GenericConst {
             .filter(|param| matches!(&param.variant, EdlGenericParamVariant::Const(_)))
             .count();
         index
+    }
+}
+
+impl From<GenericConst> for ExtConstUid {
+    fn from(value: GenericConst) -> Self {
+        value.uid
     }
 }
 
@@ -2031,6 +2122,7 @@ mod test {
     use crate::core::type_analysis::{Infer, InferEq, InferState, InferSub, InferTryEq, NodeIdGen};
     use crate::issue::{TypeArgument, TypeArguments};
     use std::fmt::{Display, Formatter};
+    use std::hash::DefaultHasher;
     use crate::inline_code;
     use crate::lexer::SrcPos;
 
@@ -2088,7 +2180,7 @@ mod test {
 
         impl Display for TyFormatter<'_, '_> {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                TypeArguments::new(&[TypeArgument::new_type(self.ty)])
+                TypeArguments::new(&[TypeArgument::<'_, DefaultHasher>::new_type(self.ty)])
                     .fmt(f, self.reg, self.vars)
             }
         }

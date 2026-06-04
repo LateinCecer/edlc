@@ -1,23 +1,26 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::ast::ast_error::AstTranslationError;
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::{AstElement, IntoHir};
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::core::binop::BinaryOp;
 use crate::core::edl_trait;
 use crate::file::ModuleSrc;
@@ -154,6 +157,10 @@ impl IntoHir for AstBinaryExpr {
             self.lhs.clone().hir_repr(parser)?,
             self.rhs.hir_repr(parser)?,
         ];
+        let modifiers = vec![
+            CallParamModifier::Mutable,
+            CallParamModifier::None,
+        ];
         let trait_instance = parser.types.new_trait_instance(trait_id).unwrap();
         let mut out: HirExpression = HirFunctionCall::with_trait(
             self.pos,
@@ -163,6 +170,7 @@ impl IntoHir for AstBinaryExpr {
             generic_params,
             trait_instance,
             params,
+            modifiers,
         ).into();
 
         if matches!(self.op, BinaryOp::Neq | BinaryOp::Geq | BinaryOp::Leq) {

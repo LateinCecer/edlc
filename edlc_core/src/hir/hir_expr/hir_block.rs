@@ -1,44 +1,53 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::collections::HashSet;
-use std::error::Error;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_block::MirBlock;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{Context, DebugSymbols, MirValue, ValueScope};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::resolver::ScopeId;
+use std::collections::HashSet;
+use std::error::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// The return value of a block is always immutable.
+    /// This is a design decision; however, it should be noted that Rust makes the same design
+    /// decision.
+    /// Having mutable expression evals for blocks would be confusing for the user; it would also
+    /// be even more confusing to have syntax deviating from that of Rust in a language that is
+    /// otherwise so close to it.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -258,7 +267,7 @@ impl ResolveFn for HirBlock {
 impl ResolveNames for HirBlock {
     fn resolve_names(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         let prev_scope = *phase.res.current_scope()
-            .map_err(|err| HirError::new_res(self.pos, err))?;
+            .map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         phase.res.revert_to_scope(&self.scope);
         phase.pos = self.pos;
 
@@ -332,10 +341,14 @@ impl ResolveTypes for HirBlock {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let own_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -360,6 +373,11 @@ impl ResolveTypes for HirBlock {
         } else {
             None
         }
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -435,17 +453,6 @@ impl HirExpr for HirBlock {
 impl EdlFnArgument for HirBlock {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        if let Some(ret) = self.ret.as_ref() {
-            ret.is_mutable(state)
-        } else {
-            Ok(true)
-        }
-    }
-
     /// A block is `const_expr` exactly when **all** items in the block are.
     fn const_expr(
         &self,
@@ -462,43 +469,99 @@ impl EdlFnArgument for HirBlock {
     }
 }
 
-impl IntoMir for HirBlock {
-    type MirRepr = MirBlock;
-
-    fn mir_repr<B: Backend>(
+impl HirBlock {
+    /// Writes the contents of the HIR block into the MIR flow graph.
+    /// Unlike [HirBlock::write_to_graph], this function does not create a new MIR block.
+    pub(super) fn write_to_graph_plane<B: Backend>(
         &self,
-        edl_types: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        let mut content = Vec::new();
-        for item in  self.content.iter() {
-            content.push(item.mir_repr(edl_types, mir_phase, mir_funcs)?);
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        for statement in self.content.iter() {
+            let value_ty = statement.mir_type(graph)?;
+            let value = graph.graph.create_temp_variable(value_ty);
+            statement.write_to_graph(graph, value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // early return in statement
+            }
         }
-        let value = match &self.ret {
-            Some(val) => Some(Box::new(val.mir_repr(edl_types, mir_phase, mir_funcs)?)),
-            None => None,
-        };
-        // get return type
-        let ty = match &value {
-            Some(val) => {
-                val.get_type(mir_funcs, mir_phase)
-            },
-            None => {
-                mir_phase.types.empty()
-            },
-        };
 
-        Ok(MirBlock {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            value,
-            content,
-            ty,
-            comptime: self.comptime,
-        })
+        if let Some(ret) = self.ret.as_ref() {
+            // we are passing the return value by value here. make sure MIR knows that the value
+            // is moved
+            let target_ty = *graph.graph.get_var_type(&target);
+            let tmp = graph.graph.create_temp_variable(target_ty);
+            ret.write_to_graph(graph, tmp)?;
+            if !graph.is_current_sealed() {
+                graph.graph.insert_move(
+                    graph.current_block, tmp, target, DebugSymbols { pos: self.pos });
+            }
+        } else {
+            let empty = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                empty,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        Ok(())
+    }
+}
+
+impl MakeGraph for HirBlock {
+    fn write_to_graph<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block);
+        let merge_block = merge_block.build();
+        // make sure to record that `target` lives outside the new block we are about to create
+        let scope = graph.graph.get_block_scope(&merge_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
+
+        // block in HIR always create a new MIR block too;
+        // this makes tracking of debugging information easier and provides an attachment point for
+        // block contexts
+        let mut new_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .create_scope();
+        if self.comptime {
+            new_block = new_block.with_context(Context::Comptime);
+        }
+
+        let new_block = new_block.build();
+        graph.graph.insert_jump(graph.current_block, new_block, DebugSymbols { pos: self.pos });
+        graph.current_block = new_block;
+        self.write_to_graph_plane(graph, target)?;
+
+        if !graph.is_current_sealed() {
+            graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
+        }
+        graph.current_block = merge_block;
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        if let Some(ret) = self.ret.as_ref() {
+            ret.mir_deref_type(graph)
+        } else {
+            Ok(graph.mir_phase.types.empty())
+        }
     }
 }

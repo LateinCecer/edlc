@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::error::Error;
@@ -23,9 +25,6 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::hir::{HirError, HirFmt, HirPhase};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
 
 #[derive(Clone, Debug)]
 pub enum HirTranslationError {
@@ -42,7 +41,8 @@ pub enum HirTranslationError {
     EdlError(EdlError),
     UnresolvedParameterName { pos: SrcPos, name: String },
     CannotAssignToExpr { pos: SrcPos, msg: String },
-    RecursionInHybridFunction { pos: SrcPos }
+    RecursionInHybridFunction { pos: SrcPos },
+    ExpectedReference { pos: SrcPos, got: EdlTypeInstance },
 }
 
 impl Display for HirTranslationError {
@@ -88,6 +88,9 @@ impl Display for HirTranslationError {
             HirTranslationError::RecursionInHybridFunction { pos } => {
                 write!(f, "call at {pos} generates a recursive callstack for a hybrid function, \
                 which is illegal")
+            }
+            HirTranslationError::ExpectedReference { pos, got } => {
+                write!(f, "call at {pos} expected a reference but got type {got:?} instead")
             }
         }
     }
@@ -135,6 +138,11 @@ impl HirFmt for HirTranslationError {
             Self::EdlError(err) => {
                 err.pretty_fmt(f, &phase.types, &phase.vars)
             },
+            Self::ExpectedReference { pos, got } => {
+                write!(f, "Expected reference at pos {pos} but got type `")?;
+                got.fmt_type(f, &phase.types)?;
+                write!(f, "` instead")
+            }
 
             err => write!(f, "{err}")
         }
@@ -148,18 +156,6 @@ impl From<EdlError> for HirTranslationError {
 }
 
 impl Error for HirTranslationError {}
-
-
-pub trait IntoMir {
-    type MirRepr;
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>;
-}
 
 impl From<HirError> for HirTranslationError {
     fn from(value: HirError) -> Self {

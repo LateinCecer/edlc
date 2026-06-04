@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 //! This module contains code used by the compiler to pretty print & explain error messages.
@@ -27,9 +29,12 @@ use ansi_term::{Colour, Style};
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Arguments, Debug, Display, Formatter};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::marker::PhantomData;
+use std::ptr::NonNull;
 use std::sync::mpsc::Sender;
 use serde::{Deserialize, Serialize};
-use crate::core::edl_type::{EdlTypeRegistry, FmtType};
+use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
 
 
 #[derive(Default, Clone, Debug)]
@@ -96,11 +101,11 @@ pub struct CompilerReport {
 
 impl CompilerReport {
     fn new(
-        args: TypeArguments,
-        errors: &[SrcError],
+        args: TypeArguments<'_, DefaultHasher>,
+        errors: &[SrcError<'_, DefaultHasher>],
         level: ReportLevel,
         types: &EdlTypeRegistry,
-        vars: &EdlVarRegistry
+        vars: &EdlVarRegistry,
     ) -> Self {
         CompilerReport {
             msg: args.to_string(types, vars),
@@ -130,14 +135,67 @@ where T: FmtType {
     }
 }
 
-pub enum TypeArgument<'a> {
+macro_rules! impl_edl_display(
+    (type $T:ty) => (
+impl EdlDisplay for $T {
+    fn fmt_edl(&self, f: &mut Formatter<'_>, info: &TypeArgInformation<'_>) -> Result<(), fmt::Error> {
+        self.fmt_type(f, info.types)
+    }
+}
+    );
+    (var $T:ty) => (
+impl EdlDisplay for $T {
+    fn fmt_edl(&self, f: &mut Formatter<'_>, info: &TypeArgInformation<'_>) -> Result<(), fmt::Error> {
+        self.fmt_var(f, info.types, info.vars)
+    }
+}
+    );
+);
+
+impl_edl_display!(type EdlTypeInstance);
+impl_edl_display!(type EdlTraitInstance);
+impl_edl_display!(type EdlMaybeType);
+impl_edl_display!(type EdlParameterDef);
+impl_edl_display!(type EdlFnInstance);
+impl_edl_display!(type EdlFnSignature);
+impl_edl_display!(var EdlVarId);
+
+impl EdlDisplay for EdlTypeId {
+    fn fmt_edl(&self, f: &mut Formatter<'_>, info: &TypeArgInformation<'_>) -> Result<(), fmt::Error> {
+        info.types.fmt_type(*self, f)
+    }
+}
+
+pub struct TypeArgInformation<'a> {
+    types: &'a EdlTypeRegistry,
+    vars: &'a EdlVarRegistry,
+}
+
+pub trait EdlDisplay {
+    fn fmt_edl(&self, f: &mut Formatter<'_>, info: &TypeArgInformation<'_>) -> Result<(), fmt::Error>;
+}
+
+pub enum TypeArgument<'a, H: Hasher> {
     TypeArg(&'a dyn FmtType),
     VarArg(&'a dyn FmtVar),
     Arg(Arguments<'a>),
     String(String),
+    Str(&'a str),
+    General {
+        ptr: NonNull<()>,
+        formatter: fn(&(), fmt: &mut Formatter<'_>) -> Result<(), fmt::Error>,
+        hasher: fn(&(), hasher: &mut H),
+        _lifetime: PhantomData<&'a ()>,
+    },
+    Types {
+        ptr: NonNull<()>,
+        formatter: fn(&(), fmt: &mut Formatter<'_>, info: &TypeArgInformation<'_>) -> Result<(), fmt::Error>,
+        hasher: fn(&(), hasher: &mut H),
+        _lifetime: PhantomData<&'a ()>,
+    },
 }
 
-impl<'a> TypeArgument<'a> {
+impl<'a, H: Hasher> TypeArgument<'a, H> {
     pub fn new_arg(arg: Arguments<'a>) -> Self {
         Self::Arg(arg)
     }
@@ -151,47 +209,130 @@ impl<'a> TypeArgument<'a> {
 
     pub fn new_var(arg: &'a dyn FmtVar) -> Self { Self::VarArg(arg) }
 
+    pub fn new_display<A: std::fmt::Display + std::hash::Hash>(arg: &'a A) -> Self {
+        Self::General {
+            ptr: NonNull::<A>::from_ref(arg).cast(),
+            // # Safety: the `formatter` function pointer will only ever be called with `ptr` as the
+            // argument for `self`, which is the right type.
+            formatter: unsafe {
+                let f: fn(&A, &mut Formatter<'_>) -> Result<(), fmt::Error> = A::fmt;
+                std::mem::transmute::<
+                    fn(&A, &mut Formatter<'_>) -> Result<(), fmt::Error>,
+                    fn(&(), &mut Formatter<'_>) -> Result<(), fmt::Error>,
+                >(f)
+            },
+            // # Safety: the `hasher` function pointer will only ever be called with `ptr` as the
+            // argument for `self`, which is the right type.
+            hasher: unsafe {
+                std::mem::transmute::<
+                    fn(&A, &mut H),
+                    fn(&(), &mut H),
+                >(A::hash)
+            },
+            _lifetime: PhantomData,
+        }
+    }
+
+    pub fn new_edl<A: EdlDisplay + std::hash::Hash>(arg: &'a A) -> Self {
+        Self::Types {
+            ptr: NonNull::<A>::from_ref(arg).cast(),
+            // # Safety: the `formatter` function pointer will only ever be called with `ptr` as the
+            // argument for `self`, which is the right type.
+            formatter: unsafe {
+                let f: fn(&A, &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error> = A::fmt_edl;
+                std::mem::transmute::<
+                    fn(&A, &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error>,
+                    fn(&(), &mut Formatter<'_>, &TypeArgInformation) -> Result<(), fmt::Error>,
+                >(f)
+            },
+            // # Safety: the `hasher` function pointer will only ever be called with `ptr` as the
+            // argument for `self`, which is the right type.
+            hasher: unsafe {
+                std::mem::transmute::<
+                    fn(&A, &mut H),
+                    fn(&(), &mut H),
+                >(A::hash)
+            },
+            _lifetime: PhantomData,
+        }
+    }
+
     fn fmt(&self, fmt: &mut Formatter<'_>, types: &EdlTypeRegistry, vars: &EdlVarRegistry) -> Result<(), fmt::Error> {
         match self {
             Self::Arg(args) => std::fmt::Display::fmt(args, fmt),
             Self::TypeArg(arg) => arg.fmt_type(fmt, types),
             Self::String(str) => std::fmt::Display::fmt(str, fmt),
             Self::VarArg(args) => args.fmt_var(fmt, types, vars),
+            TypeArgument::Str(s) => {
+                std::fmt::Display::fmt(s, fmt)
+            }
+            TypeArgument::General { ptr, formatter, .. } => {
+                unsafe {
+                    formatter(ptr.as_ref(), fmt)
+                }
+                // write!(fmt, "placeholder")
+            }
+            TypeArgument::Types { ptr, formatter, .. } => {
+                unsafe {
+                    formatter(ptr.as_ref(), fmt, &TypeArgInformation { types, vars } )
+                }
+                // write!(fmt, "placeholder")
+            }
+        }
+    }
+
+    fn arg_hash(&self, state: &mut H) {
+        match self {
+            TypeArgument::TypeArg(_) => panic!(),
+            TypeArgument::VarArg(_) => panic!(),
+            TypeArgument::Arg(_) => panic!(),
+            TypeArgument::String(s) => s.hash(state),
+            TypeArgument::Str(s) => s.hash(state),
+            TypeArgument::General { ptr, hasher, .. } => {
+                unsafe {
+                    hasher(ptr.as_ref(), state)
+                }
+            }
+            TypeArgument::Types { ptr, hasher, .. } => {
+                unsafe {
+                    hasher(ptr.as_ref(), state)
+                }
+            }
         }
     }
 }
 
-impl<'a> From<Arguments<'a>> for TypeArgument<'a> {
+impl<'a, H: Hasher> From<Arguments<'a>> for TypeArgument<'a, H> {
     fn from(args: Arguments<'a>) -> Self {
         TypeArgument::new_arg(args)
     }
 }
 
-impl<'a> From<&'a dyn FmtType> for TypeArgument<'a> {
+impl<'a, H: Hasher> From<&'a dyn FmtType> for TypeArgument<'a, H> {
     fn from(arg: &'a dyn FmtType) -> Self {
         TypeArgument::new_type(arg)
     }
 }
 
-impl<'a> From<&'a dyn FmtVar> for TypeArgument<'a> {
+impl<'a, H: Hasher> From<&'a dyn FmtVar> for TypeArgument<'a, H> {
     fn from(arg: &'a dyn FmtVar) -> Self {
         TypeArgument::new_var(arg)
     }
 }
 
-impl<'a> From<String>  for TypeArgument<'a> {
+impl<'a, H: Hasher> From<String>  for TypeArgument<'a, H> {
     fn from(value: String) -> Self {
         TypeArgument::new_string(value)
     }
 }
 
 #[derive(Clone, Copy)]
-pub struct TypeArguments<'a> {
-    args: &'a [TypeArgument<'a>],
+pub struct TypeArguments<'a, H: Hasher> {
+    args: &'a [TypeArgument<'a, H>],
 }
 
 pub struct Fmt<'a, 'reg> {
-    args: &'a TypeArguments<'a>,
+    args: &'a TypeArguments<'a, DefaultHasher>,
     types: &'reg EdlTypeRegistry,
     vars: &'reg EdlVarRegistry,
 }
@@ -202,8 +343,8 @@ impl<'a, 'reg> Display for Fmt<'a, 'reg> {
     }
 }
 
-impl<'a> TypeArguments<'a> {
-    pub fn new(args: &'a [TypeArgument<'a>]) -> Self {
+impl<'a, H: Hasher> TypeArguments<'a, H> {
+    pub fn new(args: &'a [TypeArgument<'a, H>]) -> Self {
         TypeArguments {
             args,
         }
@@ -216,6 +357,12 @@ impl<'a> TypeArguments<'a> {
         Ok(())
     }
 
+    pub fn arg_hash(&self, state: &mut H) {
+        self.args.iter().for_each(|arg| arg.arg_hash(state));
+    }
+}
+
+impl<'a> TypeArguments<'a, DefaultHasher> {
     /// Turns the type arguments into an `std::alloc::String`
     pub fn to_string(&self, types: &EdlTypeRegistry, vars: &EdlVarRegistry) -> String {
         format!("{}", Fmt { args: self, types, vars })
@@ -234,11 +381,14 @@ macro_rules! format_type_args(
     )
 );
 pub(crate) use format_type_args;
+use crate::core::edl_fn::EdlFnSignature;
+use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_var::{EdlVarRegistry, FmtVar};
+use crate::core::EdlVarId;
 
 // main implementation of the issue formatter.
 impl<'a> IssueFormatter<'a> {
-    pub fn error(&mut self, args: TypeArguments, errors: &[SrcError]) -> Result<(), FmtError> {
+    pub fn error(&mut self, args: TypeArguments<'_, DefaultHasher>, errors: &[SrcError<'_, DefaultHasher>]) -> Result<(), FmtError> {
         match &mut self.mode {
             ReportTarget::Printout => {
                 let color = TokenColors::color_from_hex(0xcbc9cfff);
@@ -248,7 +398,7 @@ impl<'a> IssueFormatter<'a> {
                     Colour::RGB(color.0, color.1, color.2).paint(": "),
                     Colour::RGB(color.0, color.1, color.2).paint(Self::text_wrap(&args.to_string(&self.phase.types, &self.phase.vars), 120, 0)));
 
-                for err in errors.into_iter() {
+                for err in errors.iter() {
                     self.fmt_error(err, Colour::Red.into())?;
                 }
             },
@@ -260,7 +410,7 @@ impl<'a> IssueFormatter<'a> {
         Ok(())
     }
 
-    pub fn warn(&mut self, args: TypeArguments, errors: &[SrcError]) -> Result<(), FmtError> {
+    pub fn warn(&mut self, args: TypeArguments<'_, DefaultHasher>, errors: &[SrcError<'_, DefaultHasher>]) -> Result<(), FmtError> {
         match &mut self.mode {
             ReportTarget::Printout => {
                 let color = TokenColors::color_from_hex(0xcbc9cfff);
@@ -273,7 +423,7 @@ impl<'a> IssueFormatter<'a> {
 
                 let text_color = TokenColors::color_from_hex(0xff9900ff);
                 let text_style = Colour::RGB(text_color.0, text_color.1, text_color.2);
-                for err in errors.into_iter() {
+                for err in errors.iter() {
                     self.fmt_error(err, text_style.into())?;
                 }
             },
@@ -499,7 +649,7 @@ impl<'a> IssueFormatter<'a> {
         out
     }
 
-    fn fmt_error<'b>(&mut self, error: &SrcError<'b>, style: Style) -> Result<(), FmtError> {
+    fn fmt_error<'b>(&mut self, error: &SrcError<'b, DefaultHasher>, style: Style) -> Result<(), FmtError> {
         print!("{}", Colour::Blue.bold().paint("  --> "));
         match error {
             SrcError::Single {
@@ -580,27 +730,27 @@ impl From<SrcPos> for SrcRange {
     }
 }
 
-pub enum SrcError<'a> {
+pub enum SrcError<'a, H: Hasher> {
     Single {
         pos: SrcRange,
         src: ModuleSrc,
-        error: TypeArguments<'a>,
+        error: TypeArguments<'a, H>,
     },
     Double {
         first: SrcRange,
         second: SrcRange,
         src: ModuleSrc,
-        error_first: TypeArguments<'a>,
-        error_second: TypeArguments<'a>,
+        error_first: TypeArguments<'a, H>,
+        error_second: TypeArguments<'a, H>,
     }
 }
 
-impl<'a> SrcError<'a> {
-    pub fn single(pos: SrcPos, src: ModuleSrc, error: TypeArguments<'a>) -> Self {
+impl<'a, H: Hasher> SrcError<'a, H> {
+    pub fn single(pos: SrcPos, src: ModuleSrc, error: TypeArguments<'a, H>) -> Self {
         SrcError::Single { pos: pos.into(), src, error, }
     }
 
-    pub fn double(first: SrcPos, first_error: TypeArguments<'a>, second: SrcPos, second_error: TypeArguments<'a>, src: ModuleSrc) -> Self {
+    pub fn double(first: SrcPos, first_error: TypeArguments<'a, H>, second: SrcPos, second_error: TypeArguments<'a, H>, src: ModuleSrc) -> Self {
         SrcError::Double { first: first.into(), error_first: first_error, second: second.into(), error_second: second_error, src, }
     }
 }
@@ -624,7 +774,7 @@ pub enum CachedError {
 }
 
 impl<'a> CachedError {
-    fn map(value: &'a SrcError<'a>, types: &EdlTypeRegistry, vars: &EdlVarRegistry) -> Self {
+    fn map(value: &'a SrcError<'a, DefaultHasher>, types: &EdlTypeRegistry, vars: &EdlVarRegistry) -> Self {
         match value {
             SrcError::Single { pos, src, error } => {
                 CachedError::Single {

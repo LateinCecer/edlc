@@ -1,164 +1,82 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::mem;
-use crate::file::ModuleSrc;
-use crate::hir::HirPhase;
-use crate::lexer::SrcPos;
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::{MirExpr, MirTreeWalker};
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::resolver::ScopeId;
+use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirInitAssign {
     pub off: usize,
-    pub val: MirExpr,
+    pub val: MirValue,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirTypeInit {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub ty: MirTypeId,
     pub inits: Vec<MirInitAssign>,
 }
 
-impl From<MirTypeInit> for MirExpr {
-    fn from(value: MirTypeInit) -> Self {
-        MirExpr::Init(value)
-    }
-}
-
-impl MirInitAssign {
-    fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        funcs: &mut B,
-        hir_phase: &mut HirPhase
-    ) -> Result<Option<Vec<MirInitAssign>>, MirError<B>> {
-        self.val.optimize(phase, funcs, hir_phase)?;
-        // check if nested inits can be flattened
-        if let MirExpr::Init(val) = &self.val {
-            let parent_off = self.off;
-            // value is an init value itself
-            let values = val.inits.iter().map(|m| {
-                let mut m = m.clone();
-                m.off += parent_off;
-                m
-            }).collect::<Vec<_>>();
-            Ok(Some(values))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-impl<B: Backend> MirTreeWalker<B> for MirTypeInit {
-    fn walk<F, T, R>(&self, filter: &F, task: &T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: Fn(&MirExpr) -> bool,
-        T: Fn(&MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut results = Vec::new();
-        for el in self.inits.iter() {
-            results.append(&mut el.val.walk(filter, task)?);
-        }
-        Ok(results)
-    }
-
-    fn walk_mut<F, T, R>(&mut self, filter: &mut F, task: &mut T) -> Result<Vec<R>, MirError<B>>
-    where
-        F: FnMut(&MirExpr) -> bool,
-        T: FnMut(&mut MirExpr) -> Result<R, MirError<B>>
-    {
-        let mut results = Vec::new();
-        for el in self.inits.iter_mut() {
-            results.append(&mut el.val.walk_mut(filter, task)?);
-        }
-        Ok(results)
-    }
-}
-
 impl MirTypeInit {
-    pub fn terminates<B: Backend>(&self, types: &MirTypeRegistry) -> Result<bool, MirError<B>> {
-        for m in self.inits.iter() {
-            if m.val.terminates(types)? {
-                return Ok(true)
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn early_returns<B: Backend>(&self, types: &MirTypeRegistry) -> Result<bool, MirError<B>> {
-        for m in self.inits.iter() {
-            if m.val.early_returns(types)? {
-                return Ok(true)
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn verify<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &MirFuncRegistry<B>,
-        hir_phase: &mut HirPhase
-    ) -> Result<(), MirError<B>> {
-        for m in self.inits.iter_mut() {
-            m.val.verify(phase, backend, hir_phase)?;
-        }
-        Ok(())
-    }
-
-    pub fn optimize<B: Backend>(
-        &mut self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-        hir_phase: &mut HirPhase,
-    ) -> Result<(), MirError<B>> {
-        let mut inits = Vec::new();
-        mem::swap(&mut inits, &mut self.inits);
-        for mut m in inits.into_iter() {
-            if let Some(mut replacement) = m.optimize(phase, backend, hir_phase)? {
-                self.inits.append(&mut replacement);
-            } else {
-                self.inits.push(m);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<B: Backend> IsConstExpr<B> for MirTypeInit {
-    fn is_const_expr(
+    pub fn execute(
         &self,
-        phase: &MirPhase,
-        funcs: &MirFuncRegistry<B>
-    ) -> Result<bool, MirError<B>> {
-        for m in self.inits.iter() {
-            if !m.val.is_const_expr(phase, funcs)? {
-                return Ok(false);
-            }
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        _reg: &MirTypeRegistry,
+    ) -> Result<(), ExecutionError> {
+        let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
+        assert_eq!(target_ty, self.ty);
+        for MirInitAssign { off, val } in self.inits.iter() {
+            let source = stack_frame.get_offset(val, vm).unwrap();
+            let dst_offset = target_range.start + *off;
+            vm.memcpy(
+                &(dst_offset..(dst_offset + source.0.len()), source.1),
+                &source,
+            );
         }
-        Ok(true)
+        Ok(())
+    }
+
+    pub(super) fn is_avail(
+        &self,
+        frame: &ConstFrame,
+        graph: &BorrowGraph,
+    ) -> bool {
+        self.inits.iter().all(|param| frame.is_avail(&param.val, graph))
     }
 }
 
+impl MirGraphElement for MirTypeInit {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        self.inits.iter().map(|item| item.val).collect()
+    }
 
+    fn uses_var(&self, val: &MirValue) -> bool {
+        self.inits.iter().any(|item| &item.val == val)
+    }
+
+    fn replace_var(&mut self, var: &MirValue, repl: &MirValue) {
+        self.inits.iter_mut().for_each(|item| if &item.val == var {
+            item.val = *repl;
+        })
+    }
+}

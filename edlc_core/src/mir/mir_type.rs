@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 pub mod layout;
@@ -40,6 +42,7 @@ use crate::mir::mir_backend::Backend;
 use crate::mir::mir_funcs::ComptimeParams;
 use crate::mir::mir_str::FatPtr;
 use crate::mir::mir_type::abi::{AbiConfig, AbiLayout};
+use crate::mir::mir_type::layout::Layout;
 use crate::mir::MirError;
 use crate::mir::MirError::UnknownConst;
 use crate::prelude::mir_funcs::UnifiedComptimeParam;
@@ -48,7 +51,13 @@ use crate::prelude::mir_type::layout::MirLayout;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash)]
-pub struct MirTypeId(usize);
+pub struct MirTypeId(pub(crate) usize);
+
+impl Display for MirTypeId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<type {:x}>", self.0)
+    }
+}
 
 pub struct MirLiteralTypes {
     u8: MirTypeId,
@@ -381,7 +390,23 @@ impl StructMember {
 }
 
 #[derive(Clone, Debug, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct MemberOffset(pub usize);
+pub struct MemberOffset {
+    pub offset: usize,
+    pub size: usize,
+    pub align: usize,
+}
+
+impl MemberOffset {
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.offset < other.offset + other.size && other.offset < self.offset + self.size
+    }
+}
+
+impl Display for MemberOffset {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:08x} ({:08x} bytes)", self.offset, self.size)
+    }
+}
 
 pub trait MirAggregateTypeLayout {
     type Index<'a>: ?Sized;
@@ -419,11 +444,11 @@ impl MirAggregateTypeLayout for Vec<StructMember> {
                 StructMember::Member { name, ty } if name == search_name => {
                     let align = types.byte_alignment(*ty).unwrap();
                     assert_eq!(offset % align, 0, "miss-aligned member type encountered");
-                    return Ok(MemberOffset(offset));
+                    return Ok(MemberOffset { offset, size: types.byte_size(*ty).unwrap(), align });
                 }
-                StructMember::Layout { name, align, .. } if name == search_name => {
+                StructMember::Layout { name, align, size, .. } if name == search_name => {
                     assert_eq!(offset % *align, 0, "miss-aligned member type encountered");
-                    return Ok(MemberOffset(offset));
+                    return Ok(MemberOffset { offset, size: *size, align: *align });
                 }
                 StructMember::Member { ty, .. } => {
                     let align = types.byte_alignment(*ty).unwrap();
@@ -616,7 +641,7 @@ impl MirTypeLayout {
         }
     }
 
-    fn float_bytes(&self, size: usize, types: &MirTypeRegistry, flag: &mut ByteLayout) {
+    pub fn float_bytes(&self, size: usize, types: &MirTypeRegistry, flag: &mut ByteLayout) {
         match self {
             Self::Integer => {
                 for _ in 0..size {
@@ -686,6 +711,7 @@ struct TMirType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TMirParams {
+    env: EdlEnvId,
     params: Vec<TMirParamValue>,
 }
 
@@ -793,6 +819,13 @@ impl TMirType {
         }
         Ok(ty)
     }
+
+    fn to_edl(&self) -> EdlTypeInstance {
+        EdlTypeInstance {
+            ty: self.id,
+            param: self.param.to_edl(),
+        }
+    }
 }
 
 impl TMirParamStack {
@@ -806,6 +839,15 @@ impl TMirParamStack {
             stack: output_stack,
         })
     }
+
+    fn to_edl(&self) -> EdlParamStack {
+        let stack: Vec<_> = self.stack.iter()
+            .map(|params| params.to_edl())
+            .collect();
+        EdlParamStack {
+            stack,
+        }
+    }
 }
 
 impl TMirParams {
@@ -815,8 +857,20 @@ impl TMirParams {
             params.push(TMirParamValue::from_edl(param.clone(), reg, edl_types)?);
         }
         Ok(Self {
-            params
+            env: value.env_id,
+            params,
         })
+    }
+
+    fn to_edl(&self) -> EdlParameterDef {
+        let params = self.params
+            .iter()
+            .map(|param| param.to_edl())
+            .collect();
+        EdlParameterDef {
+            params,
+            env_id: self.env,
+        }
     }
 }
 
@@ -848,6 +902,17 @@ impl TMirParamValue {
             }
             EdlGenericParamValue::ElicitType => {
                 Err(EdlError::E017)
+            }
+        }
+    }
+
+    fn to_edl(&self) -> EdlGenericParamValue {
+        match self {
+            TMirParamValue::Type(val) => {
+                EdlGenericParamValue::Type(val.to_edl())
+            }
+            TMirParamValue::Const(val) => {
+                EdlGenericParamValue::Const(EdlConstValue::Literal(val.clone()))
             }
         }
     }
@@ -884,6 +949,7 @@ pub struct MirTypeRegistry {
     variables: IndexMap<MirTypeId>,
     literal_types: Option<MirLiteralTypes>,
     stack: EnvStack,
+    event_type: Option<MirTypeId>,
 }
 
 impl MirTypeRegistry {
@@ -916,7 +982,7 @@ impl MirTypeRegistry {
     }
 
     pub fn get_const_value(
-        &mut self,
+        &self,
         const_val: &EdlConstValue
     ) -> Option<EdlLiteralValue> {
         match const_val {
@@ -1015,6 +1081,20 @@ impl MirTypeRegistry {
         self.literal_types.as_ref().unwrap().never
     }
 
+    pub fn is_plain_old_data(&self, ty: MirTypeId) -> bool {
+        ty == self.i8() || ty == self.i16()
+            || ty == self.i32() || ty == self.i64()
+            || ty == self.i128() || ty == self.isize()
+            || ty == self.u8() || ty == self.u16()
+            || ty == self.u32() || ty == self.u64()
+            || ty == self.u128() || ty == self.usize()
+            || ty == self.f32() || ty == self.f64()
+            || ty == self.bool() || ty == self.char()
+            || ty == self.str() || ty == self.empty()
+            || ty == self.never()
+            || self.is_ref(&ty)
+    }
+
     pub fn is_i_type(&self, ty: MirTypeId) -> bool {
         ty == self.i8() || ty == self.i16()
             || ty == self.i32() || ty == self.i64()
@@ -1086,6 +1166,96 @@ impl MirTypeRegistry {
         Ok(())
     }
 
+    pub fn register_event_type<T: MirLayout + 'static>(
+        &mut self,
+        types: &EdlTypeRegistry,
+    ) -> Result<(), EdlError> {
+        if let Some(event_ty) = types.get_event_type() {
+            let id = self.register::<T>(event_ty.clone(), types)?;
+            self.event_type = Some(id);
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn event_type(&self) -> Option<&MirTypeId> {
+        self.event_type.as_ref()
+    }
+
+    pub fn is_array(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_ARRAY
+    }
+
+    /// Gets the parameter type information for an array type.
+    /// This parameter information includes the element type id and the length of the array.
+    pub fn get_array_type(&self, id: &MirTypeId) -> Option<(MirTypeId, usize)> {
+        if !self.is_array(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        let TMirParamValue::Const(len) = &self.types[id.0].tmir_version.param.params[1] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        let element = *self.conversion_map.get(param).unwrap();
+        let array_length = len.clone().into_usize().unwrap();
+        Some((element, array_length))
+    }
+
+    /// Checks if `id` is a reference.
+    /// This applies for both mutable and immutable references.
+    pub fn is_ref(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_REF
+    }
+
+    /// Returns the mutability of a reference type.
+    /// If `id` is not a reference type, this method panics.
+    pub fn is_ref_mutable(&self, id: &MirTypeId) -> bool {
+        assert_eq!(self.types[id.0].tmir_version.id, edl_type::EDL_REF, "not a reference type");
+
+        // get the mutability from the generics
+        let val = self.types[id.0].tmir_version.param.params[1].clone();
+        if let TMirParamValue::Const(EdlLiteralValue::Bool(mutable)) = val {
+            mutable
+        } else {
+            panic!("mutability of reference not specified / resolved");
+        }
+    }
+
+    /// Returns the base type behind a reference.
+    /// This works for both mutable and immutable references.
+    pub fn get_ref_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
+        if !self.is_ref(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        Some(*self.conversion_map.get(param).unwrap())
+    }
+
+    pub fn is_slice(&self, id: &MirTypeId) -> bool {
+        self.types[id.0].tmir_version.id == edl_type::EDL_SLICE
+    }
+
+    pub fn get_slice_type(&self, id: &MirTypeId) -> Option<MirTypeId> {
+        if !self.is_slice(id) {
+            return None;
+        }
+        let TMirParamValue::Type(param) = &self.types[id.0].tmir_version.param.params[0] else {
+            unreachable!()
+        };
+        // note: unwrap is wanted here, since if `id` exists, then the parameter type must also
+        //       already exist in the conversion map
+        Some(*self.conversion_map.get(param).unwrap())
+    }
+
     /// Inserts a new constant into the MIR type registry.
     /// The type registry then associates a MIR type with the constant.
     pub fn insert_const(&mut self, id: EdlConstId, ty: MirTypeId) {
@@ -1105,6 +1275,8 @@ impl MirTypeRegistry {
             Ok(*value)
         } else if edl_type.ty == edl_type::EDL_ARRAY {
             self.register_array(edl_type.clone(), edl_reg)
+        } else if edl_type.ty == edl_type::EDL_REF {
+            self.register_ref(edl_type.clone(), edl_reg)
         } else {
             // try to generate structured type
             let layout = generation::generate_type(edl_type.clone(), edl_reg, self)?;
@@ -1137,6 +1309,10 @@ impl MirTypeRegistry {
 
     pub fn get_rust_from_type(&self, id: MirTypeId) -> Option<TypeId> {
         self.types.get(id.0).map(|ty| &ty.rust_repr)?.clone()
+    }
+
+    pub fn get_edl_type(&self, id: MirTypeId) -> Option<EdlTypeInstance> {
+        self.types.get(id.0).map(|item| item.tmir_version.to_edl())
     }
 
     /// Registers a new type for the MIR type registry.
@@ -1213,6 +1389,45 @@ impl MirTypeRegistry {
         let mir_id = MirTypeId(self.types.insert(ty));
         self.conversion_map.insert(tmir, mir_id);
         Ok(mir_id)
+    }
+
+    fn register_ref(
+        &mut self,
+        ty: EdlTypeInstance,
+        edl_reg: &EdlTypeRegistry,
+    ) -> Result<MirTypeId, EdlError> {
+        let tmir = TMirType::from_edl(ty.clone(), self, edl_reg)?;
+        if let Some(&id) = self.conversion_map.get(&tmir) {
+            // place the layout
+            return Ok(id);
+        }
+
+        let layout = self.get_reference_layout(ty)?;
+        let ty = MirType {
+            size: layout.size,
+            alignment: layout.align,
+            tmir_version: tmir.clone(),
+            rust_repr: None,
+            layout: layout.layout,
+        };
+        let mir_id = MirTypeId(self.types.insert(ty));
+        self.conversion_map.insert(tmir, mir_id);
+        Ok(mir_id)
+    }
+
+    fn get_reference_layout(
+        &mut self,
+        ty: EdlTypeInstance,
+    ) -> Result<Layout, EdlError> {
+        if ty.ty != edl_type::EDL_REF {
+            return Err(EdlError::E003 { exp: edl_type::EDL_REF, got: ty.ty });
+        }
+
+        Ok(Layout {
+            align: align_of::<*const u8>(),
+            size: size_of::<*const u8>(),
+            layout: MirTypeLayout::Integer,
+        })
     }
 
     fn register_array(

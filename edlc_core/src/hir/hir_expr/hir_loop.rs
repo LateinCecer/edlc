@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_param_env::Adaptable;
@@ -20,23 +22,24 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_loop::MirLoop;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue, ValueScope};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::resolver::ScopeId;
 use std::error::Error;
-
+use crate::core::edl_type;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,10 +129,14 @@ impl ResolveTypes for HirLoop {
                 .eq(&own_uid, &never)
                 .unwrap();
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             own_uid
         }
@@ -144,6 +151,11 @@ impl ResolveTypes for HirLoop {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -225,28 +237,6 @@ impl HirExpr for HirLoop {
 impl EdlFnArgument for HirLoop {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        // if all break statements return a mutable value, the value of the loop itself can also
-        // be considered mutable
-        let id = self.element_id;
-        let mutable = self.block.walk(
-            &mut |expr| match expr {
-                HirExpression::Break(b) => b.refers_to_loop(id),
-                _ => false,
-            },
-            &mut |expr| match expr {
-                HirExpression::Break(b) => b.is_mutable(state),
-                _ => panic!("illegal state"),
-            }
-        )?.into_iter()
-            .reduce(|lhs, rhs| lhs & rhs)
-            .unwrap_or(true);
-        Ok(mutable)
-    }
-
     /// Currently, we cannot check if the loop terminates.
     /// As long as this is not possible, we can also not check if the loop can be interpreted as a
     /// constant value or not.
@@ -258,40 +248,68 @@ impl EdlFnArgument for HirLoop {
     }
 }
 
-impl IntoMir for HirLoop {
-    type MirRepr = MirLoop;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirLoop {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let ty = self.get_type(phase)?;
+        let scope = graph.graph.get_block_scope(&graph.current_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
+
+        let header_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
+            .create_scope()
+            .build();
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .build();
+        graph.loop_mapper.insert(self.element_id, merge_block, header_block, target);
+
+        graph.graph.insert_jump(
+            graph.current_block,
+            header_block,
+            DebugSymbols { pos: self.pos },
+        );
+        graph.current_block = header_block;
+
+        // compile block and write value to temp variable (never read)
+        let block_ty = self.block.mir_type(graph)?;
+        let block_value = graph.graph.create_temp_variable(block_ty);
+        self.block.write_to_graph_plane(graph, block_value)?;
+
+        if !graph.is_current_sealed() {
+            // seal loop body by inserting a jump instruction back to the head of the loop and continue
+            // writing in the merge block after the loop.
+            graph.graph.insert_jump(
+                graph.current_block,
+                header_block,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        graph.current_block = merge_block;
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
         if !ty.is_fully_resolved() {
             return Err(HirTranslationError::TypeNotFullyResolved {
                 pos: self.pos,
                 ty,
-            })
+            });
         }
-        let EdlMaybeType::Fixed(ty) = ty else {
-            unreachable!();
-        };
-
-        let ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-        let block = self.block.mir_repr(phase, mir_phase, mir_funcs)?;
-        Ok(MirLoop {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            uid: mir_phase.new_id(),
-            id: self.element_id,
-            ty,
-            block,
-        })
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
 

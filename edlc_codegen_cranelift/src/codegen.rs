@@ -1,53 +1,46 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::DerefMut;
 use std::ops::Deref;
+use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
-use edlc_core::lexer::SrcPos;
 
-use edlc_core::prelude::{EdlVarId, HirPhase, HirUid, MirError, MirPhase};
+use crate::codegen::variable::{AggregateValue, VarCache};
+use crate::compiler::{GlobalVar, JIT};
+use crate::prelude::SSARepr;
+use cranelift::prelude::*;
+use cranelift_codegen::ir::{SourceLoc, StackSlot};
+use cranelift_jit::JITModule;
+use cranelift_module::{DataDescription, DataId};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::MirExpr;
+use edlc_core::prelude::mir_expr::{HeadlessId, MirExprId, MirFlowGraph, MirLoc, MirValue};
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
-use cranelift::prelude::*;
-use cranelift_codegen::ir::StackSlot;
-use cranelift_jit::JITModule;
-use cranelift_module::{DataDescription, DataId};
-use crate::codegen::variable::{AggregateValue, VarCache};
-use crate::compiler::{GlobalVar, JIT};
-use crate::compiler::panic_handle::PanicHandle;
-use crate::prelude::{PtrValue, RecordMarker, RuntimeOffset, SSARepr, VarMarker};
+use edlc_core::prelude::{DebugInformation, HirPhase, HirUid, MirError, MirPhase};
 
 mod literal_codegen;
-pub mod layout;
 mod call_codegen;
-mod block_codegen;
 pub mod variable;
-mod constdef_codegen;
-mod module_codegen;
-mod let_codegen;
-pub mod variable_codegen;
 mod const_codegen;
 mod data_codegen;
 mod assign_codegen;
@@ -55,13 +48,11 @@ mod arrayinit_codegen;
 
 #[cfg(test)]
 mod test;
-mod if_codegen;
-mod loop_codegen;
-mod break_codegen;
-mod continue_codegen;
-mod return_codegen;
 mod as_codegen;
 mod type_init_codegen;
+mod ref_codegen;
+mod global_codegen;
+pub mod cfg_codegen;
 
 macro_rules! code_ctx(
     ($backend:expr, $phase:expr) => (
@@ -93,7 +84,8 @@ macro_rules! short_vec(
     });
 );
 pub(crate) use short_vec;
-
+use crate::layout::stack_frame::{CallingConv, CraneliftValues, StackFrameMapping};
+use crate::prelude::stack_frame::FunctionLayout;
 
 impl<T> Deref for ShortVec<T> {
     type Target = [Option<T>];
@@ -397,26 +389,15 @@ pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub func_reg: Rc<RefCell<MirFuncRegistry<JIT<Runtime>>>>,
     pub global_vars: &'jit mut IndexMap<GlobalVar>,
     pub runtime_data: &'jit mut IndexMap<DataId>,
-    /// Marks the return type of the function that is currently being translated
-    pub current_effective_return_type: MirTypeId,
-    pub current_return_type: MirTypeId,
-    pub current_return_kind: FunctionRetKind,
-    pub function_entry_block: Block,
-
-    /// Contains the arguments for a prepared function call
-    call_args: Vec<AggregateValue>,
-    call_return_ty: Option<MirTypeId>,
-    call_res: Option<AggregateValue>,
-    call_pos: Option<SrcPos>,
 
     /// variable cache
-    pub variables: VarCache,
-    pub panic_handle: &'jit mut PanicHandle,
     _rt: PhantomData<Runtime>,
     pub abi: Arc<AbiConfig>,
 
-    // handle loops for control flow
-    loops: HashMap<HirUid, LoopInfo>,
+    pub layout: StackFrameMapping,
+    pub ir_values: CraneliftValues,
+    pub function_layout: FunctionLayout,
+    pub debug_symbols: Option<&'jit DebugInformation>,
 }
 
 pub struct CodeCtx<'a, 'jit> {
@@ -431,15 +412,29 @@ pub trait Compilable<Runtime> {
     /// Since all statements in EDL are expression, just in some cases once that return the empty
     /// data type, this can also be used to compile expressions.
     fn compile(
-        self,
+        &self,
         backend: &mut FunctionTranslator<Runtime>,
         phase: &mut MirPhase,
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>>;
+        cfg: &MirFlowGraph,
+        target: &MirValue,
+        expr_id: &MirExprId,
+    ) -> Result<(), MirError<JIT<Runtime>>>;
+}
+
+pub trait HeadlessCompilable<Runtime> {
+    fn compile_headless(
+        &self,
+        backend: &mut FunctionTranslator<Runtime>,
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        target: Option<&MirValue>,
+        id: &HeadlessId,
+    ) -> Result<(), MirError<JIT<Runtime>>>;
 }
 
 pub trait ItemCodegen<Runtime> {
     fn codegen(
-        self,
+        &self,
         hir_phase: &mut HirPhase,
         backend: &mut JIT<Runtime>,
         mir_phase: &mut MirPhase,
@@ -447,25 +442,17 @@ pub trait ItemCodegen<Runtime> {
 }
 
 impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
-    pub fn new(
+    pub(crate) fn new(
         jit: &'jit mut JIT<Runtime>,
-        current_effective_return_type: MirTypeId,
-        current_return_type: MirTypeId,
-        current_return_kind: FunctionRetKind
+        mapping: StackFrameMapping,
+        function_layout: FunctionLayout,
+        debug_info: Option<&'jit DebugInformation>,
     ) -> Self {
         let mut var_cache = VarCache::default();
         var_cache.push();
 
         let mut builder = FunctionBuilder::new(&mut jit.ctx.func, &mut jit.builder_context);
-        let entry_block = builder.create_block();
-
-        // append block parameters as function parameters
-        builder.append_block_params_for_function_params(entry_block);
-        builder.switch_to_block(entry_block);
-
-        // Tell the builder that this block will have no further predecessors.
-        // Since it's the entry block, it won't have any predecessors.
-        builder.seal_block(entry_block);
+        let ir_values = mapping.create_ir_values(&mut builder);
 
         FunctionTranslator {
             builder,
@@ -474,78 +461,13 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
             runtime_data: &mut jit.runtime_data,
             func_reg: jit.func_reg.clone(),
             global_vars: &mut jit.global_vars,
-            panic_handle: &mut jit.panic_handle,
-            current_effective_return_type,
-            current_return_type,
-            current_return_kind,
-            function_entry_block: entry_block,
-            call_args: Vec::new(),
-            call_return_ty: None,
-            call_res: None,
-            call_pos: None,
-            variables: var_cache,
+            layout: mapping,
+            function_layout,
+            debug_symbols: debug_info,
+            ir_values,
             _rt: PhantomData,
             abi: jit.abi.clone(),
-            loops: HashMap::default(),
         }
-    }
-
-    pub fn build_return(
-        &mut self,
-        value: AggregateValue,
-        phase: &MirPhase
-    ) -> Result<(), MirError<JIT<Runtime>>> {
-        self.current_return_kind.build_return(
-            value,
-            &mut CodeCtx {
-                abi: self.abi.clone(),
-                builder: &mut self.builder,
-                module: &mut self.module,
-                phase,
-            },
-            self.function_entry_block,
-        )
-    }
-
-    pub fn add_loop(&mut self, id: HirUid, body: Block, merge: Block, ty: MirTypeId, kind: LoopBreakKind) {
-        self.loops.insert(id, LoopInfo {
-            id,
-            body_block: body,
-            merge_block: merge,
-            ty,
-            kind,
-        });
-    }
-
-    /// Removes the specified loop from the function generator so that the body and merge blocks
-    /// cannot be found anymore.
-    ///
-    /// # Panics
-    ///
-    /// This function panics if the requested loop does not exist.
-    pub fn remove_loop(&mut self, id: &HirUid) {
-        self.loops.remove(id)
-            .expect("tried to finish loop that does not exist");
-    }
-
-    pub fn find_loop_body(&self, loop_id: &HirUid) -> Option<&Block> {
-        self.loops.get(loop_id)
-            .map(|info| &info.body_block)
-    }
-
-    pub fn find_loop_merge(&self, loop_id: &HirUid) -> Option<&Block> {
-        self.loops.get(loop_id)
-            .map(|info| &info.merge_block)
-    }
-
-    pub fn find_loop_break_kind(&self, loop_id: &HirUid) -> Option<&LoopBreakKind> {
-        self.loops.get(loop_id)
-            .map(|info| &info.kind)
-    }
-
-    pub fn find_loop_return_type(&self, loop_id: &HirUid) -> Option<&MirTypeId> {
-        self.loops.get(loop_id)
-            .map(|info| &info.ty)
     }
 
     pub fn code_ctx(&mut self, phase: &'jit MirPhase) -> CodeCtx<'jit, '_> {
@@ -557,156 +479,11 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
         }
     }
 
-    fn add_call_arg(&mut self, arg: AggregateValue) {
-        self.call_args.push(arg);
-    }
-
-    fn put_call_return(&mut self, ret: MirTypeId, pos: SrcPos) {
-        // assert!(self.call_return_ty.is_none(),
-        //         "Tried to reassign call return type before the return type was used");
-        self.call_return_ty = Some(ret);
-        self.call_pos = Some(pos);
-    }
-
-    pub fn get_call_return_ty(&mut self) -> Option<MirTypeId> {
-        let mut out = None;
-        mem::swap(&mut self.call_return_ty, &mut out);
-        out
-    }
-
-    pub fn get_call_pos(&mut self) -> Option<SrcPos> {
-        self.call_pos
-    }
-
-    /// Returns the call arguments that are currently saved in the codegen module and clears
-    /// the call arguments.
-    pub fn get_call_args(&mut self) -> Vec<AggregateValue> {
-        let mut tmp = Vec::new();
-        mem::swap(&mut self.call_args, &mut tmp);
-        tmp
-    }
-
-    pub fn put_call_result(&mut self, instr: AggregateValue) {
-        self.call_pos = None;
-        self.call_return_ty = None;
-        self.call_args.clear();
-        self.call_res = Some(instr);
-    }
-
-    /// Returns the result of the last call instruction as a compile value type.
-    /// As a side effect, this method will clear the call instruction from the backend memory, such
-    /// that this method should only be called once after each function call.
-    fn get_call_result(&mut self) -> Option<AggregateValue> {
-        let mut out = None;
-        mem::swap(&mut self.call_res, &mut out);
-        out
-    }
-
-    pub fn def_var(
-        &mut self,
-        id: EdlVarId,
-        value: AggregateValue,
-        mutable: bool,
-        phase: &MirPhase
-    ) -> Result<(), MirError<JIT<Runtime>>> {
-        if self.global_vars.get(id.0).is_some() {
-            panic!("Tried to redefine global variable in local context. This is a compiler error!");
-        } else {
-            self.variables.def_var(id, value, mutable, code_ctx!(self, phase))
-        }
-    }
-    
-    pub fn use_var(
-        &mut self,
-        id: EdlVarId,
-        offset: usize,
-        ty: MirTypeId,
-        phase: &MirPhase
-    ) -> Option<AggregateValue> {
-        if let Some(var) = self.global_vars.get(id.0) {
-            Some(var.clone().get(self, phase, offset, ty))
-        } else {
-            self.variables.use_var::<Runtime>(id, offset, ty, code_ctx!(self, phase))
-        }
-    }
-
-    pub fn set_var(
-        &mut self,
-        id: EdlVarId,
-        offset: usize,
-        value: AggregateValue,
-        phase: &MirPhase
-    ) -> Result<(), MirError<JIT<Runtime>>> {
-        if self.global_vars.get(id.0).is_some() {
-            panic!("Attempted to modify global variable. Currently, only local variables can be modified!");
-        } else {
-            self.variables.set_var(id, value, offset, code_ctx!(self, phase))
-        }
-    }
-
-    pub fn set_var_runtime_offset(
-        &mut self,
-        id: EdlVarId,
-        offset: RuntimeOffset,
-        value: AggregateValue,
-        phase: &MirPhase
-    ) -> Result<(), MirError<JIT<Runtime>>> {
-        if self.global_vars.get(id.0).is_some() {
-            panic!("Attempted to modify global variable. Currently, only local variables can be modified!");
-        } else {
-            self.variables.set_var_runtime_offset(id, value, offset, code_ctx!(self, phase))
-        }
-    }
-
-    pub fn var_as_ptr(
-        &mut self,
-        id: EdlVarId,
-        phase: &MirPhase,
-    ) -> Result<PtrValue, MirError<JIT<Runtime>>> {
-        if self.global_vars.get(id.0).is_some() {
-            todo!()
-        } else {
-            self.variables.var_as_ptr(id, code_ctx!(self, phase))
-        }
-    }
-
-    /// Create a variable marker that records all SSA variable changes that occur from this point
-    /// onwards.
-    pub fn mark_vars(&mut self) -> RecordMarker {
-        self.variables.mark()
-    }
-
-    /// Retrieve all variable changes that occurred between the creation of a record marker and the
-    /// calling of this method.
-    pub fn fence_vars(&mut self, marker: &RecordMarker) -> Option<VarMarker> {
-        self.variables.fence(marker)
-    }
-}
-
-impl<Runtime> Compilable<Runtime> for MirExpr {
-    fn compile(
-        self,
-        backend: &mut FunctionTranslator<Runtime>,
-        phase: &mut MirPhase
-    ) -> Result<AggregateValue, MirError<JIT<Runtime>>> {
-        match self {
-            MirExpr::ArrayInit(val) => val.compile(backend, phase),
-            MirExpr::As(val) => val.compile(backend, phase),
-            MirExpr::Block(val) => val.compile(backend, phase),
-            MirExpr::Call(val) => val.compile(backend, phase),
-            MirExpr::Literal(val) => val.compile(backend, phase),
-            MirExpr::Variable(val) => val.compile(backend, phase),
-            MirExpr::Constant(val) => val.compile(backend, phase),
-            MirExpr::Assign(val) => val.compile(backend, phase),
-            MirExpr::Let(val) => val.compile(backend, phase),
-            MirExpr::Data(val) => val.compile(backend, phase),
-            MirExpr::Offset(val) => val.compile(backend, phase),
-            MirExpr::If(val) => val.compile(backend, phase),
-            MirExpr::Loop(val) => val.compile(backend, phase),
-            MirExpr::Break(val) => val.compile(backend, phase),
-            MirExpr::Continue(val) => val.compile(backend, phase),
-            MirExpr::Return(val) => val.compile(backend, phase),
-            MirExpr::Init(val) => val.compile(backend, phase),
+    pub fn insert_source_loc(&mut self, loc: &MirLoc) {
+        if let Some(debug_symbols) = self.debug_symbols.as_ref() {
+            if let Some(id) = debug_symbols.try_id(loc) {
+                self.builder.set_srcloc(SourceLoc::new(*id));
+            }
         }
     }
 }

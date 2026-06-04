@@ -1,39 +1,40 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::error::Error;
-use std::mem;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
-use crate::core::edl_type::{EdlMaybeType};
+use crate::core::edl_type::EdlMaybeType;
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_condition::MirCondition;
-use crate::mir::mir_expr::mir_if::MirIf;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::{MirError, MirPhase};
-use crate::prelude::{report_infer_error, HirErrorType};
+use crate::mir::mir_expr::{DebugSymbols, MirValue, ValueScope};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
+use crate::prelude::{edl_type, report_infer_error, HirErrorType};
 use crate::resolver::ScopeId;
+use std::error::Error;
+use std::mem;
 
 
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +50,10 @@ struct CompileInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// Like a block, a if-expression is always immutable.
+    /// If the if-expression yields a reference, that reference may still be mutable, but the
+    /// reference itself - as a stand alone value - is immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +191,13 @@ impl ResolveTypes for HirCondition {
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
     }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        match self {
+            Self::Plane(val, _) => val.mutability(inferer),
+            Self::Match {} => unimplemented!("match cases are currently unimplemented"),
+        }
+    }
 }
 
 impl ResolveTypes for HirIf {
@@ -236,10 +248,14 @@ impl ResolveTypes for HirIf {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let type_uid = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompileInfo {
                 node,
                 own_uid: type_uid,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             type_uid
         }
@@ -261,6 +277,11 @@ impl ResolveTypes for HirIf {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -573,20 +594,6 @@ impl HirCondition {
 impl EdlFnArgument for HirIf {
     type CompilerState = HirPhase;
 
-    /// The return value of an if-expression is only mutable, when all branches are mutable.
-    /// For now, this holds true regardless of if these branches can actually be reached.
-    fn is_mutable(
-        &self,
-        state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        for block in self.iter() {
-            if !block.is_mutable(state)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// An if expression is `const_expr` exactly when the condition, and **all** internal blocks
     /// are constant.
     fn const_expr(
@@ -697,121 +704,133 @@ impl HirExpr for HirIf {
     }
 }
 
-impl IntoMir for HirCondition {
-    type MirRepr = MirCondition;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirCondition {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
+        assert_eq!(graph.graph.get_var_type(&target), &graph.mir_phase.types.bool());
         match self {
-            Self::Plane(val, _) => {
-                let val = val.mir_repr(phase, mir_phase, mir_funcs)?;
-                if val.get_type(mir_funcs, mir_phase) != mir_phase.types.bool() {
-                    return Err(HirTranslationError::MirError(
-                        *val.get_pos(),
-                        format!("conditions must be a bool; {:?} != bool",
-                                val.get_type(mir_funcs, mir_phase)),
-                    ));
-                }
-                Ok(MirCondition::Plane(Box::new(val)))
+            HirCondition::Plane(v, _) => {
+                v.write_to_graph(graph, target)
             }
-            Self::Match {} => Ok(MirCondition::Match {}),
+            HirCondition::Match { .. } => {
+                unimplemented!();
+            }
         }
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.bool())
     }
 }
 
-impl IntoMir for HirIf {
-    type MirRepr = MirIf;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirIf {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let mut if_else_blocks = vec![];
+        let scope = graph.graph.get_block_scope(&graph.current_block);
+        graph.graph.var_scopes.set(&target, ValueScope::Block(scope));
+        let merge_block = graph.graph
+            .create_block()
+            .with_parent(graph.current_block)
+            .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
+            .build();
 
-        let return_ty = &self.info.as_ref().unwrap().finalized_type;
-        let EdlMaybeType::Fixed(return_ty) = return_ty else {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: return_ty.clone(),
-                pos: self.pos,
-            });
-        };
-        if !return_ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved {
-                ty: EdlMaybeType::Fixed(return_ty.clone()),
-                pos: self.pos,
-            });
-        }
-
-        let ty = mir_phase.types.mir_id(&return_ty, &phase.types)?;
-
-        // fill blocks
+        let mut early_exit = false;
         for (cond, block) in self.if_else_blocks.iter() {
-            let cond = cond.mir_repr(phase, mir_phase, mir_funcs)?;
-            let block = block.mir_repr(phase, mir_phase, mir_funcs)?;
-
-            if cond.mir_type_id(mir_funcs, mir_phase) != mir_phase.types.bool() {
-                return Err(HirTranslationError::MirError(
-                    *cond.pos(),
-                    format!("conditions must be a bool; {:?} != bool",
-                            cond.mir_type_id(mir_funcs, mir_phase)),
-                ));
-            }
-            if !block.terminates(&mir_phase.types).map_err(|err: MirError<B>| HirTranslationError::MirError(
-                block.pos,
-                format!("{err}"),
-            ))? && block.ty != ty {
-                return Err(HirTranslationError::MirError(
-                    block.pos,
-                    format!("else-if chain type mismatch: block has type {:?} but the type of the \
-                    entire structure is suppose to be {:?}", block.ty, ty),
-                ));
+            let cond_ty = cond.mir_deref_type(graph)?;
+            let cond_value = graph.graph.create_temp_variable(cond_ty);
+            cond.write_to_graph(graph, cond_value)?;
+            if graph.is_current_sealed() {
+                early_exit = true;
+                break; // early exit in condition - stop traversing if-else chain
             }
 
-            if_else_blocks.push((cond, block));
+            let then_block = graph.graph
+                .create_block()
+                .with_parent(graph.current_block)
+                .with_source(self.src.clone(), DebugSymbols { pos: self.pos.clone() }, self.scope)
+                .create_scope()
+                .build();
+            let else_block = graph.graph
+                .create_block()
+                .with_parent(graph.current_block)
+                .with_source(self.src.clone(), DebugSymbols { pos: block.pos.clone() }, block.scope)
+                .create_scope()
+                .build();
+
+            graph.graph.insert_conditional_jump(
+                graph.current_block, then_block, else_block, cond_value, DebugSymbols { pos: self.pos });
+            // write then block
+            graph.current_block = then_block;
+            block.write_to_graph_plane(graph, target)?;
+            if !graph.is_current_sealed() {
+                // only insert jump if the block does not exit early
+                graph.graph.insert_jump(graph.current_block, merge_block, DebugSymbols { pos: self.pos });
+            }
+            // continue on else block
+            graph.current_block = else_block;
         }
-        // type check and return final else block
-        let else_block = if let Some(block) = self.else_block.as_ref() {
-            let block = block.mir_repr(phase, mir_phase, mir_funcs)?;
-            if !block.terminates(&mir_phase.types).map_err(|err: MirError<B>| HirTranslationError::MirError(
-                block.pos,
-                format!("{err}"),
-            ))? && block.ty != ty {
-                return Err(HirTranslationError::MirError(
-                    block.pos,
-                    format!("else-if chain type mismatch: block has type {:?} but the type of the \
-                    entire structure is suppose to be {:?}", block.ty, ty),
-                ));
-            }
-            Some(block)
-        } else {
-            None
-        };
 
-        Ok(MirIf {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            ty,
-            if_else_blocks,
-            else_block,
-        })
+        if !early_exit {
+            // compile final `else` block
+            if let Some(fin) = self.else_block.as_ref() {
+                fin.write_to_graph_plane(graph, target)?;
+            } else {
+                let empty_id = graph.graph.expressions
+                    .insert_empty(&graph.mir_phase.types);
+                let empty_value = graph.graph
+                    .create_temp_variable(graph.mir_phase.types.empty());
+                graph.graph.insert_def(
+                    graph.current_block,
+                    empty_value,
+                    empty_id,
+                    &graph.mir_phase.types,
+                    DebugSymbols { pos: self.pos },
+                );
+            }
+        }
+
+        if !graph.is_current_sealed() {
+            // only insert jump if the block does not exit early
+            graph.graph.insert_jump(
+                graph.current_block,
+                merge_block,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        graph.current_block = merge_block;
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
-
-
 
 
 #[cfg(test)]

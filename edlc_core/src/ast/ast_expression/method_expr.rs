@@ -1,20 +1,22 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
-use crate::ast::ast_expression::call_expr::AstCallExpr;
+use crate::ast::ast_expression::call_expr::{AstCallExpr, CallParamModifier};
 use crate::ast::ast_expression::field_expr::AstFieldExpr;
 use crate::ast::ast_type::{AstTypeNameEntry};
 use crate::ast::{AstElement, IntoHir};
@@ -33,6 +35,7 @@ pub struct AstMethodExpr {
     src: ModuleSrc,
     lhs: Box<AstExpr>,
     params: Vec<AstExpr>,
+    modifiers: Vec<CallParamModifier>,
     name: AstTypeNameEntry,
 }
 
@@ -114,7 +117,7 @@ impl AstMethodExpr {
         let name = AstTypeNameEntry::parse_from_name(
             name, name_pos, parser, true)?;
         expect_token!(parser; (Token::Punct(Punct::BracketOpen)) expected "method parameters `(`")?;
-        let params = AstCallExpr::parse_params(parser)?;
+        let (params, modifiers) = AstCallExpr::parse_params(parser)?;
 
         Ok(AstMethodExpr {
             lhs,
@@ -123,6 +126,7 @@ impl AstMethodExpr {
             src,
             name,
             params,
+            modifiers,
         })
     }
 }
@@ -137,6 +141,9 @@ impl IntoHir for AstMethodExpr {
             params.push(param.hir_repr(parser)?);
         }
 
+        let mut param_modifiers = self.modifiers.clone();
+        param_modifiers.insert(0, CallParamModifier::Mutable);
+
         let name: QualifierName = vec![self.name.name].into();
         let generic_params = self.name.params;
 
@@ -147,6 +154,7 @@ impl IntoHir for AstMethodExpr {
             name,
             generic_params,
             params,
+            param_modifiers,
         ))
     }
 }

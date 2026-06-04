@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 // This module contains the definition of a HIR (higher intermediate representation)
@@ -20,8 +22,10 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{Arguments, Debug, Display, Formatter};
+use std::hash::DefaultHasher;
 use std::rc::Rc;
 use log::warn;
+use regex::Regex;
 use crate::core::{edl_type, EdlVarId};
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlRecoverableError};
@@ -31,20 +35,17 @@ use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlMaybeType, EdlTraitInstance, EdlTypeId, EdlTypeInitError, EdlTypeInstance, EdlTypeRegistry, FmtType, StackReplacements};
 use crate::core::edl_var::EdlVarRegistry;
 use crate::file::{ModuleSrc, ParserSupplier};
-use crate::hir::hir_expr::{hir_as, HirExpr, HirExpression};
+use crate::hir::hir_expr::{hir_as, DefaultMut, HirExpr, HirExpression, HirTreeWalker, SourceObject};
 use crate::hir::hir_expr::hir_const::HirConst;
 use crate::hir::hir_expr::hir_let::HirLet;
 use crate::hir::hir_expr::hir_type::HirTypeName;
 use crate::hir::hir_expr::hir_use::HirUse;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
-use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::issue::{IssueFormatter, ReportTarget, SrcError, SrcRange, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_item::MirItem;
-use crate::mir::MirPhase;
 use crate::parser::Parser;
 use crate::resolver::{QualifierName, ResolveError, ScopeId, TopLevelNameResolver};
 
@@ -59,17 +60,19 @@ mod code_container;
 pub mod hir_trait_fn;
 mod hir_report;
 mod lifetime;
+pub mod hir_where;
 
 // export HIR context variables
 pub use context::HirContext;
 pub use context::ExecType;
 use crate::ast::ItemDoc;
-use crate::core::edl_value::EdlConstValue;
+use crate::core::edl_value::{EdlConstValue};
 use crate::core::type_analysis::{Infer, InferError, InferProvider, InferState, TypeUid, ExtConstUid};
 use crate::documentation::{DocCompilerState, DocElement};
 use crate::hir::code_container::CodeContainer;
 use crate::issue;
 pub use crate::hir::hir_report::{report_infer_error, ReportResult, WithInferer, StateContainer, BundledInfererError};
+use crate::report::Report;
 
 pub trait HirElement {}
 
@@ -195,7 +198,7 @@ pub struct TypeSource<'src, 'a> {
     pub ty: EdlMaybeType,
     pub pos: SrcRange,
     pub src: &'src ModuleSrc,
-    pub remark: TypeArguments<'a>
+    pub remark: TypeArguments<'a, DefaultHasher>,
 }
 
 impl HirPhase {
@@ -218,7 +221,12 @@ impl HirPhase {
     }
 
     /// Can be used to format error messages for compiler errors.
-    pub fn report_error(&mut self, error: TypeArguments, remarks: &[SrcError], _help: Option<TypeArguments>) {
+    pub fn report_error(
+        &mut self,
+        error: TypeArguments<'_, DefaultHasher>,
+        remarks: &[SrcError<'_, DefaultHasher>],
+        _help: Option<TypeArguments<'_, DefaultHasher>>,
+    ) {
         if !self.report_mode.print_errors {
             return;
         }
@@ -313,7 +321,7 @@ impl HirPhase {
         ctx: Arguments,
         exp: TypeSource,
         got: &HirExpression,
-        got_remark: TypeArguments,
+        got_remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<(), HirError> {
         let got = self.check_type_from_expr(got, got_remark)?;
         self.check_report_type(ctx, exp, got)
@@ -327,9 +335,9 @@ impl HirPhase {
         &mut self,
         ctx: Arguments,
         exp: &HirExpression,
-        exp_remark: TypeArguments,
+        exp_remark: TypeArguments<'_, DefaultHasher>,
         got: &HirExpression,
-        got_remark: TypeArguments,
+        got_remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<(), HirError> {
         let exp = self.check_type_from_expr(exp, exp_remark)?;
         let got = self.check_type_from_expr(got, got_remark)?;
@@ -339,7 +347,7 @@ impl HirPhase {
     fn check_extract_resolved_type(
         &mut self,
         expr: &HirExpression,
-        remark: TypeArguments,
+        remark: TypeArguments<'_, DefaultHasher>,
     ) -> Result<EdlMaybeType, HirError> {
         let ty = self.check_type_from_expr(expr, remark)?;
         self.check_type_resolved(&ty)?;
@@ -350,7 +358,7 @@ impl HirPhase {
     fn check_type_from_expr<'src, 'a>(
         &mut self,
         expr: &'src HirExpression,
-        remark: TypeArguments<'a>,
+        remark: TypeArguments<'a, DefaultHasher>,
     ) -> Result<TypeSource<'src, 'a>, HirError> {
         let err = match expr.get_type(self) {
             Ok(ty) => return Ok(TypeSource {
@@ -393,7 +401,7 @@ impl HirPhase {
                     SrcError::Single {
                         pos: exp.pos,
                         src: exp.src.clone(),
-                        error: exp.remark,
+                        error: exp.remark.clone(),
                     }
                 ],
                 Some(issue::format_type_args!(
@@ -411,7 +419,12 @@ impl HirPhase {
     }
 
     /// Can be used to format warning messages for compiler errors.
-    pub fn report_warn(&mut self, error: TypeArguments, remarks: &[SrcError], _help: Option<TypeArguments>) {
+    pub fn report_warn(
+        &mut self,
+        error: TypeArguments<'_, DefaultHasher>,
+        remarks: &[SrcError<'_, DefaultHasher>],
+        _help: Option<TypeArguments<'_, DefaultHasher>>,
+    ) {
         if !self.report_mode.print_warnings {
             return;
         }
@@ -594,33 +607,23 @@ impl HirItem {
             Self::Use(u) => u.pos,
         }
     }
-}
 
-impl IntoMir for HirItem {
-    type MirRepr = MirItem;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>,
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    pub fn src(&self) -> &ModuleSrc {
         match self {
-            HirItem::Let(val) => val.mir_repr(phase, mir_phase, mir_funcs)
-                .map(|item| item.into()),
-            HirItem::Const(val) => val.mir_repr(phase, mir_phase, mir_funcs)
-                .map(|item| item.into()),
-            HirItem::Func(_) => Ok(MirItem::Func),
-            HirItem::Impl(_) => Ok(MirItem::Impl),
-            HirItem::Submod(_, _) => Ok(MirItem::Submod),
-            HirItem::Use(_) => Ok(MirItem::Use),
+            HirItem::Let(val) => &val.src,
+            HirItem::Const(val) => &val.src,
+            HirItem::Func(val) => &val.signature.src,
+            HirItem::Impl(val) => &val.src,
+            HirItem::Submod(val, _) => &val.src,
+            HirItem::Use(val) => &val.src,
         }
     }
 }
 
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirModule {
+    pub src: ModuleSrc,
     pub items: Vec<HirItem>,
     pub full_name: QualifierName,
     pub scope: ScopeId,
@@ -641,6 +644,8 @@ impl HirModule {
         phase.report_mode.print_warnings = false;
         if !errors.is_empty() {
             // reset reporting mode
+            let resolve_report = HirError::resolve_report(errors.iter());
+            resolve_report.print_errors(phase);
             phase.report_mode.print_errors = false;
             phase.report_mode.print_warnings = false;
             return errors;
@@ -687,10 +692,90 @@ impl HirModule {
             phase.report_mode.print_warnings = false;
             return errors;
         }
+
+        // traverse HIR tree and insert default mutability values
+        self.insert_default_mutability(phase, infer_state, &mut errors);
         self.finalize_types(phase, infer_state);
+
+        let resolve_report = HirError::resolve_report(errors.iter());
+        resolve_report.print_errors(phase);
+
         phase.report_mode.print_errors = false;
         phase.report_mode.print_warnings = false;
         errors
+    }
+
+    /// Finds all surface level functions in the module and its submodules that have annotations
+    /// matching the specified regex.
+    /// This can be used to, for example, identity test cases / benchmarks, find entry points, etc.
+    ///
+    /// # Return Type
+    ///
+    /// This function returns a `Vec` containing tuples with the [EdlTypeId] for the identified
+    /// function, as well as the annotation string from the function signature that matched
+    /// the regex.
+    pub fn find_function_with_annotation(
+        &self,
+        regex: &Regex,
+        name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Option<Vec<(EdlTypeId, String)>> {
+        let mut buf = Vec::new();
+        self.find_function_with_annotation_internal(regex, name, &mut buf, path);
+        if buf.is_empty() {
+            None
+        } else {
+            Some(buf)
+        }
+    }
+
+    fn find_function_with_annotation_internal(
+        &self,
+        regex: &Regex,
+        name: &Regex,
+        ret_buf: &mut Vec<(EdlTypeId, String)>,
+        path: Option<&QualifierName>,
+    ) {
+        let mut worklist = vec![self]; // remember kids, recursion is ass
+        while let Some(item) = worklist.pop() {
+            let (this_module, exit_early) = if let Some(search_path) = path {
+                let matches = search_path == &item.full_name;
+                (matches, matches)
+            } else {
+                (true, false)
+            };
+
+            for item in item.items.iter() {
+                match item {
+                    HirItem::Func(func) if this_module => {
+                        // to clippy: this match is not collapsible in edition 2021
+                        // we can adjust this if we ever update to 2024 with chained let-matches
+                        let annotation = func.signature.annotations.iter()
+                            .find(|sig| {
+                                regex.is_match(sig)
+                            });
+                        if !name.is_match(&func.signature.name) {
+                            continue;
+                        }
+
+                        #[allow(clippy::collapsible_match)]
+                        if let Some(annotation) = annotation {
+                            if let Some(id) = func.signature.get_id() {
+                                ret_buf.push((id, annotation.to_string()));
+                            }
+                        }
+                    },
+                    HirItem::Submod(submod, _) => {
+                        worklist.push(submod.as_ref())
+                    },
+                    _ => (),
+                }
+            }
+
+            if exit_early {
+                break;
+            }
+        }
     }
 
     /// Recursively goes through this module and all child modules and registers the function
@@ -757,10 +842,7 @@ impl HirModule {
                 _ => Ok(()),
             };
             if let Err(err) = res {
-                errors.push(HirError {
-                    pos: item.pos(),
-                    ty: Box::new(HirErrorType::Resolver(err)),
-                });
+                errors.push(HirError::new_res(item.pos(), err, item.src().clone()));
             }
         }
     }
@@ -867,6 +949,47 @@ impl HirModule {
                 HirItem::Impl(im) => im.finalize_types(&mut phase.infer_from(infer_state)),
                 HirItem::Submod(val, _) => {
                     val.finalize_types(phase, infer_state)
+                }
+                HirItem::Use(_) => (),
+            }
+        }
+    }
+
+    fn insert_default_mutability(&mut self, phase: &mut HirPhase, infer_state: &mut InferState, errors: &mut Vec<HirError>) {
+        for item in self.items.iter_mut() {
+            match item {
+                HirItem::Let(val) => {
+                    if let Err(err) = val.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Const(val) => {
+                    if let Err(err) = val.value.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Func(val) => {
+                    if let Err(err) = val.body.walk_mut(&mut |_| true, &mut |s| {
+                        s.insert_default_mutability(phase, infer_state)
+                    }) {
+                        errors.push(err);
+                    }
+                }
+                HirItem::Impl(val) => {
+                    for func in val.funcs.iter_mut() {
+                        if let Err(err) = func.body.walk_mut(&mut |_| true, &mut |s| {
+                            s.insert_default_mutability(phase, infer_state)
+                        }) {
+                            errors.push(err);
+                        }
+                    }
+                }
+                HirItem::Submod(val, _) => {
+                    val.insert_default_mutability(phase, infer_state, errors);
                 }
                 HirItem::Use(_) => (),
             }
@@ -1047,10 +1170,10 @@ impl HirError {
         }
     }
 
-    pub fn new_res(pos: SrcPos, err: ResolveError) -> Self {
+    pub fn new_res(pos: SrcPos, err: ResolveError, src: ModuleSrc) -> Self {
         HirError {
             pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
+            ty: Box::new(HirErrorType::Resolver(err, src)),
         }
     }
 
@@ -1070,6 +1193,20 @@ impl HirError {
             HirErrorType::EdlError(err) => err.type_resolve_recoverable(),
             _ => false,
         }
+    }
+
+    /// Creates a report from all resolver errors in an iterator of resolver errors.
+    pub fn resolve_report<'a, I: IntoIterator<Item=&'a Self>>(
+        errors: I,
+    ) -> Report<ResolveError, ()> {
+        let mut report = Report::default();
+        for item in errors.into_iter() {
+            let HirErrorType::Resolver(err, src) = item.ty.as_ref() else {
+                continue;
+            };
+            report.insert_err(err.clone(), item.pos, src.clone());
+        }
+        report
     }
 }
 
@@ -1128,7 +1265,7 @@ pub enum HirErrorType {
     /// returns either nothing, or by value.
     FunctionCallArg,
     /// Some error with the name resolver
-    Resolver(ResolveError),
+    Resolver(ResolveError, ModuleSrc),
     NameUnresolved(HirTypeName),
     VariableIsNotConstant(EdlVarId),
     IllegalState(String),
@@ -1175,6 +1312,8 @@ pub enum HirErrorType {
     NeverTypeInVariable(EdlVarId),
     Infer(InferError),
     TypeInit(EdlTypeInitError),
+    NonReferencableExpression(String),
+    NotMutable(String),
 }
 
 impl Display for HirError {
@@ -1219,12 +1358,9 @@ impl Display for HirErrorType {
                 `HirErrorType::FunctionName`")
             },
             HirErrorType::FunctionCallArg => {
-                write!(f, "The return value of a function call my only be passed on as a function parameter for \
-                another function call, if the return type is either `None` or passed by `Value`. \
-                `Resource` and `Reference` return types cannot be passed, as they require a named resource target to \
-                stick to.")
+                write!(f, "function call argument error.")
             },
-            HirErrorType::Resolver(res) => {
+            HirErrorType::Resolver(res, _src) => {
                 write!(f, "{res}")
             },
             HirErrorType::NameUnresolved(name) => {
@@ -1318,6 +1454,12 @@ impl Display for HirErrorType {
             }
             HirErrorType::ConstantValueUnresolved(val) => {
                 write!(f, "Constant value `{val:?}` is not fully resolved")
+            }
+            HirErrorType::NonReferencableExpression(expr) => {
+                write!(f, "Expression is not referencable; {expr}")
+            }
+            HirErrorType::NotMutable(msg) => {
+                write!(f, "Expression is not mutable; {msg}")
             }
         }
     }
@@ -1481,6 +1623,11 @@ pub trait ResolveTypes {
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>);
 
     fn as_const(&mut self, inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid>;
+
+    /// For elements that can be mutable, this returns the mutability as a constant.
+    /// The constant should be a boolean that is `true` to indicate a mutable variable, or `false`
+    /// to indicate a shared variable.
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid;
 }
 
 pub trait ResolveFn {

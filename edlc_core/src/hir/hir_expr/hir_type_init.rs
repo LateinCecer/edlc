@@ -1,44 +1,49 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlType, EdlTypeInitError, EdlTypeInstance, EdlTypeState};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ReportResult, ResolveFn, ResolveNames, ResolveTypes, TypeSource, WithInferer};
 use crate::issue;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_type_init::{MirInitAssign, MirTypeInit};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::MirAggregateTypeLayout;
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::{MirAggregateTypeLayout, MirTypeId};
+use crate::prelude::edl_type;
 use crate::prelude::type_analysis::*;
 use crate::resolver::ScopeId;
 use std::error::Error;
 use std::ops::BitAnd;
-
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {
     node: NodeId,
     own_uid: TypeUid,
     finalized_type: EdlMaybeType,
+    /// Since a type init always creates a new value instance, we can safely say that his type of
+    /// expression is _never_ mutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -432,10 +437,14 @@ impl ResolveTypes for HirTypeInit {
         } else {
             let node = inferer.state.node_gen.gen_info(&self.pos, &self.src);
             let ty = inferer.new_type(node);
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 own_uid: ty,
                 finalized_type: EdlMaybeType::Unknown,
+                mutable,
             });
             ty
         }
@@ -474,6 +483,11 @@ impl ResolveTypes for HirTypeInit {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -856,13 +870,6 @@ impl HirTypeInit {
 impl EdlFnArgument for HirTypeInit {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     fn const_expr(
         &self,
         state: &Self::CompilerState
@@ -908,138 +915,94 @@ impl EdlFnArgument for HirTypeInit {
     }
 }
 
-impl IntoMir for HirTypeInit {
-    type MirRepr = MirTypeInit;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+impl MakeGraph for HirTypeInit {
+    fn write_to_graph<B: Backend>(&self, graph: &mut MirGraph<B>, target: MirValue) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let mut inits = Vec::new();
         let ty = &self.info.as_ref().unwrap().finalized_type;
         if !ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ty.clone() });
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                ty: ty.clone(),
+                pos: self.pos,
+            });
         }
-        let EdlMaybeType::Fixed(ty) = ty else {
-            unreachable!();
-        };
+        let EdlMaybeType::Fixed(ty) = ty else { unreachable!() };
 
+        let mir_ty = graph.mir_phase.types.mir_id(ty, &graph.hir_phase.types)?;
+        assert_eq!(&mir_ty, graph.graph.get_var_type(&target));
+        let layout = graph.mir_phase.types.get_layout(mir_ty).unwrap().clone();
+
+        // collect init elements
+        let mut inits = vec![];
         match &self.variant {
-            Variant::StructList { params, .. } => {
-                let mir_ty = mir_phase.types.mir_id(ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
+            Variant::StructList { params, .. }
+            | Variant::Tuple { params, .. } => {
                 for (index, element) in params.iter().enumerate() {
-                    let value = element.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(
-                        &index.to_string(), &mir_phase.types)?;
+                    let element_ty = element.mir_deref_type(graph)?;
+                    let element_value = graph.graph
+                        .create_temp_variable(element_ty);
+                    element.write_to_graph(graph, element_value)?;
+                    let offset = layout
+                        .member_offset(&index.to_string(), &graph.mir_phase.types)?;
                     inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
+                        off: offset.offset,
+                        val: element_value,
                     });
                 }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
             }
-            Variant::StructNamed { params, .. } => {
-                // get type layout
-                let mir_ty = mir_phase.types.mir_id(ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
+            Variant::StructNamed { params, .. }
+            | Variant::Dict { params, .. } => {
                 for NamedParameter { name, value, .. } in params.iter() {
-                    let value = value.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(name, &mir_phase.types)?;
+                    let element_ty = value.mir_deref_type(graph)?;
+                    let element_value = graph.graph
+                        .create_temp_variable(element_ty);
+                    value.write_to_graph(graph, element_value)?;
+                    let offset = layout
+                        .member_offset(name, &graph.mir_phase.types)?;
                     inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
+                        off: offset.offset,
+                        val: element_value,
+                    })
                 }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
             }
-            Variant::EnumList { ty: _, params: _, variant: _ } => {
-                todo!()
+            Variant::EnumList { .. } => {
+                unimplemented!("")
             }
-            Variant::EnumNamed { ty: _, params: _, variant: _ } => {
-                todo!()
-            }
-            Variant::Tuple { params, } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for (index, element) in params.iter().enumerate() {
-                    let value = element.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(&index.to_string(), &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
-            Variant::Dict { params, } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                let layout = mir_phase.types
-                    .get_layout(mir_ty).unwrap().clone();
-
-                for NamedParameter { name, value, .. } in params.iter() {
-                    let value = value.mir_repr(phase, mir_phase, mir_funcs)?;
-                    let offset = layout.member_offset(name, &mir_phase.types)?;
-                    inits.push(MirInitAssign {
-                        off: offset.0,
-                        val: value,
-                    });
-                }
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
+            Variant::EnumNamed { .. } => {
+                unimplemented!()
             }
             Variant::Union { .. } => {
-                todo!()
+                unimplemented!()
             }
-            Variant::Unit { ty: _ } => {
-                let mir_ty = mir_phase.types.mir_id(&ty, &phase.types)?;
-                Ok(MirTypeInit {
-                    pos: self.pos,
-                    scope: self.scope,
-                    src: self.src.clone(),
-                    id: mir_phase.new_id(),
-                    ty: mir_ty,
-                    inits,
-                })
-            }
+            Variant::Unit { ty: _ } => (), // no inits
         }
+
+        // write to graph
+        let expr_id = graph.graph.expressions.insert_type_init(MirTypeInit {
+            id: graph.mir_phase.new_id(),
+            ty: mir_ty,
+            inits,
+        });
+        graph.graph.insert_def(
+            graph.current_block,
+            target,
+            expr_id,
+            &graph.mir_phase.types,
+            DebugSymbols { pos: self.pos }
+        );
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty: ty.clone(),
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }

@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::fmt::{Display, Formatter};
 use crate::ast::ast_expression::AstExpr;
@@ -41,6 +43,7 @@ pub struct AstBlock {
 pub enum InitReason {
     Comma(SrcPos, String),
     NamedParameter(SrcPos, String),
+    Forced(SrcPos),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,7 @@ impl InitReason {
         match self {
             InitReason::Comma(pos, _) => pos,
             InitReason::NamedParameter(pos, _) => pos,
+            InitReason::Forced(pos) => pos,
         }
     }
 }
@@ -70,6 +74,10 @@ impl Display for InitReason {
             InitReason::NamedParameter(pos, name) => {
                 write!(f, "colon at {pos} indicates that `{name}` should be the name of a member,\
                 with the value expression following the colon")
+            }
+            InitReason::Forced(pos) => {
+                write!(f, "type identifier at {pos} implies that the block following it must be a \
+                type init list")
             }
         }
     }
@@ -121,18 +129,19 @@ impl AstBlockOrInit {
     }
 
     fn continue_parse_block_init(
-        first_member: AstStructMemberInit,
+        mut members: Vec<AstStructMemberInit>,
         reason: InitReason,
         parser: &mut Parser,
     ) -> Result<Self, ParseError> {
-        let mut members = vec![first_member];
         loop {
             if let Ok(local!(Token::Punct(Punct::BraceClose))) = parser.peak() {
                 parser.next_token()?;
                 break;
             }
-            expect_token!(parser; (Token::Punct(Punct::Comma))
-                expected "`,` or struct init block close `}`")?;
+            if !members.is_empty() {
+                expect_token!(parser; (Token::Punct(Punct::Comma))
+                    expected "`,` or struct init block close `}`")?;
+            }
             if let Ok(local!(Token::Punct(Punct::BraceClose))) = parser.peak() {
                 parser.next_token()?;
                 break;
@@ -142,10 +151,17 @@ impl AstBlockOrInit {
         }
         Ok(Self::Init(members, reason))
     }
+
+    pub fn parse_init(parser: &mut Parser, name_position: SrcPos) -> Result<AstBlockOrInit, ParseError> {
+        let _pos = expect_token!(parser; (Token::Punct(Punct::BraceOpen)),
+            pos => pos expected "type init starting with `{`")?;
+        parser.env.push_block();
+        Self::continue_parse_block_init(vec![], InitReason::Forced(name_position), parser)
+    }
 }
 
-impl Parsable for AstBlockOrInit {
-    fn parse(parser: &mut Parser) -> Result<AstBlockOrInit, ParseError> {
+impl AstBlockOrInit {
+    pub fn parse(parser: &mut Parser, allow_init: bool) -> Result<AstBlockOrInit, ParseError> {
         let pos = expect_token!(parser; (Token::Punct(Punct::BraceOpen)), pos => pos
             expected "block starting with `{`")?;
 
@@ -193,7 +209,7 @@ impl Parsable for AstBlockOrInit {
 
             // parse expression
             let expr = AstExpr::parse(parser)?;
-            if content.is_empty() {
+            if content.is_empty() && allow_init {
                 // check if the expr is a simple name
                 if matches!(&expr, AstExpr::Name(name) if name.path.len() == 1 && name.path[0].params.is_empty()) {
                     if let Ok(local!(Token::Punct(Punct::Colon))) = parser.peak() {
@@ -209,7 +225,7 @@ impl Parsable for AstBlockOrInit {
                         let value = AstExpr::parse(parser)?;
                         let m = AstStructMemberInit::from_value(name.clone(), pos, value);
                         // continue with block init
-                        return Self::continue_parse_block_init(m, InitReason::NamedParameter(reason_pos, name), parser);
+                        return Self::continue_parse_block_init(vec![m], InitReason::NamedParameter(reason_pos, name), parser);
                     }
 
                     if let Ok(SrcToken { pos: reason_pos, token: Token::Punct(Punct::Comma)} ) = parser.peak() {
@@ -225,7 +241,7 @@ impl Parsable for AstBlockOrInit {
 
                         let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src);
                         // continue with block init
-                        return Self::continue_parse_block_init(m, InitReason::Comma(reason_pos, name), parser);
+                        return Self::continue_parse_block_init(vec![m], InitReason::Comma(reason_pos, name), parser);
                     }
                 }
             }
@@ -247,7 +263,7 @@ impl Parsable for AstBlockOrInit {
 
 impl Parsable for AstBlock {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
-        AstBlockOrInit::parse(parser).and_then(|block| block.unwrap_block())
+        AstBlockOrInit::parse(parser, false).and_then(|block| block.unwrap_block())
     }
 }
 

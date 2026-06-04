@@ -1,24 +1,26 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::fmt::Formatter;
 use std::mem;
 use std::sync::Arc;
 use log::{debug, warn};
 use crate::ast::ast_const::AstConst;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::ast_use::AstUseExpr;
 use crate::ast::ast_expression::let_expr::AstLetExpr;
 use crate::ast::ast_fn::{AstFn, AstFnModifier};
@@ -56,8 +58,7 @@ mod test;
 pub mod ast_impl;
 pub mod ast_type_def;
 pub mod ast_trait;
-
-
+mod ast_where;
 
 pub trait AstElement {
     fn pos(&self) -> &SrcPos;
@@ -91,6 +92,7 @@ impl ItemDoc {
         let mut doc_pos = SrcPos::default();
         let mut doc = String::new();
 
+        let mut has_content = false;
         while let Ok(local!(Token::Doc(s, DocType::Plane))) = parser.peak() {
             let pos = parser.next_token()?.pos;
             if !doc.is_empty() {
@@ -99,12 +101,17 @@ impl ItemDoc {
                 doc_pos = pos;
             }
             doc.push_str(&s);
+            has_content = true;
         }
 
-        Ok(Some(ItemDoc {
-            pos: doc_pos,
-            doc,
-        }))
+        if has_content {
+            Ok(Some(ItemDoc {
+                pos: doc_pos,
+                doc,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn append(&mut self, other: &Self) {
@@ -508,14 +515,14 @@ impl AstModule {
 
     pub fn push_constant_definition(c: &AstConst, phase: &mut HirPhase) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
-        let edl_ty = ty.edl_repr(phase)
-            .map_err(|e| AstTranslationError::HirError { err: e })?; // RustRover: false positive
+        let edl_ty = ty.edl_repr(phase).wrap_ast(&c.src)?; // RustRover: false positive
 
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E031,
             }),
         };
@@ -524,6 +531,7 @@ impl AstModule {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty),
             });
         }
@@ -534,6 +542,7 @@ impl AstModule {
             .map_err(|e| AstTranslationError::ResolveError {
                 pos: c.pos,
                 err: e,
+                src: c.src.clone(),
             })?;
         const_name.push(c.name.clone());
 
@@ -546,6 +555,7 @@ impl AstModule {
         ).map_err(|e| AstTranslationError::ResolveError {
             pos: c.pos,
             err: e,
+            src: c.src.clone(),
         })?;
         Ok(())
     }
@@ -606,7 +616,7 @@ impl AstModule {
                             }],
                             None,
                         );
-                        return Err(AstTranslationError::ResolveError { err, pos: u.pos });
+                        return Err(AstTranslationError::ResolveError { err, pos: u.pos, src: self.src.clone() });
                     }
                 },
                 AstItem::LoadedModule(module, _) => {
@@ -653,6 +663,7 @@ impl IntoHir for AstModule {
             }
         }
         Ok(HirModule {
+            src: self.src.clone(),
             items,
             scope: self.scope,
             full_name: self.name,

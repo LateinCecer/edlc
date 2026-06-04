@@ -1,19 +1,21 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::ast_type::{AstTypeName, AstTypeNameEntry};
@@ -328,6 +330,7 @@ impl TypeInitExpr {
                 // error -> cannot init generic type
                 return Err(AstTranslationError::CannotInitGeneric {
                     pos: self.pos,
+                    src: self.src,
                     name,
                 });
             },
@@ -335,6 +338,7 @@ impl TypeInitExpr {
                 // error -> cannot init function type
                 return Err(AstTranslationError::CannotInitFunction {
                     pos: self.pos,
+                    src: self.src,
                     name,
                 });
             },
@@ -350,6 +354,7 @@ impl TypeInitExpr {
                 if !can_init {
                     return Err(AstTranslationError::TypeNotInstantiable {
                         pos: self.pos,
+                        src: self.src,
                         name,
                     });
                 }
@@ -362,6 +367,7 @@ impl TypeInitExpr {
                                 Err(AstTranslationError::ExpectedPositionDependentInit {
                                     ty,
                                     pos: self.pos,
+                                    src: self.src,
                                 })
                             }
                             InitVariant::Tuple {
@@ -371,6 +377,7 @@ impl TypeInitExpr {
                                 if members.len() != member_values.len() {
                                     return Err(AstTranslationError::MemberParameterLengthMismatch {
                                         pos,
+                                        src: self.src,
                                         ty,
                                         exp: members.len(),
                                         got: member_values.len(),
@@ -391,6 +398,7 @@ impl TypeInitExpr {
                                 Err(AstTranslationError::ExpectedPositionDependentInit {
                                     ty,
                                     pos,
+                                    src: self.src,
                                 })
                             }
                         }
@@ -408,6 +416,7 @@ impl TypeInitExpr {
                                     if members.iter().find(|(name, _)| *name == &exp_m.name).is_none() {
                                         return Err(AstTranslationError::MissingNamedParameter {
                                             pos,
+                                            src: self.src,
                                             ty,
                                             name: exp_m.name.clone(),
                                         });
@@ -435,12 +444,14 @@ impl TypeInitExpr {
                             InitVariant::Tuple { pos, .. } => {
                                 Err(AstTranslationError::ExpectedNamedInit {
                                     pos,
+                                    src: self.src,
                                     ty,
                                 })
                             }
                             InitVariant::Unit(pos) => {
                                 Err(AstTranslationError::ExpectedNamedInit {
                                     pos,
+                                    src: self.src,
                                     ty,
                                 })
                             }
@@ -451,12 +462,14 @@ impl TypeInitExpr {
                             InitVariant::Struct { pos, .. } => {
                                 Err(AstTranslationError::ExpectedZeroSizedInit {
                                     pos,
+                                    src: self.src,
                                     ty,
                                 })
                             }
                             InitVariant::Tuple { pos, .. } => {
                                 Err(AstTranslationError::ExpectedZeroSizedInit {
                                     pos,
+                                    src: self.src,
                                     ty,
                                 })
                             }
@@ -484,6 +497,7 @@ impl TypeInitExpr {
                 if !can_init {
                     return Err(AstTranslationError::TypeNotInstantiable {
                         pos: self.pos,
+                        src: self.src,
                         name,
                     });
                 }
@@ -493,6 +507,7 @@ impl TypeInitExpr {
                 // error -> cannot init opaque type
                 Err(AstTranslationError::TypeNotInstantiable {
                     pos: self.pos,
+                    src: self.src,
                     name,
                 })
             },
@@ -500,6 +515,7 @@ impl TypeInitExpr {
                 // error -> cannot init uninitialized type
                 Err(AstTranslationError::TypeNotInitialized {
                     pos: self.pos,
+                    src: self.src,
                     name,
                 })
             },
@@ -519,14 +535,16 @@ impl TypeInitExpr {
                 // error -> cannot init generic type
                 return Err(AstTranslationError::CannotInitGeneric {
                     pos: self.pos,
-                    name: name.clone(),
+                    src: self.src,
+                    name,
                 });
             },
             EdlType::Function { .. } => {
                 // error -> cannot init function type
                 return Err(AstTranslationError::CannotInitFunction {
                     pos: self.pos,
-                    name: name.clone(),
+                    src: self.src,
+                    name,
                 });
             },
         };
@@ -545,13 +563,15 @@ impl TypeInitExpr {
                 if !can_init {
                     return Err(AstTranslationError::TypeNotInstantiable {
                         pos: self.pos,
-                        name: name.clone(),
+                        src: self.src,
+                        name,
                     });
                 }
 
                 let Some(members) = variants.get(&variant.variant) else {
                     return Err(AstTranslationError::MissingEnumVariant {
                         pos: self.pos,
+                        src: self.src,
                         ty: Box::new(variant),
                     });
                 };
@@ -565,6 +585,7 @@ impl TypeInitExpr {
                                 Err(AstTranslationError::ExpectedPositionDependentVariantInit {
                                     ty: Box::new(variant),
                                     pos: self.pos,
+                                    src: self.src,
                                 })
                             }
                             InitVariant::Tuple {
@@ -574,6 +595,7 @@ impl TypeInitExpr {
                                 if members.len() != member_values.len() {
                                     return Err(AstTranslationError::EnumVariantMemberParameterLengthMismatch {
                                         pos,
+                                        src: self.src,
                                         ty: Box::new(variant),
                                         exp: members.len(),
                                         got: member_values.len(),
@@ -595,6 +617,7 @@ impl TypeInitExpr {
                                 Err(AstTranslationError::ExpectedPositionDependentVariantInit {
                                     ty: Box::new(variant),
                                     pos,
+                                    src: self.src,
                                 })
                             }
                         }
@@ -630,6 +653,7 @@ impl TypeInitExpr {
                 // error -> cannot init opaque type
                 Err(AstTranslationError::TypeNotInstantiable {
                     pos: self.pos,
+                    src: self.src,
                     name: name.clone(),
                 })
             },
@@ -637,6 +661,7 @@ impl TypeInitExpr {
                 // error -> cannot init uninitialized type
                 Err(AstTranslationError::TypeNotInitialized {
                     pos: self.pos,
+                    src: self.src,
                     name: name.clone(),
                 })
             },
@@ -649,7 +674,12 @@ impl IntoHir for TypeInitExpr {
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         if let Some(name) = &self.name {
-            match name.clone().hir_repr(parser)?.as_init_instance(self.pos, parser)? {
+            match name
+                .clone()
+                .hir_repr(parser)?
+                .as_init_instance(self.pos, parser)
+                .wrap_ast(&self.src)? {
+
                 InitType::Type(ty) => self.init_from_ty(ty, parser),
                 InitType::Variant(variant) => self.init_from_variant(variant, parser),
             }

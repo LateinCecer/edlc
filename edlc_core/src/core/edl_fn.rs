@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::core::edl_error::EdlError;
@@ -25,24 +27,28 @@ use crate::resolver::ScopeId;
 use std::error::Error;
 use std::fmt::{Debug, Formatter};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlFnSignature {
     pub name: String,
     pub env: EdlEnvId,
     pub scope: ScopeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
     pub ret: EdlTypeInstance,
     pub params: Vec<EdlFnParam>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlPreSignature {
     pub name: String,
     pub env: EdlEnvId,
     pub scope: ScopeId,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
 }
 
 impl EdlFnSignature {
@@ -61,13 +67,17 @@ impl FmtType for EdlFnSignature {
             write!(fmt, "?comptime ")?;
         }
 
+        if self.async_ {
+            write!(fmt, "async  ")?;
+        }
+
         write!(fmt, "fn {}", self.name)?;
         types.fmt_env(self.env, fmt)?;
 
         // print parameters
+        write!(fmt, "(")?;
         let mut iter = self.params.iter();
         if let Some(i) = iter.next() {
-            write!(fmt, "(")?;
             i.fmt_type(fmt, types)?;
         }
         for i in iter {
@@ -81,6 +91,9 @@ impl FmtType for EdlFnSignature {
             Ok(())
         } else {
             write!(fmt, " -> ")?;
+            if self.async_return {
+                write!(fmt, "async ")?;
+            }
             self.ret.fmt_type(fmt, types)
         }
     }
@@ -119,6 +132,10 @@ impl EdlFnSignature {
             write!(fmt, "?comptime")?;
         }
 
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "fn {}", self.name)?;
         if let Some(params) = stack.get_def(self.env) {
             params.fmt_type(fmt, types)?;
@@ -141,6 +158,9 @@ impl EdlFnSignature {
             Ok(())
         } else {
             write!(fmt, " -> ")?;
+            if self.async_return {
+                write!(fmt, "async ")?;
+            }
             self.ret.resolve_generics(stack, types).fmt_type(fmt, types)
         }
     }
@@ -159,6 +179,13 @@ impl EdlFnParam {
         if self.mutable {
             write!(fmt, "mut ")?;
         }
+        if self.comptime {
+            write!(fmt, "comptime ")?;
+        }
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "{}: ", self.name)?;
         ty.fmt_type(fmt, types)
     }
@@ -169,16 +196,24 @@ impl FmtType for EdlFnParam {
         if self.mutable {
             write!(fmt, "mut ")?;
         }
+        if self.comptime {
+            write!(fmt, "comptime ")?;
+        }
+        if self.async_ {
+            write!(fmt, "async ")?;
+        }
+
         write!(fmt, "{}: ", self.name)?;
         self.ty.fmt_type(fmt, types)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlFnParam {
     pub name: String,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub ty: EdlTypeInstance,
 }
 
@@ -289,8 +324,6 @@ pub trait EdlRecoverableError: Error {
 
 pub trait EdlFnArgument: Debug + PartialEq {
     type CompilerState: EdlCompilerState;
-
-    fn is_mutable(&self, state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error>;
 
     /// Returns if the argument is a const expression.
     /// Const expressions are expressions that can be evaluated at compiletime.

@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 //! Please note that the duplicate warnings in this file are not strictly all that bad.
@@ -20,13 +22,14 @@
 //! calling conventions, than SystemV.
 
 use crate::codegen::FunctionTranslator;
-use crate::compiler::calling_convention::{CallingConvention, SystemV};
 use crate::compiler::{RuntimeId, JIT};
-use edlc_core::prelude::mir_backend::{CodeGen, InstructionCount};
-use edlc_core::prelude::mir_funcs::MirFuncRegistry;
-use edlc_core::prelude::{MirError, MirPhase};
+use crate::layout::stack_frame::native_calling_conv;
 use cranelift_module::Linkage;
-
+use edlc_core::prelude::mir_backend::CodeGen;
+use edlc_core::prelude::mir_expr::mir_call::MirCall;
+use edlc_core::prelude::mir_expr::{MirFlowGraph, MirLoc, MirValue};
+use edlc_core::prelude::mir_funcs::CallSrc;
+use edlc_core::prelude::{DebugInformation, MirError, MirPhase};
 
 /// The difference between a normal call and a runtime call is that a pointer to the global runtime
 /// is passed to the callee from the global context.
@@ -63,223 +66,41 @@ impl JITExternCall {
     }
 }
 
-impl<Runtime> InstructionCount<JIT<Runtime>> for JITExternCall {
-    fn count_instructions(
-        &self,
-        _phase: &MirPhase,
-        _func_reg: &MirFuncRegistry<JIT<Runtime>>
-    ) -> Result<usize, MirError<JIT<Runtime>>> {
-        Ok(0)
-    }
-}
-
 impl<Runtime> CodeGen<JIT<Runtime>> for JITExternCall {
     fn code_gen(
         &self,
         backend: &mut FunctionTranslator<'_, Runtime>,
-        phase: &mut MirPhase
+        phase: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        call: &MirCall,
+        target: Option<&MirValue>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<JIT<Runtime>>> {
-        SystemV.compile_call(backend, phase, self)
-/*        let mut sig = backend.module.make_signature();
-        let mut args = Vec::new();
-        let ptr_type = backend.module.target_config().pointer_type();
-
-        // check how the return value is passed
-        let Some(ret) = backend.get_call_return_ty() else {
-            return Err(MirError::BackendError(JITError {
-                ty: JITErrorType::MissingReturnType(self.symbol.clone()),
-            }));
-        };
-
-        // accumulate integer- and floating point parameter lengths for alignment in case of a
-        // stack spill
-        let mut rxx_size: u32 = 0;
-        let mut xmm_size: u32 = 0;
-
-        info!("Creating codegen for external function `{}` call...", self.symbol);
-        let ret_ssa = SSARepr::abi_repr(ret, backend.abi.clone(), &phase.types)?;
-        let ret_slot = if ret_ssa.is_large_aggregated_type(&backend.abi) {
-            // we return via return buffer
-            let slot = backend.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                SSARepr::align(ret_ssa.byte_size(), 8) as u32,
-                16,
-            ));
-            let ptr = backend.builder.ins().stack_addr(ptr_type, slot, 0);
-            args.push(ptr);
-            sig.params.push(AbiParam::special(ptr_type, ArgumentPurpose::StructReturn));
-            sig.returns.push(AbiParam::special(ptr_type, ArgumentPurpose::Normal));
-            rxx_size += ptr_type.bytes();
-            info!(" -- extern function returns by pointer");
-            Some(slot)
-        } else {
-            // we return via return registers
-            // todo: shouldn't we also use the parameter layout here?
-            ret_ssa.members
-                .iter()
-                .for_each(|ty| sig.returns.push(AbiParam::new(*ty)));
-
-            info!(" -- extern function returns by value");
-            None
-        };
-
-        // insert reference to runtime if the runtime is requested
-        if let Some(runtime) = self.runtime {
-            let runtime_data = *backend.runtime_data.get(runtime.as_usize())
-                .ok_or(MirError::BackendError(JITError {
-                    ty: JITErrorType::InvalidRuntimeData(runtime)
-                }))?;
-            let global_value = backend.module
-                .declare_data_in_func(runtime_data, backend.builder.func);
-            let ptr = backend.builder
-                .ins()
-                .symbol_value(ptr_type, global_value);
-            args.push(ptr);
-            sig.params.push(AbiParam::new(ptr_type));
-            rxx_size += ptr_type.bytes();
-        }
-
-        // insert parameters
-        for value in backend.get_call_args() {
-            // push the parameter types to the signature
-            let ssa = SSARepr::abi_repr(value.ty(), backend.abi.clone(), &phase.types)?;
-            let purpose = if ssa.is_large_aggregated_type(&backend.abi) {
-                let argument_size = SSARepr::align(ssa.byte_size(), 8) as u32;
-                info!("Argument size in call: {}", argument_size);
-                ArgumentPurpose::StructArgument(argument_size)
-            } else {
-                ArgumentPurpose::Normal
-            };
-
-            let parameter_layout = ssa.parameter_layout::<Runtime>(phase, backend.abi.clone());
-            let (rxx_sum, xmm_sum) = SSARepr::sum_block_type_bytes(&parameter_layout);
-            // check if parameters are spilled to stack after this argument
-            /*
-            NOTE: In stack spills there is no differentiation between RXX and XMM registers, since
-            the stack itself does not care if it hoses integer, or floating point bits.
-            For this reason, the order in which arguments are pushed to the function signature is
-            important here.
-
-            HOWEVER: each stack of registers (integer and floating point) are in essence filled
-            separately.
-            Lets suppose the following example:
-            all RXX registers are filled and some arguments **that are entirely
-            consistent of integer bits** are already pushed to the stack.
-            If we now add a new argument that is completely composed of __floating point__ bits,
-            then this new argument can still be passed entirely on the XMM registers.
-            **But**: if we try to push a type that is completely or **partially** made up of
-            integer bits, then we must guarantee the callee that the integer and floating point
-            bits are in the correct order.
-             */
-            /*
-            TODO fix this!
-            if rxx_sum != 0 && rxx_size + rxx_sum > SystemV::INT_REGS.len() as u32 * ptr_type.bytes() {
-                // top up RXX registers with enough padding that the entirety of this argument
-                // lives on the stack spill
-                if xmm_sum != 0 && xmm_sum < SystemV::FLOAT_REGS.len() as u32 * ptr_type.bytes() {
-                    // this type contains float bits and not all XMM registers are full yet.
-                    // this means that we must pass the **entire** argument, including the floating
-                    // point bytes, through the stack, __without__ filling the XMM registers first.
-                    // Using the current CodeGen backend, this is not possible.
-                    // For this, we must implement the Calling convention, **with all register
-                    // uses**, manually and cannot rely on Cranelift to do this for us.
-                    unimplemented!("new codegen for SystemV function calls")
-                }
-                if rxx_sum < SystemV::INT_REGS.len() as u32 * ptr_type.bytes() {
-                    unimplemented!("new codegen for SystemV function calls")
-                }
-                // all registers are clear, we are good to go
+        match call_src {
+            CallSrc::Expr(expr_id) => {
+                assert!(target.is_some());
+                let call_layout = backend.layout.call_layout(expr_id).clone();
+                let sig = call_layout.compile(backend, phase).unwrap();
+                sig.generate(backend, phase, self)
             }
-            if xmm_sum != 0 && xmm_size + xmm_sum > SystemV::FLOAT_REGS.len() as u32 * ptr_type.bytes() {
-                // top up XMM registers with enough padding that the entirety of this argument
-                // lives on the stack spill
-                if rxx_sum != 0 && rxx_size + rxx_sum < SystemV::INT_REGS.len() as u32 * ptr_type.bytes() {
-                    // this type contains integer bits and not all RXX registers are full yet.
-                    // this means that we must pass the **entire** argument, including the integer
-                    // bytes, through the stack, __without__ filling the RXX registers first.
-                    // Using the current CodeGen backend, this is not possible.
-                    // For this, we must implement the Calling convention, **with all register
-                    // uses**, manually and cannot rely on Cranelift to do this for us.
-                    unimplemented!("new codegen for SystemV function calls")
-                }
-                if xmm_sum < SystemV::FLOAT_REGS.len() as u32 * ptr_type.bytes() {
-                    unimplemented!("new codegen for SystemV function calls")
-                }
-                // all registers are clear, we are good to go
-            }*/
-            rxx_size += rxx_sum;
-            xmm_size += xmm_sum;
-
-            let parameter_types = SSARepr::types_for_layout(parameter_layout);
-            let parameter_types_len = parameter_types.len();
-            parameter_types.into_iter()
-                .for_each(|ty| sig.params.push(AbiParam::special(ty, purpose)));
-
-            // change the value into a valid ABI argument format
-            let value = value.into_parameter(
-                &mut CodeCtx {
-                    abi: backend.abi.clone(),
-                    phase,
-                    builder: &mut backend.builder,
-                    module: &mut backend.module,
-                }
-            )?;
-
-            let values_stripped = value.strip();
-            assert_eq!(values_stripped.len(), parameter_types_len);
-            // pass raw buffer content to the argument buffer
-            values_stripped.into_iter().for_each(|value| args.push(*value))
+            CallSrc::Headless(id) => {
+                // use crate::layout::stack_frame::CallingConv;
+                // let call_conv = native_calling_conv();
+                // let call_layout = call_conv
+                //     .make_call_layout::<JIT<Runtime>>(cfg, call, target.cloned(), &phase.types, None)
+                //     .expect("calling convention layout should always be valid");
+                let call_layout = backend.layout.headless_layout(id).clone();
+                let sig = call_layout.compile(backend, phase).unwrap();
+                sig.generate(backend, phase, self)
+            }
         }
+    }
 
-        // declare function in local scope
-        let func_id = backend
-            .module
-            .declare_function(&self.symbol, self.linkage, &sig)
-            .map_err(|err| MirError::BackendError(JITError {
-                ty: JITErrorType::ModuleErr(err)
-            }))?;
-        let local_callee = backend.module.declare_func_in_func(
-            func_id, backend.builder.func);
-        // Call function and extract return value
-        let call = backend.builder.ins().call(local_callee, &args);
-        let call_pos = backend.get_call_pos().unwrap();
-        backend.check_continue_unwind(&format!("{}: unwind external call", call_pos), phase)?;
-
-        // return values in the correct way
-        if let Some(ret_slot) = ret_slot {
-            // we have a return buffer, so use that
-            // let ptr = backend.builder
-            //     .inst_results(call);
-            // info!(" -- {:?}", ptr);
-            //
-            // backend.put_call_result(AggregateValue::from_ref(ptr[0], ret, type_reg, false)?);
-            let val = AggregateValue::from_slot(
-                ret_slot, ret, false, &mut CodeCtx {
-                    abi: backend.abi.clone(),
-                    phase,
-                    module: &mut backend.module,
-                    builder: &mut backend.builder,
-                })?;
-            backend.put_call_result(val);
-            info!(" -- getting external function return values from return buffer");
-        } else {
-            let raw_values = backend.builder
-                .inst_results(call);
-            assert!(raw_values.len() <= 2);
-
-            let value = raw_values.into_value(ret);
-            let value: AggregateValue = AggregateValue::from_comp_value(
-                value,
-                &mut CodeCtx {
-                    abi: backend.abi.clone(),
-                    phase,
-                    builder: &mut backend.builder,
-                    module: &mut backend.module,
-                }
-            )?;
-            info!(" -- getting external function return values from return registers");
-            backend.put_call_result(value);
-        }
-        Ok(())*/
+    fn debug_info(
+        &self,
+        _info: &mut DebugInformation,
+        _loc: &MirLoc,
+    ) {
+        // don't attach anything for just a normal function call
     }
 }

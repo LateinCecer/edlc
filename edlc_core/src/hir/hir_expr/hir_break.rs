@@ -1,42 +1,49 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::error::Error;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_type::EdlMaybeType;
-use crate::core::edl_value::{EdlConstValue};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::translation::{HirTranslationError, IntoMir};
 use crate::issue;
 use crate::issue::SrcError;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_break::MirBreak;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::prelude::edl_fn::EdlFnArgument;
 use crate::resolver::ScopeId;
+use std::error::Error;
+use crate::core::edl_type;
+use crate::mir::mir_type::MirTypeId;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompInfo {
     node: NodeId,
     own_uid: TypeUid,
     break_uid: TypeUid,
+    /// The return value of a `break` statement is always `()`.
+    /// Since this value is always created from scratch, it cannot be mutable (also is zero-sized,
+    /// so mutability would make even less sense).
+    mutable: ExtConstUid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,10 +207,14 @@ impl ResolveTypes for HirBreak {
                     .unwrap();
             }
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompInfo {
                 node,
                 own_uid,
                 break_uid: ret_uid,
+                mutable,
             });
             own_uid
         }
@@ -217,6 +228,11 @@ impl ResolveTypes for HirBreak {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -271,13 +287,6 @@ impl HirExpr for HirBreak {
 impl EdlFnArgument for HirBreak {
     type CompilerState = HirPhase;
 
-    fn is_mutable(
-        &self,
-        _state: &Self::CompilerState
-    ) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        Ok(true)
-    }
-
     fn const_expr(
         &self,
         _state: &Self::CompilerState
@@ -286,38 +295,66 @@ impl EdlFnArgument for HirBreak {
     }
 }
 
-impl IntoMir for HirBreak {
-    type MirRepr = MirBreak;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirBreak {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
     where
         MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
     {
-        let loop_id = *self.loop_id.as_ref()
-            .expect("tried to lower `break` statement to MIR level before the statement \
-            was assigned to a loop");
-        let value = if let Some(val) = self.val.as_ref() {
-            Some(Box::new(val.mir_repr(phase, mir_phase, mir_funcs)?))
-        } else {
-            None
-        };
+        let loop_id = self.loop_id.as_ref()
+            .expect("reference to loop in break statement unresolved");
+        let loop_merger = *graph.loop_mapper.merger(loop_id)
+            .expect("loop flow mapper is missing a loop");
 
-        Ok(MirBreak {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: mir_phase.new_id(),
-            loop_id,
-            value,
-        })
+        // we do not need to write anything to the target; the definition can never be read since
+        // `break` yields execution to a point at which `target` need to be overwritten before
+        // any potential reads anyway
+        let target_ty = graph.graph.get_var_type(&target);
+        assert_eq!(*target_ty, graph.mir_phase.types.empty());
+
+        // write value if break statement
+        // NOTE: we must make sure that MIR knows that the return value of the loop is moved out of
+        //       its context. so, we write it to a temporary value here and then move that to the
+        //       loop value to ensure consistency in borrow analysis.
+        let loop_value = *graph.loop_mapper.value(loop_id)
+            .expect("loop flow manager is missing a loop");
+        let loop_value_ty = *graph.graph.get_var_type(&loop_value);
+        let tmp_value = graph.graph.create_temp_variable(loop_value_ty);
+        if let Some(value) = self.val.as_ref() {
+            value.write_to_graph(graph, tmp_value)?;
+            if graph.is_current_sealed() {
+                return Ok(()); // value results in early return
+            }
+        } else {
+            let empty_id = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(
+                graph.current_block,
+                tmp_value,
+                empty_id,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        graph.graph.insert_move(
+            graph.current_block, tmp_value, loop_value, DebugSymbols { pos: self.pos });
+
+        // seal block with jump to merger
+        graph.graph.insert_jump(
+            graph.current_block, loop_merger, DebugSymbols { pos: self.pos });
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        Ok(graph.mir_phase.types.empty())
     }
 }
-
 
 
 #[cfg(test)]

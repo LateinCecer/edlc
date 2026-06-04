@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::ast::ast_param_env::AstPreParams;
@@ -24,23 +26,29 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::SegmentType;
-use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
+use crate::hir::translation::{HirTranslationError};
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ImplSource, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError, SrcRange, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::mir_call::{ComptimeParamPair, MirCall};
+use crate::mir::mir_expr::mir_call::{CallContext, ComptimeParamPair, MirCall};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::TMirFnCallInfo;
+use crate::mir::mir_type::{MirTypeId, TMirFnCallInfo};
 use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ScopeId};
 use std::error::Error;
+use std::hash::DefaultHasher;
 use log::warn;
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::hir_ref::HirRef;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::prelude::report_infer_error;
+
 
 #[derive(Clone, Debug, PartialEq)]
 struct FinalizedTypeInfo {
@@ -48,6 +56,7 @@ struct FinalizedTypeInfo {
     stack: EdlParamStack,
     associated_type: Option<EdlMaybeType>,
     ret_ty: EdlMaybeType,
+    params: Vec<EdlMaybeType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +64,13 @@ struct CompilerInfo {
     node: NodeId,
     resolver: CallResolver,
     finalized_type_info: Option<FinalizedTypeInfo>,
+    /// For calls the mutability of the return value is somewhat complicated; if the function
+    /// returns by value, then the value is newly created (from the standpoint of the caller) and
+    /// is thus immutable.
+    /// If the function returns by reference, then the reference may be mutable, but the reference
+    /// as a value _itself_ is always immutable.
+    /// Thus, the mutability of a call is always immutable.
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +87,7 @@ pub struct HirFunctionCall {
     pub scope: ScopeId,
     pub src: ModuleSrc,
     pub params: Vec<HirExpression>,
+    pub param_modifiers: Vec<CallParamModifier>,
     pub is_method_call: bool,
 
     raw_name: Option<AstTypeName>,
@@ -96,8 +113,8 @@ struct FunctionParameterReport<'a, Fact: Sized> {
     facts: Fact,
     ret: EdlMaybeType,
     arg_types: Vec<EdlMaybeType>,
-    arg_formated: Vec<[TypeArgument<'a>; 3]>,
-    args: Vec<SrcError<'a>>,
+    arg_formated: Vec<[TypeArgument<'a, DefaultHasher>; 3]>,
+    args: Vec<SrcError<'a, DefaultHasher>>,
 }
 
 macro_rules! format_function_parameters(
@@ -144,6 +161,7 @@ impl HirFunctionCall {
         scope: ScopeId,
         src: ModuleSrc,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
         name: AstTypeName,
     ) -> Self {
         HirFunctionCall {
@@ -151,6 +169,7 @@ impl HirFunctionCall {
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: false,
 
             raw_name: Some(name),
@@ -170,12 +189,14 @@ impl HirFunctionCall {
         generic_params: AstPreParams,
         associated_trait: EdlTraitInstance,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
     ) -> Self {
         HirFunctionCall {
             pos,
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: false,
 
             raw_name: None,
@@ -202,12 +223,14 @@ impl HirFunctionCall {
         name: QualifierName,
         generic_params: AstPreParams,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
     ) -> Self {
         HirFunctionCall {
             pos,
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: true,
 
             raw_name: None,
@@ -466,6 +489,71 @@ impl HirFunctionCall {
             .unwrap_or(self.pos)
     }
 
+    fn verify_mut_ref(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        let mut res = Ok(());
+        let info = self.info.as_ref().unwrap();
+        if let Some(resolver_info) = info.resolver.res.as_ref() {
+            for (value, (auto_ref, modifier)) in self.params
+                .iter()
+                .zip(resolver_info.auto_ref
+                    .iter()
+                    .zip(self.param_modifiers.iter())) {
+
+                let AutoReference::Reference { mutability } = auto_ref else {
+                    continue;
+                };
+                let m = infer_state.find_ext_const(*mutability)
+                    .expect("failed to find mutability in type inferer state");
+                let m = m.unwrap_literal().unwrap_bool();
+                let func = resolver_info.sig.fn_id;
+
+                if m && *modifier != CallParamModifier::Mutable {
+                    // the value must be mutable
+                    phase.report_error(
+                        TypeArguments::new(&[
+                            TypeArgument::new_display(&"creation of mutable reference must be \
+                            marked as `mut`"),
+                        ]),
+                        &[
+                            SrcError::Double {
+                                src: self.src.clone(),
+                                first: self.pos.clone().into(),
+                                second: value.pos().clone().into(),
+                                error_first: TypeArguments::new(&[
+                                    TypeArgument::new_display(&"function call `"),
+                                    TypeArgument::new_edl(&func),
+                                    TypeArgument::new_display(&"` takes a mutable reference"),
+                                ]),
+                                error_second: TypeArguments::new(&[
+                                    TypeArgument::new_display(&"value needs to be referenced \
+                                    mutably, which requires prefixing the parameter value with the \
+                                    `mut` keyword"),
+                                ]),
+                            }
+                        ],
+                        Some(TypeArguments::new(&[
+                            TypeArgument::new_display(&"This language feature is there to \
+                            clearly communicate to the user that a value may be modified by the \
+                            callee."),
+                        ])),
+                    );
+                    if res.is_ok() {
+                        res = Err(HirError {
+                            pos: value.pos(),
+                            ty: Box::new(HirErrorType::NotMutable("mutable reference is created \
+                            but parameter is not marked as `mut`".to_string()))
+                        });
+                    }
+                }
+            }
+        }
+        res
+    }
+
     pub fn verify(
         &mut self,
         phase: &mut HirPhase,
@@ -591,6 +679,11 @@ impl HirFunctionCall {
             self.call_comptime_if_possible = true;
         }
         // println!("  [{}] result = {res:?}", self.pos);
+        if let Err(err) = self.verify_mut_ref(phase, infer_state) {
+            if res.is_ok() {
+                res = Err(err);
+            }
+        }
         res
     }
 
@@ -1670,6 +1763,26 @@ impl ResolveTypes for HirFunctionCall {
                 | CallResolveError::TooManyMethods(_)
                 | CallResolveError::TooManyTraitMethods(_)) => (),
         }
+
+        if let Some(res) = self.info.as_ref().unwrap().resolver.res.as_ref() {
+            for (param, auto_ref_state) in self.params.iter_mut().zip(res.auto_ref.iter()) {
+                match auto_ref_state {
+                    AutoReference::Reference {
+                        mutability
+                    } => {
+                        let mut inferer = phase.infer_from(infer_state);
+                        let param_mutability = param.mutability(&mut inferer);
+                        if let Err(err) = inferer
+                            .at(node)
+                            .eq(mutability, &param_mutability) {
+                            return Err(report_infer_error(err, infer_state, phase));
+                        }
+                    }
+                    _ => ()
+                }
+            }
+        }
+
         // resolve types of arguments again, to resolve nested function calls correctly
         for param in self.params.iter_mut() {
             param.resolve_types(phase, infer_state)?;
@@ -1718,10 +1831,14 @@ impl ResolveTypes for HirFunctionCall {
                 resolver.with_trait(trait_id.clone());
             }
 
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
+
             self.info = Some(CompilerInfo {
                 node,
                 resolver,
                 finalized_type_info: None,
+                mutable,
             });
             ret_type
         }
@@ -1729,13 +1846,14 @@ impl ResolveTypes for HirFunctionCall {
 
     fn finalize_types(&mut self, inferer: &mut Infer<'_, '_>) {
         let info = self.info.as_mut().unwrap();
-        if let Some((fn_id, stack, associated_type)) = info.resolver.finalize_types(inferer) {
+        if let Some((fn_id, stack, associated_type, params)) = info.resolver.finalize_types(inferer) {
             let ret_ty = inferer.find_type(info.resolver.args.ret);
             info.finalized_type_info = Some(FinalizedTypeInfo {
                 fn_id,
                 stack,
                 associated_type,
                 ret_ty,
+                params,
             });
         } else {
             warn!("function failed to resolve without error. Lets hope this will be captured during verification...");
@@ -1747,6 +1865,11 @@ impl ResolveTypes for HirFunctionCall {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -1841,10 +1964,6 @@ impl HirExpr for HirFunctionCall {
 impl EdlFnArgument for HirFunctionCall {
     type CompilerState = HirPhase;
 
-    fn is_mutable(&self, _state: &Self::CompilerState) -> Result<bool, <Self::CompilerState as EdlCompilerState>::Error> {
-        todo!()
-    }
-
     /// At this state, it is not clear whether the function is stateless.
     /// This information is only present in the MIR phase of the compiler pipeline, since only then
     /// the body of the function can be considered.
@@ -1856,142 +1975,170 @@ impl EdlFnArgument for HirFunctionCall {
     }
 }
 
-impl IntoMir for HirFunctionCall {
-    type MirRepr = MirCall;
-
-    fn mir_repr<B: Backend>(
+impl MakeGraph for HirFunctionCall {
+    fn write_to_graph<B: Backend>(
         &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        func_reg: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError>
-    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-        // create function instance
-        let func_instance = self.get_function_instance().unwrap();
-        if !func_instance.is_fully_resolved() {
-            phase.report_error(
-                format_type_args!(
-                    format_args!("function call not fully resolved at the time of codegen")
-                ),
-                &[
-                    SrcError::Single {
-                        pos: self.pos.into(),
-                        src: self.src.clone(),
-                        error: format_type_args!(
-                            format_args!(""),
-                            &func_instance as &dyn FmtType
-                        )
-                    }
-                ],
-                None,
-            );
-            panic!();
-        }
+        graph: &mut MirGraph<B>,
+        target: MirValue,
+    ) -> Result<(), HirTranslationError>
+    where
+        MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>
+    {
+        let info = self.info.as_ref().unwrap();
+        let type_info = info.finalized_type_info.as_ref().unwrap();
 
-        // find return type
-        let ret_ty = self.get_type(phase)?;
-        if !ret_ty.is_fully_resolved() {
-            return Err(HirTranslationError::TypeNotFullyResolved { pos: self.pos, ty: ret_ty });
-        }
-        let EdlMaybeType::Fixed(ret_ty) = ret_ty else {
-            panic!();
-        };
-
-        // translate comptime parameters
-        let caller_uid = mir_phase.new_id();
-        let sig = phase.types.get_fn_signature(func_instance.func)?.clone();
-
-        // format MIR return type
-        let mir_ret = if sig.return_type().ty != edl_type::EDL_NEVER {
-            mir_phase.types.mir_id(&ret_ty, &phase.types)
-                .map_err(HirTranslationError::EdlError)?
+        // get function signature for comparison
+        let edl_sig = graph.hir_phase.types.get_fn_signature(type_info.fn_id)?.clone();
+        let ret = if edl_sig.ret == graph.hir_phase.types.never() {
+            graph.mir_phase.types.never()
         } else {
-            // make sure that functions that return `never` are actually invoked with the correct
-            // signature
-            mir_phase.types.never()
+            graph.mir_phase.types.mir_id(&type_info.ret_ty.clone().unwrap(), &graph.hir_phase.types)?
         };
+        let edl_func_instance = self.get_function_instance().unwrap();
+        let mir_uid = graph.mir_phase.new_id();
 
-        // check if the function call was from a `comptime` context and if the callee is a
-        // hybrid function.
-        // In that case, generate the function as a `comptime` function, instead of as a
+        // check if the function call was from a `comptime` context and if the callee is a hybrid
+        // function. In that case, generate the function as a `comptime` function, instead of as a
         // true hybrid function.
-        let comptime_call = sig.comptime_only || (self.call_comptime_if_possible && sig.comptime);
-        let mut comptime_params = if !comptime_call && sig.is_hybrid() {
-            ComptimeParams::new(caller_uid)
-        } else{
+        let comptime_call = edl_sig.comptime_only || (self.call_comptime_if_possible && edl_sig.comptime);
+        let mut comptime_params = if !comptime_call && edl_sig.is_hybrid() {
+            ComptimeParams::new(mir_uid)
+        } else {
             ComptimeParams::empty()
         };
 
-        let mut args = Vec::new();
+        // we can assume that call resolution was successful if we've reached this point
+        let resolver_data = info.resolver.res.as_ref()
+            .expect("failed to get resolver success data after successful function call resolution");
 
-        let mut comptime_args = Vec::new();
-        for (i, (arg, param_def)) in self.params
+        // write parameters
+        let mut parameter_values = vec![];
+        let mut comptime_parameter_values = vec![];
+        for (i, ((param, param_def), (auto_ref, param_ty))) in self.params
             .iter()
-            .zip(sig.params.iter())
+            .zip(edl_sig.params.iter())
+            .zip(resolver_data.auto_ref
+                .iter()
+                .zip(type_info.params.iter()))
             .enumerate() {
-            
-            let mir_arg = arg.mir_repr(phase, mir_phase, func_reg)?;
-            if param_def.comptime && !comptime_call {
-                let id = func_reg.comptime_mapper.create();
-                let comptime_index = comptime_params.len();
-                comptime_params.push(id, i, comptime_index);
 
-                comptime_args.push(ComptimeParamPair {
-                    value_id: id,
-                    value_expr: mir_arg,
+            let EdlMaybeType::Fixed(param_ty) = param_ty else {
+                unreachable!()
+            };
+            let param_ty = graph.mir_phase.types.mir_id(param_ty, &graph.hir_phase.types)?;
+            let param_value = graph.graph.create_temp_variable(param_ty);
+            match auto_ref {
+                AutoReference::None => {
+                    param.write_to_graph(graph, param_value)?;
+                }
+                AutoReference::Reference { .. } => {
+                    let pos = param.pos();
+                    HirRef::write_ref_to_graph(param, graph, param_value, pos)?;
+                }
+                AutoReference::Dereference => {
+                    let pos = param.pos();
+                    HirDeref::write_deref_to_graph(param, graph, param_value, pos)?;
+                }
+            }
+            if graph.is_current_sealed() {
+                return Ok(()); // early exit in the eval of the parameter value
+            }
+
+            // register as runtime or as comptime parameter
+            if param_def.comptime && !comptime_call {
+                let value_id = graph.mir_funcs.comptime_mapper.create();
+                let comptime_index = comptime_params.len();
+                comptime_params.push(value_id, i, comptime_index);
+                comptime_parameter_values.push(ComptimeParamPair {
+                    value_id,
+                    value_expr: param_value,
                 });
             } else {
-                args.push(mir_arg);
+                parameter_values.push(param_value);
             }
         }
-        // -- sanity checks
-        assert_eq!(args.len() + comptime_params.len(), self.params.len());
-        assert_eq!(comptime_params.len(), comptime_args.len());
+        // sanity check parameter lengths
+        assert_eq!(parameter_values.len() + comptime_params.len(), self.params.len());
+        assert_eq!(comptime_params.len(), comptime_parameter_values.len());
 
-        let mir_call_id = match func_reg.mir_id(
-            &func_instance,
-            phase,
-            mir_phase,
+        // get MIR function id from the registry
+        let func = graph.mir_funcs.mir_id(
+            &edl_func_instance,
+            graph.hir_phase,
+            graph.mir_phase,
             comptime_params,
-            comptime_call
-        ) {
-            Ok(val) => val,
-            Err(err) => {
-                phase.report_error(
-                    format_type_args!(
-                        format_args!("failed to generate function instance")
-                    ),
-                    &[
-                        SrcError::Single {
-                            src: self.src.clone(),
-                            pos: self.pos.clone().into(),
-                            error: format_type_args!(
-                                format_args!("was evaluated to function instance `"),
-                                &func_instance as &dyn FmtType,
-                                format_args!("`")
-                            )
-                        }
-                    ],
-                    None,
-                );
-                return Err(err);
-            },
-        };
+            comptime_call && edl_sig.is_hybrid(),
+        )?;
 
-        Ok(MirCall {
-            pos: self.pos,
-            scope: self.scope,
-            src: self.src.clone(),
-            id: caller_uid,
-            ret: mir_ret,
-            func: mir_call_id,
-            args,
-            comptime_args,
-            is_recursive: false,
-        })
+        // println!("function call to `{}` compiled to {func:?}", format_type_args!(&edl_func_instance as &dyn FmtType)
+        //     .printable(&graph.hir_phase.types, &graph.hir_phase.vars));
+        // println!("  - comptime: {comptime_call}");
+
+        // get call context from function signature
+        // how the function is actually called is ultimately up to the MIR compiler
+        let call_context = CallContext::from_sig(&edl_sig);
+
+        // create call expression
+        let expr = graph.graph.expressions
+            .insert_call(MirCall {
+                id: Some(mir_uid),
+                args: parameter_values,
+                comptime_args: comptime_parameter_values,
+                ret,
+                func,
+                is_recursive: false,
+                context: call_context,
+            });
+        // seal block if the function is marked as 'never-return'
+        if ret == graph.mir_phase.types.never() {
+            let temp_val = graph.graph.create_temp_variable(ret);
+            graph.graph.insert_def(
+                graph.current_block,
+                temp_val,
+                expr,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+            // function call is expected to never actually return.
+            // to make sure that this is actually represented in the flow graph, insert a panic.
+            // this acts as a guard in case the function call does return after all
+            let panic_value = graph.graph
+                .create_temp_variable(graph.mir_phase.types.empty());
+            let empty = graph.graph.expressions
+                .insert_empty(&graph.mir_phase.types);
+            graph.graph.insert_def(graph.current_block, panic_value, empty, &graph.mir_phase.types, DebugSymbols { pos: self.pos });
+            graph.graph.insert_panic(graph.current_block, panic_value, DebugSymbols { pos: self.pos });
+        } else {
+            graph.graph.insert_def(
+                graph.current_block,
+                target,
+                expr,
+                &graph.mir_phase.types,
+                DebugSymbols { pos: self.pos },
+            );
+        }
+        Ok(())
+    }
+
+    fn mir_type<B: Backend>(
+        &self,
+        graph: &mut MirGraph<B>,
+    ) -> Result<MirTypeId, HirTranslationError> {
+        // NOTE: the return value of the function is always just a plane value. Function returns
+        //       may never be internal references. What can be internal references is dereferenced
+        //       references returned by function calls. But that naturally is a language level
+        //       reference, even if the dereferencing may be performed automatically.
+        let ty = self.get_type(&mut graph.hir_phase)?;
+        if !ty.is_fully_resolved() {
+            return Err(HirTranslationError::TypeNotFullyResolved {
+                pos: self.pos,
+                ty,
+            });
+        }
+        graph.mir_phase.types.mir_id(&ty.unwrap(), &graph.hir_phase.types)
+            .map_err(HirTranslationError::EdlError)
     }
 }
-
 
 #[cfg(test)]
 mod test {

@@ -1,20 +1,22 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::AstExpr;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir};
@@ -536,17 +538,20 @@ impl AstPreParams {
 /// As a result, only fully parsed parameter definitions are contained in the final result.
 impl AstPreParams {
     pub fn hir_repr_env(self, env: EdlEnvId, parser: &mut HirPhase) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse_env(env, parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse_env(env, parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 
     pub fn hir_repr(self, parser: &mut HirPhase, path: &QualifierName) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse(path, parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse(path, parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 
     pub fn hir_repr_self(self, parser: &mut HirPhase) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse_self(parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse_self(parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 }
@@ -596,13 +601,13 @@ impl IntoHir for ParamDef {
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         match self {
-            ParamDef::Const(AstExpr::Elicit(_)) => {
+            ParamDef::Const(AstExpr::Elicit(_, _)) => {
                 Ok(HirParamValue::ElicitConst)
             }
             ParamDef::Const(expr) => {
                 Ok(HirParamValue::Const(expr.hir_repr(parser)?))
             }
-            ParamDef::Type(AstType::Elicit(_)) => {
+            ParamDef::Type(AstType::Elicit(_, _)) => {
                 Ok(HirParamValue::ElicitType)
             }
             ParamDef::Type(value) => {

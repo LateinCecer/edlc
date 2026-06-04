@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::ast::ast_error::AstTranslationError;
@@ -37,6 +39,7 @@ use crate::ast::ast_expression::method_expr::AstMethodExpr;
 use crate::ast::ast_expression::prefix_expr::{AstPrefixExpr, PrefixOperator};
 use crate::ast::ast_expression::return_expr::AstReturn;
 use crate::ast::ast_expression::type_init_expr::TypeInitExpr;
+use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_name::HirName;
 use crate::hir::hir_expr::HirExpression;
 use crate::hir::HirPhase;
@@ -82,7 +85,7 @@ pub enum AstExpr {
     As(AstAsExpr),
     Use(AstUseExpr),
     Block(AstBlock),
-    Elicit(SrcPos),
+    Elicit(SrcPos, ModuleSrc),
     Prefix(AstPrefixExpr),
     If(AstIf),
     For(AstFor),
@@ -176,8 +179,8 @@ impl IntoHir for AstExpr {
             AstExpr::Block(block) => {
                 block.hir_repr(parser).map(|lit| lit.into())
             }
-            AstExpr::Elicit(pos) => {
-                Err(AstTranslationError::ElicitValue { pos })
+            AstExpr::Elicit(pos, src) => {
+                Err(AstTranslationError::ElicitValue { pos, src })
             }
             AstExpr::Prefix(val) => {
                 val.hir_repr(parser)
@@ -214,7 +217,7 @@ impl AstElement for AstExpr {
             AstExpr::As(x) => x.pos(),
             AstExpr::Use(x) => x.pos(),
             AstExpr::Block(x) => x.pos(),
-            AstExpr::Elicit(pos) => pos,
+            AstExpr::Elicit(pos, _) => pos,
             AstExpr::Method(val) => val.pos(),
             AstExpr::Prefix(val) => val.pos(),
             AstExpr::For(val) => val.pos(),
@@ -267,7 +270,7 @@ impl AstExpr {
                 => AstInitExpr::parse(parser).map(|e| e.into()),
 
             Ok(local!(Token::Punct(Punct::BraceOpen))) => {
-                match AstBlockOrInit::parse(parser)? {
+                match AstBlockOrInit::parse(parser, true)? {
                     AstBlockOrInit::Init(expr, reason) => {
                         let pos = *reason.src();
                         let scope = *parser.env.current_scope().wrap(pos)?;
@@ -299,9 +302,12 @@ impl AstExpr {
             Ok(local!(Token::Key(KeyWord::If))) => AstIf::parse(parser).map(|e| e.into()),
             Ok(local!(Token::Key(KeyWord::Use))) => AstUseExpr::parse(parser).map(|e| e.into()),
             Ok(local!(Token::Key(KeyWord::Comptime))) => AstComptime::parse(parser).map(|e| e.into()),
+            Ok(local!(Token::Key(KeyWord::SelfParameter))) => {
+                AstTypeName::parse_self_param(parser).map(|e| e.into())
+            }
             Ok(local!(Token::Ident(ident))) if ident == "false" || ident == "true"
                 => AstBoolExpr::parse(parser).map(|e| e.into()),
-            Ok(local!(Token::Ident(ident))) if ident == "_" => Ok(AstExpr::Elicit(parser.next_token()?.pos)),
+            Ok(local!(Token::Ident(ident))) if ident == "_" => Ok(AstExpr::Elicit(parser.next_token()?.pos, parser.module_src.clone())),
             Ok(local!(Token::Ident(_))) => {
                 let name = AstTypeName::parse(parser);
                 // check for named struct init
@@ -309,14 +315,19 @@ impl AstExpr {
                     let pos = *parser.pos();
                     let scope = *parser.env.current_scope().wrap(pos)?;
 
-                    match AstBlockOrInit::parse(parser)? {
-                        AstBlockOrInit::Init(expr, ..) => {
+                    match AstBlockOrInit::parse_init(parser, pos) {
+                        Ok(AstBlockOrInit::Init(expr, ..)) => {
                             TypeInitExpr::from_list_named(expr, name?, pos, scope, parser.module_src.clone())
                                 .map(|e| e.into())
                         }
-                        AstBlockOrInit::Block(..) => {
+                        Ok(AstBlockOrInit::Block(..)) => {
                             parser.reset_until(&pos)
-                                .map_err(|err| ParseError::LexError(err))?;
+                                .map_err(ParseError::LexError)?;
+                            name.map(|e| e.into())
+                        }
+                        Err(_) => {
+                            parser.reset_until(&pos)
+                                .map_err(ParseError::LexError)?;
                             name.map(|e| e.into())
                         }
                     }
@@ -331,14 +342,19 @@ impl AstExpr {
                     let pos = *parser.pos();
                     let scope = *parser.env.current_scope().wrap(pos)?;
 
-                    match AstBlockOrInit::parse(parser)? {
-                        AstBlockOrInit::Init(expr, ..) => {
+                    match AstBlockOrInit::parse_init(parser, pos) {
+                        Ok(AstBlockOrInit::Init(expr, ..)) => {
                             TypeInitExpr::from_list(expr, pos, scope, parser.module_src.clone())
                                 .map(|e| e.into())
                         }
-                        AstBlockOrInit::Block(..) => {
+                        Ok(AstBlockOrInit::Block(..)) => {
                             parser.reset_until(&pos)
-                                .map_err(|err| ParseError::LexError(err))?;
+                                .map_err(ParseError::LexError)?;
+                            name.map(|e| e.into())
+                        }
+                        Err(_) => {
+                            parser.reset_until(&pos)
+                                .map_err(ParseError::LexError)?;
                             name.map(|e| e.into())
                         }
                     }

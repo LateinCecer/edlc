@@ -1,34 +1,33 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::collections::HashMap;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlConstId, EdlTypeId};
 use crate::core::EdlVarId;
 use crate::hir::translation::HirTranslationError;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, StackError};
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId, MirFuncRegistry};
+use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
-use crate::mir::mir_vars::MirVarRegistry;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::mem;
-use crate::mir::mir_expr::mir_block::MirBlock;
+
+pub use debug::{DebugDataId, DebugInformation, SourceInfo, TrapInfo};
 
 pub mod mir_type;
 pub mod mir_funcs;
@@ -40,6 +39,10 @@ pub mod mir_item;
 pub mod mir_vars;
 pub mod mir_str;
 mod borrowchecker;
+mod mir_comptime;
+mod mir_opt;
+pub mod mir_executor;
+mod debug;
 
 #[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct MirFnId(usize);
@@ -359,10 +362,8 @@ impl Display for MirUid {
 #[derive(Default)]
 pub struct MirPhase {
     pub types: MirTypeRegistry,
-    pub vars: MirVarRegistry,
     pub ctx: MirContext,
     pub id_counter: MirUid,
-    pub const_block_values: HashMap<MirUid, MirExpr>,
     pub is_optimizing: bool,
 }
 
@@ -390,24 +391,6 @@ impl MirPhase {
         id
     }
 
-    /// Evaluates a compile time constant MIR block and returns
-    pub fn eval_const_block<B: Backend>(
-        &mut self,
-        hir_phase: &mut HirPhase,
-        backend: &mut B,
-        val: &MirBlock,
-    ) -> Result<MirExpr, MirError<B>> {
-        assert!(val.comptime, "only comptime blocks should be evaluated at compile time");
-        if let Some(const_expr) = self.const_block_values.get(&val.id) {
-            Ok(const_expr.clone())
-        } else {
-            let id = val.id;
-            let const_expr = backend.eval_const_expr(MirExpr::Block(val.clone()), self, hir_phase)?;
-            self.const_block_values.insert(id, const_expr.clone());
-            Ok(const_expr)
-        }
-    }
-
     pub fn ctx(&self) -> &MirContext {
         &self.ctx
     }
@@ -415,63 +398,4 @@ impl MirPhase {
     pub fn ctx_mut(&mut self) -> &mut MirContext {
         &mut self.ctx
     }
-
-    pub fn update_var<B: Backend>(
-        &mut self,
-        id: EdlVarId,
-        value: &MirExpr,
-        funcs: &MirFuncRegistry<B>,
-    ) -> Result<(), MirError<B>> {
-        if value.is_const_expr(self, funcs)? {
-            // let con = backend.eval_const_expr(value.clone(), self)?;
-            self.vars.update_var(id, Some(value.clone()))
-        } else {
-            self.vars.update_var(id, None)
-        }
-    }
-
-    /// Removes the currently tracked value from the specified variable in the data-flow graph.
-    /// This must be called for items which obfuscate the value the a variable through mechanisms
-    /// such as conditional branching where the conditional branch is **not** compile-time
-    /// constant.
-    pub fn unoptimize_var<B: Backend>(
-        &mut self,
-        id: EdlVarId,
-    ) -> Result<(), MirError<B>> {
-        self.vars.update_var(id, None)
-    }
-
-    pub fn insert_var(&mut self, id: EdlVarId, ty: MirTypeId, is_global: bool) {
-        self.vars.insert_var(id, ty, is_global)
-    }
-
-    pub fn is_var_const_expr<B: Backend>(&self, id: EdlVarId) -> Result<bool, MirError<B>> {
-        self.vars.is_comptime(id)
-    }
-
-    pub fn push_layer(&mut self) {
-        self.vars.push_layer();
-    }
-
-    pub fn pop_layer(&mut self) {
-        self.vars.pop_layer();
-    }
-}
-
-pub trait IsConstExpr<B: Backend> {
-    /// Returns true, if the expression can be evaluated at compiletime.
-    fn is_const_expr(
-        &self,
-        phase: &MirPhase,
-        funcs: &MirFuncRegistry<B>
-    ) -> Result<bool, MirError<B>>;
-}
-
-pub trait AsConstExpr<B: Backend> {
-    /// Returns a constant expression from the raw expression, if possible.
-    fn into_const_expr(
-        self,
-        phase: &mut MirPhase,
-        backend: &mut B,
-    ) -> Result<MirExpr, MirError<B>>;
 }

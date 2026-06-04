@@ -1,0 +1,231 @@
+/*
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
+ *
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
+ *
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
+ *
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+use std::collections::BTreeMap;
+use std::ops;
+use crate::core::index_map::IndexMap;
+use crate::file::ModuleSrc;
+use crate::lexer::SrcPos;
+use crate::mir::mir_expr::{MirBlockRef, MirFlowGraph, MirGraphLoc, MirLoc};
+
+pub(crate) struct CfgBlockMap<T> {
+    statement_data: IndexMap<T>,
+    seal_data: Option<T>,
+}
+
+pub(crate) struct CfgMap<T> {
+    blocks: Vec<CfgBlockMap<T>>,
+}
+
+pub(crate) struct CfgMapIter<'a, 'cfg, T> {
+    map: &'a CfgMap<T>,
+    cfg: &'cfg MirFlowGraph,
+    block_idx: usize,
+    statement_idx: usize,
+}
+
+impl<'a, 'cfg, T> Iterator for CfgMapIter<'a, 'cfg, T> {
+    type Item = (MirLoc, &'a T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let block = self.map.blocks.get(self.block_idx)?;
+            let cfg_block = self.cfg.get_block(&MirBlockRef(self.block_idx)).unwrap();
+            while self.statement_idx < cfg_block.statements.len() {
+                let Some(statement_data) = block.statement_data.get(self.statement_idx) else {
+                    self.statement_idx += 1;
+                    continue;
+                };
+                let uid = *cfg_block.statements[self.statement_idx].uid();
+                self.statement_idx += 1;
+                return Some((
+                    MirLoc::GraphLoc(MirGraphLoc::new(MirBlockRef(self.block_idx), uid)),
+                    statement_data,
+                ));
+            }
+            if self.statement_idx == cfg_block.statements.len() {
+                if let Some(seal_data) = block.seal_data.as_ref() {
+                    self.statement_idx += 1;
+                    break Some((
+                        MirLoc::Seal(MirBlockRef(self.block_idx)),
+                        seal_data,
+                    ));
+                }
+            }
+            self.block_idx += 1;
+            self.statement_idx = 0;
+        }
+    }
+}
+
+impl<T> CfgMap<T> {
+    pub fn new() -> Self {
+        CfgMap {
+            blocks: Vec::new(),
+        }
+    }
+
+    pub(crate) fn iter<'cfg>(&self, cfg: &'cfg MirFlowGraph) -> CfgMapIter<'_, 'cfg, T> {
+        CfgMapIter {
+            map: self,
+            cfg,
+            block_idx: 0,
+            statement_idx: 0,
+        }
+    }
+
+    fn get_block_mut(&mut self, loc: &MirBlockRef) -> &mut CfgBlockMap<T> {
+        while self.blocks.len() <= loc.ordinal() {
+            self.blocks.push(CfgBlockMap {
+                statement_data: IndexMap::default(),
+                seal_data: None,
+            });
+        }
+        &mut self.blocks[loc.ordinal()]
+    }
+
+    fn get_block(&self, loc: &MirBlockRef) -> Option<&CfgBlockMap<T>> {
+        self.blocks.get(loc.ordinal())
+    }
+
+    pub fn insert(&mut self, loc: &MirLoc, val: T) {
+        match loc {
+            MirLoc::Seal(block_ref) => {
+                self
+                    .get_block_mut(block_ref)
+                    .seal_data = Some(val);
+            }
+            MirLoc::GraphLoc(MirGraphLoc(block_ref, uid)) => {
+                self
+                    .get_block_mut(block_ref)
+                    .statement_data
+                    .view_mut(uid.ordinal())
+                    .set(val);
+            }
+        }
+    }
+
+    pub fn get(&self, loc: &MirLoc) -> Option<&T> {
+        match loc {
+            MirLoc::Seal(block_ref) => {
+                self
+                    .get_block(block_ref)
+                    .and_then(|block_map| block_map.seal_data.as_ref())
+            }
+            MirLoc::GraphLoc(MirGraphLoc(block_ref, uid)) => {
+                self
+                    .get_block(block_ref)
+                    .and_then(|block_map| block_map.statement_data.get(uid.ordinal()))
+            }
+        }
+    }
+
+    pub fn get_mut_with<F: FnOnce() -> T>(&mut self, loc: &MirLoc, with: F) -> &mut T {
+        match loc {
+            MirLoc::Seal(block_ref) => {
+                if self.get_block_mut(block_ref).seal_data.is_none() {
+                self.get_block_mut(block_ref).seal_data = Some(with());
+                }
+                self.get_block_mut(block_ref).seal_data.as_mut().unwrap()
+            }
+            MirLoc::GraphLoc(MirGraphLoc(block_ref, uid)) => {
+                let statements = &mut self
+                    .get_block_mut(block_ref)
+                    .statement_data;
+                let _ = statements
+                    .view_mut(uid.ordinal())
+                    .get_or_insert_with(with);
+                &mut statements[uid.ordinal()]
+            }
+        }
+    }
+}
+
+pub type DebugDataId = u32;
+
+pub struct SourceInfo {
+    pub pos: SrcPos,
+    pub src: ModuleSrc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapInfo {
+    DivideByZero,
+    ArrayIndex,
+    SliceIndex,
+    ArrayRange,
+    SliceRange,
+    ExplicitPanic,
+    AssertionFailed,
+    Other(&'static str),
+}
+
+pub struct DebugInformation {
+    locs: CfgMap<DebugDataId>,
+    counter: DebugDataId,
+    src_info: IndexMap<SourceInfo>,
+    trap_info: BTreeMap<DebugDataId, TrapInfo>,
+}
+
+impl DebugInformation {
+    pub fn new() -> Self {
+        DebugInformation {
+            counter: 0,
+            locs: CfgMap::new(),
+            src_info: IndexMap::default(),
+            trap_info: BTreeMap::default(),
+        }
+    }
+
+    pub fn deconstruct(self) -> (IndexMap<SourceInfo>, BTreeMap<DebugDataId, TrapInfo>) {
+        (self.src_info, self.trap_info)
+    }
+
+    pub fn id(&mut self, loc: &MirLoc) -> DebugDataId {
+        *self.locs.get_mut_with(loc, || {
+            self.counter += 1;
+            self.counter
+        })
+    }
+
+    pub fn try_id(&self, loc: &MirLoc) -> Option<&DebugDataId> {
+        self.locs.get(loc)
+    }
+
+    pub fn insert_source_info(&mut self, loc: &MirLoc, info: SourceInfo) {
+        let id = self.id(loc);
+        self.src_info.view_mut(id as usize).set(info);
+    }
+
+    pub fn insert_trap_info(&mut self, loc: &MirLoc, info: TrapInfo) {
+        let id = self.id(loc);
+        self.trap_info.insert(id, info);
+    }
+
+    pub fn get_src_info(&self, id: DebugDataId) -> Option<&SourceInfo> {
+        self.src_info.get(id as usize)
+    }
+
+    pub fn get_trap_info(&self, id: DebugDataId) -> Option<&TrapInfo> {
+        self.trap_info.get(&id)
+    }
+}
+
+pub struct UnwindDropMap {
+    sources: Vec<ops::Range<usize>>,
+    data: Vec<u32>,
+}

@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -35,14 +37,14 @@ pub trait SrcSupplier {
 /// A local file is a file in the **Rust** source code and **not** in the EDL code base.
 /// This struct is used to get information where in the Rust code base raw EDL source code is
 /// injected in to the compiler, in case that EDL source code causes errors or warnings.
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, PartialOrd, Eq)]
 pub struct LocalFileSource {
     pub relative_path: PathBuf,
     pub pos: SrcPos,
     pub src: String,
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, PartialOrd, Eq)]
 pub struct BufferedFile {
     pub path: PathBuf,
     pub buffer: String,
@@ -75,7 +77,7 @@ impl Debug for LocalFileSource {
 /// Since the structure is also thread save and its contents to not have to be `mut`, this means
 /// that we can attach the `ModuleSrc` to any file src position without fear of bricking the
 /// performance or memory consumption of the program.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleSrc {
     File(Arc<BufferedFile>),
     String(Arc<LocalFileSource>),

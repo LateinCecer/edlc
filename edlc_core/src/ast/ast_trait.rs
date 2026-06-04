@@ -1,26 +1,29 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use std::mem;
 use log::warn;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_fn::{AstFnModifier, AstFnSignature};
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type_def::{AliasResolver};
 use crate::ast::{AstModule, IntoHir, ItemDoc};
 use crate::ast::ast_type::AstType;
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_error::EdlError;
 use crate::core::edl_param_env::{EdlGenericParamValue, EdlGenericParamVariant};
 use crate::core::edl_trait::EdlTrait;
@@ -55,6 +58,7 @@ struct ConstDef {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstTrait {
+    src: ModuleSrc,
     pos: SrcPos,
     scope: ScopeId,
     name: String,
@@ -63,6 +67,7 @@ pub struct AstTrait {
     consts: Vec<ConstDef>,
     types: Vec<TypeDef>,
     doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 impl AstTrait {
@@ -97,11 +102,14 @@ impl Parsable for AstTrait {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
         let pos = expect_token!(parser; (Token::Key(KeyWord::Trait)), pos => pos
             expected "`trait` definition")?;
+        let src = parser.module_src.clone();
         let name = expect_token!(parser; (Token::Ident(name)) => name
             expected "trait name identifier")?;
         let env = AstParamEnv::parse(parser)?;
         parser.env.push_block();
         let scope = *parser.env.current_scope().wrap(pos)?;
+
+        let constraints = AstWhere::try_parse(parser)?;
 
         // read body
         expect_token!(parser; (Token::Punct(Punct::BraceOpen))
@@ -244,6 +252,7 @@ impl Parsable for AstTrait {
         };
 
         Ok(AstTrait {
+            src,
             pos,
             scope,
             name,
@@ -252,6 +261,7 @@ impl Parsable for AstTrait {
             consts,
             types,
             doc,
+            type_constraints: constraints,
         })
     }
 }
@@ -315,11 +325,11 @@ impl TypeDef {
     ) -> Result<(), AstTranslationError> {
         phase.res.revert_to_scope(&self.scope);
         let mut hir_env = self.env.clone().hir_repr(phase)?;
-        let edl_env = hir_env.edl_repr(phase)?;
+        let edl_env = hir_env.edl_repr(phase).wrap_ast(&self.src)?;
         let env_id = phase.types.insert_parameter_env(edl_env);
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_env(env_id, &mut phase.types)
-            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
         base_name.push(self.name.clone());
         let ty = phase.types.insert_type(EdlType::Type {
@@ -329,7 +339,7 @@ impl TypeDef {
         });
         let ty_instance = phase.types.new_type_instance(ty).unwrap();
         phase.res.push_trait_associated_type(tra, self.name, ty_instance)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })
     }
 }
 
@@ -341,13 +351,14 @@ impl AstTrait {
     ) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
         let edl_ty = ty.edl_repr(phase)
-            .map_err(|err| AstTranslationError::HirError { err })?;
+            .map_err(|err| AstTranslationError::HirError { err, src: c.src.clone() })?;
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => {
                 return Err(AstTranslationError::EdlError {
                     pos: c.pos,
+                    src: c.src.clone(),
                     err: EdlError::E031,
                 })
             }
@@ -356,13 +367,14 @@ impl AstTrait {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty),
             });
         }
         // change scope and push top level item to the name resolver
         phase.res.revert_to_scope(&c.scope);
         let mut constant_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })?;
         constant_name.push(c.name.clone());
 
         let const_id = phase.types.insert_const(EdlConst {
@@ -370,24 +382,24 @@ impl AstTrait {
             name: constant_name
         });
         phase.res.push_trait_associated_const(association, c.name.clone(), const_id)
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos })
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: c.pos, src: c.src.clone() })
     }
 
     fn push(self, phase: &mut HirPhase) -> Result<(), AstTranslationError> {
         // push trait to resolver
         // push trait definition as type
         let prev_scope = *phase.res.current_scope()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
         phase.res.revert_to_scope(&self.scope);
         let mut base_name = phase.res.current_level_name()
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         let mut env = self.env.clone().hir_repr(phase)?;
-        let edl_env = env.edl_repr(phase)?;
+        let edl_env = env.edl_repr(phase).wrap_ast(&self.src)?;
         let env_id = phase.types.insert_parameter_env(edl_env.clone());
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_env(env_id, &mut phase.types)
-            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
         // finish name
         base_name.push(self.name.clone());
@@ -407,7 +419,7 @@ impl AstTrait {
                 id: trait_id,
             },
             &mut phase.types,
-        ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+        ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         // create trait instance with initiated parameter environment
         let mut trait_instance = phase.types.new_trait_instance(trait_id).unwrap();
@@ -424,7 +436,7 @@ impl AstTrait {
                 }
                 EdlGenericParamVariant::Type => {
                     let edl_id = phase.types.find_generic_type(env_id, index)
-                        .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+                        .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
                     *param = EdlGenericParamValue::Type(phase.types.new_type_instance(edl_id).unwrap());
                 }
             }
@@ -432,9 +444,9 @@ impl AstTrait {
         // push `Self` trait to the name resolver
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_self_trait(trait_instance.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
         phase.res.push_trait_association(trait_instance.clone(), base_name.clone())
-            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         // parse associated consts
         for const_def in self.consts.into_iter() {

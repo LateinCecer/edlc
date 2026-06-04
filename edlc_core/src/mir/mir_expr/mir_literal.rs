@@ -1,42 +1,128 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
-use crate::mir::{IsConstExpr, MirError, MirPhase, MirUid};
-use crate::mir::mir_backend::Backend;
-use crate::mir::mir_expr::MirExpr;
-use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::mir_type::MirTypeId;
-use crate::resolver::ScopeId;
+use crate::mir::mir_backend::{Backend, StaticData};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
+use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
+use crate::mir::MirUid;
+use crate::prelude::ExecutorVM;
 
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirLiteral {
-    pub pos: SrcPos,
-    pub scope: ScopeId,
-    pub src: ModuleSrc,
     pub id: MirUid,
     pub ty: MirTypeId,
     pub value: MirLiteralValue,
 }
 
-impl From<MirLiteral> for MirExpr {
-    fn from(value: MirLiteral) -> Self {
-        MirExpr::Literal(value)
+impl MirLiteral {
+    pub fn execute(
+        &self,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+        target: &MirValue,
+        reg: &MirTypeRegistry,
+        backend: &impl Backend,
+    ) -> Result<(), ExecutionError> {
+        match &self.value {
+            MirLiteralValue::Char(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Bool(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Str(s) => {
+                let bytes = s.clone().into_bytes();
+                let len = bytes.len();
+                let ptr = backend.alloc_static(
+                    StaticData::Raw(bytes.into_boxed_slice()));
+                vm.write_fat_ptr(
+                    *target,
+                    ptr.as_ptr() as *const _,
+                    len,
+                    stack_frame,
+                    reg
+                );
+            }
+            MirLiteralValue::U8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::U128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Usize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I8(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I16(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::I128(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::Isize(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::F32(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+            MirLiteralValue::F64(val) => {
+                vm.write(*target, *val, stack_frame, reg)
+            }
+        };
+        Ok(())
     }
+
+    /// A literal is always known at compile times.
+    #[inline(always)]
+    pub fn is_avail(
+        &self,
+    ) -> bool {
+        true
+    }
+}
+
+impl MirGraphElement for MirLiteral {
+    fn collect_vars(&self) -> Vec<MirValue> {
+        vec![]
+    }
+
+    fn uses_var(&self, _val: &MirValue) -> bool {
+        false
+    }
+
+    fn replace_var(&mut self, _var: &MirValue, _repl: &MirValue) {}
 }
 
 
@@ -70,8 +156,3 @@ impl MirLiteralValue {
     }
 }
 
-impl<B: Backend> IsConstExpr<B> for MirLiteral {
-    fn is_const_expr(&self, _phase: &MirPhase, _funcs: &MirFuncRegistry<B>) -> Result<bool, MirError<B>> {
-        Ok(true)
-    }
-}

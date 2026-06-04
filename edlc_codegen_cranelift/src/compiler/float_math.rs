@@ -1,21 +1,23 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use edlc_core::inline_code;
-use edlc_core::prelude::{CompilerError, EdlCompiler};
+use edlc_core::prelude::{CompilerError, EdlCompiler, FromFunction};
 use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::ir::{InstBuilder, MemFlags, types};
 use crate::compiler::integer_math::*;
@@ -26,117 +28,119 @@ use crate::jit_func;
 impl<Runtime> JIT<Runtime> {
     pub fn load_f32_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
         impl_binop!(self, compiler,
-            f32::add from "core::Add" -> fadd;
-            f32::sub from "core::Sub" -> fsub;
-            f32::mul from "core::Mul" -> fmul;
-            f32::div from "core::Div" -> fdiv;
+            f32::add from "core::Add" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f32::sub from "core::Sub" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f32::mul from "core::Mul" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f32::div from "core::Div" -> fdiv; |lhs, rhs| { (lhs / rhs) }
 
-            f32::add_assign from "core::AddAssign" -> fadd;
-            f32::sub_assign from "core::SubAssign" -> fsub;
-            f32::mul_assign from "core::MulAssign" -> fmul;
-            f32::div_assign from "core::DivAssign" -> fdiv;
+            f32::add_assign from "core::AddAssign" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f32::sub_assign from "core::SubAssign" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f32::mul_assign from "core::MulAssign" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f32::div_assign from "core::DivAssign" -> fdiv; |lhs, rhs| { (lhs / rhs) }
         );
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<f32, f32> for f32 {
-                fn partial_eq(builder, lhs: f32, rhs: f32) -> bool {
+                fn partial_eq(builder, lhs, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<f32, f32> for f32 {
-                fn lesser_than(builder, lhs: f32, rhs: f32) -> bool {
+                fn lesser_than(builder, lhs, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::LessThan, lhs, rhs) }
-                }
-                fn greater_than(builder, lhs: f32, rhs: f32) -> bool {
+                }; { (lhs < rhs) }
+                fn greater_than(builder, lhs, rhs: f32) -> bool {
                     #[allow(unused_braces)]
                     { builder.fcmp(FloatCC::GreaterThan, lhs, rhs) }
-                }
+                }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
             impl ["core::Unary"]<f32> for f32 {
-                fn unary(builder, val: f32) -> f32 {
+                fn unary(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.fneg(val) }
-                }
+                }; { (-val) }
             }
         );
         impl_binop!(self, compiler,
             impl f32 {
-                fn sqrt(builder, val: f32) -> f32 {
+                fn sqrt(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.sqrt(val) }
-                }
+                }; { (f32::sqrt(val)) }
             }
             impl f32 {
-                fn abs(builder, val: f32) -> f32 {
+                fn abs(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.fabs(val) }
-                }
+                }; { (f32::abs(val)) }
             }
             impl f32 {
-                fn ceil(builder, val: f32) -> f32 {
+                fn ceil(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.ceil(val) }
-                }
+                }; { (f32::ceil(val)) }
             }
             impl f32 {
-                fn floor(builder, val: f32) -> f32 {
+                fn floor(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.floor(val) }
-                }
+                }; { (f32::floor(val)) }
             }
             impl f32 {
-                fn trunc(builder, val: f32) -> f32 {
+                fn trunc(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.trunc(val) }
-                }
+                }; { (f32::trunc(val)) }
             }
             impl f32 {
-                fn nearest(builder, val: f32) -> f32 {
+                fn nearest(builder, val) -> f32 {
                     #[allow(unused_braces)]
                     { builder.nearest(val) }
-                }
+                }; { (f32::round(val)) }
             }
             impl f32 {
-                fn as_u32_bits(builder, val: f32) -> u32 {
+                fn as_u32_bits(builder, val) -> u32 {
                     { builder.bitcast(types::I32, MemFlags::new(), val) }
-                }
+                }; { (f32::to_bits(val)) }
             }
+            impl f32 {
+                fn promote(builder, val) -> f64 {
+                    { builder.fpromote(types::F64, val) }
+                }; { (val as f64) }
+            }
+        );
+        impl_binop!(self, compiler,
             impl f32 {
                 fn from_u32_bits(builder, val: u32) -> f32 {
                     { builder.bitcast(types::F32, MemFlags::new(), val) }
-                }
-            }
-            impl f32 {
-                fn promote(builder, val: f32) -> f64 {
-                    { builder.fpromote(types::F64, val) }
-                }
+                }; { (f32::from_bits(val)) }
             }
         );
         impl_binop!(self, compiler,
             impl f32 {
-                fn min(builder, lhs: f32, rhs: f32) -> f32 {
+                fn min(builder, lhs, rhs: f32) -> f32 {
                     { builder.fmin(lhs, rhs) }
-                }
+                }; { (f32::min(lhs, rhs)) }
             }
             impl f32 {
-                fn max(builder, lhs: f32, rhs: f32) -> f32 {
+                fn max(builder, lhs, rhs: f32) -> f32 {
                     { builder.fmax(lhs, rhs) }
-                }
+                }; { (f32::max(lhs, rhs)) }
             }
             impl f32 {
-                fn cpy_sign(builder, dst: f32, src: f32) -> f32 {
+                fn cpy_sign(builder, dst, src: f32) -> f32 {
                     { builder.fcopysign(dst, src) }
-                }
+                }; { (f32::copysign(dst, src)) }
             }
         );
         impl_binop!(self, compiler,
             impl f32 {
-                fn fma(builder, lhs: f32, rhs: f32, add: f32) -> f32 {
+                fn fma(builder, lhs, rhs: f32, add: f32) -> f32 {
                     { builder.fma(lhs, rhs, add) }
-                }
+                }; { (f32::mul_add(lhs, rhs, add)) }
             }
         );
         Ok(())
@@ -144,107 +148,109 @@ impl<Runtime> JIT<Runtime> {
 
     pub fn load_f64_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
         impl_binop!(self, compiler,
-            f64::add from "core::Add" -> fadd;
-            f64::sub from "core::Sub" -> fsub;
-            f64::mul from "core::Mul" -> fmul;
-            f64::div from "core::Div" -> fdiv;
+            f64::add from "core::Add" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f64::sub from "core::Sub" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f64::mul from "core::Mul" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f64::div from "core::Div" -> fdiv; |lhs, rhs| { (lhs / rhs) }
 
-            f64::add_assign from "core::AddAssign" -> fadd;
-            f64::sub_assign from "core::SubAssign" -> fsub;
-            f64::mul_assign from "core::MulAssign" -> fmul;
-            f64::div_assign from "core::DivAssign" -> fdiv;
+            f64::add_assign from "core::AddAssign" -> fadd; |lhs, rhs| { (lhs + rhs) }
+            f64::sub_assign from "core::SubAssign" -> fsub; |lhs, rhs| { (lhs - rhs) }
+            f64::mul_assign from "core::MulAssign" -> fmul; |lhs, rhs| { (lhs * rhs) }
+            f64::div_assign from "core::DivAssign" -> fdiv; |lhs, rhs| { (lhs / rhs) }
         );
         impl_binop!(self, compiler,
             impl ["core::PartialEq"]<f64, f64> for f64 {
-                fn partial_eq(builder, lhs: f64, rhs: f64) -> bool {
+                fn partial_eq(builder, lhs, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::Equal, lhs, rhs) }
-                }
+                }; { (lhs == rhs) }
             }
             impl ["core::Ord"]<f64, f64> for f64 {
-                fn lesser_than(builder, lhs: f64, rhs: f64) -> bool {
+                fn lesser_than(builder, lhs, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::LessThan, lhs, rhs) }
-                }
-                fn greater_than(builder, lhs: f64, rhs: f64) -> bool {
+                }; { (lhs < rhs) }
+                fn greater_than(builder, lhs, rhs: f64) -> bool {
                     { builder.fcmp(FloatCC::GreaterThan, lhs, rhs) }
-                }
+                }; { (lhs > rhs) }
             }
         );
         impl_binop!(self, compiler,
             impl ["core::Unary"]<f64> for f64 {
-                fn unary(builder, val: f64) -> f64 {
+                fn unary(builder, val) -> f64 {
                     { builder.fneg(val) }
-                }
+                }; { (-val) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
-                fn sqrt(builder, val: f64) -> f64 {
+                fn sqrt(builder, val) -> f64 {
                     { builder.sqrt(val) }
-                }
+                }; { (f64::sqrt(val)) }
             }
             impl f64 {
-                fn abs(builder, val: f64) -> f64 {
+                fn abs(builder, val) -> f64 {
                     { builder.fabs(val) }
-                }
+                }; { (f64::abs(val)) }
             }
             impl f64 {
-                fn ceil(builder, val: f64) -> f64 {
+                fn ceil(builder, val) -> f64 {
                     { builder.ceil(val) }
-                }
+                }; { (f64::ceil(val)) }
             }
             impl f64 {
-                fn floor(builder, val: f64) -> f64 {
+                fn floor(builder, val) -> f64 {
                     { builder.floor(val) }
-                }
+                }; { (f64::floor(val)) }
             }
             impl f64 {
-                fn trunc(builder, val: f64) -> f64 {
+                fn trunc(builder, val) -> f64 {
                     { builder.trunc(val) }
-                }
+                }; { (f64::trunc(val)) }
             }
             impl f64 {
-                fn nearest(builder, val: f64) -> f64 {
+                fn nearest(builder, val) -> f64 {
                     { builder.nearest(val) }
-                }
+                }; { (f64::round(val)) }
             }
             impl f64 {
-                fn as_u64_bits(builder, val: f64) -> u64 {
+                fn as_u64_bits(builder, val) -> u64 {
                     { builder.bitcast(types::I64, MemFlags::new(), val) }
-                }
+                }; { (f64::to_bits(val)) }
             }
+            impl f64 {
+                fn demote(builder, val) -> f32 {
+                    { builder.fdemote(types::F32, val) }
+                }; { (val as f32) }
+            }
+        );
+        impl_binop!(self, compiler,
             impl f64 {
                 fn from_u64_bits(builder, val: u64) -> f64 {
                     { builder.bitcast(types::F64, MemFlags::new(), val) }
-                }
-            }
-            impl f64 {
-                fn demote(builder, val: f64) -> f32 {
-                    { builder.fdemote(types::F32, val) }
-                }
+                }; { (f64::from_bits(val)) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
-                fn min(builder, lhs: f64, rhs: f64) -> f64 {
+                fn min(builder, lhs, rhs: f64) -> f64 {
                     { builder.fmin(lhs, rhs) }
-                }
+                }; { (f64::min(lhs, rhs)) }
             }
             impl f64 {
-                fn max(builder, lhs: f64, rhs: f64) -> f64 {
+                fn max(builder, lhs, rhs: f64) -> f64 {
                     { builder.fmax(lhs, rhs) }
-                }
+                }; { (f64::max(lhs, rhs)) }
             }
             impl f64 {
-                fn cpy_sign(builder, dst: f64, src: f64) -> f64 {
+                fn cpy_sign(builder, dst, src: f64) -> f64 {
                     { builder.fcopysign(dst, src) }
-                }
+                }; { (f64::copysign(dst, src)) }
             }
         );
         impl_binop!(self, compiler,
             impl f64 {
-                fn fma(builder, lhs: f64, rhs: f64, add: f64) -> f64 {
+                fn fma(builder, lhs, rhs: f64, add: f64) -> f64 {
                     { builder.fma(lhs, rhs, add) }
-                }
+                }; { (f64::mul_add(lhs, rhs, add)) }
             }
         );
         Ok(())
@@ -259,61 +265,61 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
             inline_code!("f64"),
             [
                 inline_code!(r#"
-                ?comptime fn sin(x: f64) -> f64"#),
+                ?comptime fn sin(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn cos(x: f64) -> f64"#),
+                ?comptime fn cos(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn tan(x: f64) -> f64"#),
+                ?comptime fn tan(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn asin(x: f64) -> f64"#),
+                ?comptime fn asin(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn acos(x: f64) -> f64"#),
+                ?comptime fn acos(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn atan(x: f64) -> f64"#),
+                ?comptime fn atan(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn sinh(x: f64) -> f64"#),
+                ?comptime fn sinh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn cosh(x: f64) -> f64"#),
+                ?comptime fn cosh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn tanh(x: f64) -> f64"#),
+                ?comptime fn tanh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn asinh(x: f64) -> f64"#),
+                ?comptime fn asinh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn acosh(x: f64) -> f64"#),
+                ?comptime fn acosh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn atanh(x: f64) -> f64"#),
+                ?comptime fn atanh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn exp(x: f64) -> f64"#),
+                ?comptime fn exp(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn ln(x: f64) -> f64"#),
+                ?comptime fn ln(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log(x: f64, base: f64) -> f64"#),
+                ?comptime fn log(self, base: Self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log2(x: f64) -> f64"#),
+                ?comptime fn log2(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log10(x: f64) -> f64"#),
+                ?comptime fn log10(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn pow(x: f64, pow: f64) -> f64"#),
+                ?comptime fn pow(self, pow: Self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn midpoint(x: f64, y: f64) -> f64"#),
+                ?comptime fn midpoint(self, y: Self) -> Self"#),
             ],
             None,
         )?;
@@ -427,61 +433,61 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
             inline_code!("f32"),
             [
                 inline_code!(r#"
-                ?comptime fn sin(x: f32) -> f32"#),
+                ?comptime fn sin(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn cos(x: f32) -> f32"#),
+                ?comptime fn cos(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn tan(x: f32) -> f32"#),
+                ?comptime fn tan(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn asin(x: f32) -> f32"#),
+                ?comptime fn asin(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn acos(x: f32) -> f32"#),
+                ?comptime fn acos(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn atan(x: f32) -> f32"#),
+                ?comptime fn atan(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn sinh(x: f32) -> f32"#),
+                ?comptime fn sinh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn cosh(x: f32) -> f32"#),
+                ?comptime fn cosh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn tanh(x: f32) -> f32"#),
+                ?comptime fn tanh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn asinh(x: f32) -> f32"#),
+                ?comptime fn asinh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn acosh(x: f32) -> f32"#),
+                ?comptime fn acosh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn atanh(x: f32) -> f32"#),
+                ?comptime fn atanh(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn exp(x: f32) -> f32"#),
+                ?comptime fn exp(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn ln(x: f32) -> f32"#),
+                ?comptime fn ln(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log(x: f32, base: f32) -> f32"#),
+                ?comptime fn log(self, base: Self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log2(x: f32) -> f32"#),
+                ?comptime fn log2(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn log10(x: f32) -> f32"#),
+                ?comptime fn log10(self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn pow(x: f32, y: f32) -> f32"#),
+                ?comptime fn pow(self, y: Self) -> Self"#),
 
                 inline_code!(r#"
-                ?comptime fn midpoint(x: f32, y: f32) -> f32"#),
+                ?comptime fn midpoint(self, y: Self) -> Self"#),
             ],
             None,
         )?;

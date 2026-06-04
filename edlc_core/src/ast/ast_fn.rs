@@ -1,36 +1,40 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use crate::ast::ast_expression::ast_block::AstBlock;
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
+use crate::ast::ast_where::AstWhere;
 use crate::core::edl_fn::EdlPreSignature;
 use crate::core::edl_type::{EdlExtendedType, EdlMaybeType};
+use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::{HirFn, HirFnParam, HirFnSignature};
-use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl};
+use crate::hir::{HirError, HirPhase, IntoEdl};
 use crate::hir::hir_trait_fn::{HirTraitFnParam, HirTraitFnSignature};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::{KeyWord, LexError, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::prelude::edl_type::EdlEnvId;
-use crate::resolver::{ItemInit, ItemSrc, ScopeId};
+use crate::resolver::{ItemInit, ItemSrc, ScopeId, SelfType};
 
 #[derive(Clone, Debug, PartialEq)]
 struct AstFnParam {
@@ -44,22 +48,25 @@ struct AstFnParam {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstSelfParameter {
     pos: SrcPos,
-    modifier: AstFnSelfParamModifier,
+    modifiers: Vec<AstFnParamModifier>,
+    ty: AstFnSelfParamType,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum AstFnSelfParamModifier {
-    Value(Vec<AstFnParamModifier>),
-    Ref,
-    ComptimeRef,
-    MutableRef,
-    None,
+enum AstFnSelfParamType {
+    /// Pass by value
+    Value,
+    /// Pass by reference
+    Ref {
+        mutable: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AstFnModifier {
     CompTime(SrcPos),
     ForceCompTime(SrcPos),
+    Async(SrcPos),
     None,
 }
 
@@ -67,6 +74,7 @@ pub enum AstFnModifier {
 enum AstFnParamModifier {
     CompTime,
     Mutable,
+    Async,
     None,
 }
 
@@ -80,10 +88,12 @@ pub struct AstFnSignature {
     self_parameter: Option<AstSelfParameter>,
     params: Vec<AstFnParam>,
     ret: Option<AstType>,
+    ret_async: Option<SrcPos>,
     pub annotations: Vec<String>,
     env_id: Option<EdlEnvId>,
     modifiers: Vec<AstFnModifier>,
     pub(crate) doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +163,10 @@ impl Parsable for AstFnParamModifier {
                 parser.next_token()?;
                 Ok(Self::CompTime)
             },
+            Ok(local!(Token::Key(KeyWord::Async))) => {
+                parser.next_token()?;
+                Ok(Self::Async)
+            },
             _ => Ok(Self::None),
         }
     }
@@ -170,6 +184,10 @@ impl Parsable for AstFnModifier {
             Ok(local!(Token::Key(KeyWord::Comptime))) => {
                 let pos = parser.next_token()?.pos;
                 Ok(Self::ForceCompTime(pos))
+            },
+            Ok(local!(Token::Key(KeyWord::Async))) => {
+                let pos = parser.next_token()?.pos;
+                Ok(Self::Async(pos))
             },
             _ => Ok(Self::None),
         }
@@ -192,6 +210,74 @@ impl AstFnParam {
             modifiers,
             doc: None,
         })
+    }
+}
+
+impl AstSelfParameter {
+
+    fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
+        let (mutable, comptime, asy) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
+        let SelfType::Type(hir_type) = parser.res.find_self_type().clone() else {
+            panic!("`Self` type for implementation was not defined properly");
+        };
+        let ty = match self.ty {
+            AstFnSelfParamType::Ref { mutable } => {
+                parser.types
+                    .new_ref(EdlMaybeType::Fixed(hir_type), Some(EdlConstValue::from_bool(mutable)))
+                    .map_err(|err| AstTranslationError::EdlError {
+                        pos: self.pos,
+                        src: src.clone(),
+                        err,
+                    })?
+            }
+            AstFnSelfParamType::Value => hir_type,
+        };
+
+        Ok(HirFnParam {
+            name: "self".to_string(),
+            pos: self.pos,
+            ty,
+            mutable,
+            comptime,
+            async_: asy,
+            info: None,
+        })
+    }
+}
+
+impl AstSelfParameter {
+    fn trait_hir_repr(self, parser: &mut HirPhase) -> Result<HirTraitFnParam, AstTranslationError> {
+        let (mutable, comptime, asy) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
+        let SelfType::Trait(hir_type) = parser.res.find_self_type().clone() else {
+            panic!("`Self` type for trait definition was not defined properly");
+        };
+        // todo: deal with reference types to self here
+
+        Ok(HirTraitFnParam {
+            name: "self".to_string(),
+            pos: self.pos,
+            ty: EdlExtendedType::Trait(hir_type),
+            mutable,
+            comptime,
+            async_: asy,
+        })
+    }
+}
+
+impl AstFnParamModifier {
+    fn flatten_modifiers<'a, I: IntoIterator<Item=&'a Self>>(vec: I) -> (bool, bool, bool) {
+        let mut mutable = false;
+        let mut comptime = false;
+        let mut asy = false;
+        for m in vec {
+            match m {
+                AstFnParamModifier::Mutable => mutable = true,
+                AstFnParamModifier::CompTime => comptime = true,
+                AstFnParamModifier::Async => asy = true,
+                AstFnParamModifier::None => (),
+            }
+        }
+        (mutable, comptime, asy)
     }
 }
 
@@ -227,39 +313,34 @@ impl AstFnSignature {
                 modifiers.clear();
                 Some(AstSelfParameter {
                     pos,
-                    modifier: AstFnSelfParamModifier::Value(m),
+                    modifiers: m,
+                    ty: AstFnSelfParamType::Value,
                 })
             }
             Ok(local!(Token::Punct(Punct::And))) => {
                 let pos = parser.next_token()?.pos;
-                if !modifiers.is_empty() {
-                    return Err(ParseError::ModifiersOnSelfReference(pos));
-                }
                 // check for modifiers
                 Some(match parser.peak() {
                     Ok(local!(Token::Key(KeyWord::Mut))) => {
                         parser.next_token()?;
                         expect_token!(parser; (Token::Key(KeyWord::SelfParameter))
                             expected "keyword `self`")?;
+                        let m = modifiers.clone();
+                        modifiers.clear();
                         AstSelfParameter {
                             pos,
-                            modifier: AstFnSelfParamModifier::MutableRef,
-                        }
-                    }
-                    Ok(local!(Token::Key(KeyWord::Comptime))) => {
-                        parser.next_token()?;
-                        expect_token!(parser; (Token::Key(KeyWord::SelfParameter))
-                            expected "keyword `self`")?;
-                        AstSelfParameter {
-                            pos,
-                            modifier: AstFnSelfParamModifier::ComptimeRef,
+                            modifiers: m,
+                            ty: AstFnSelfParamType::Ref { mutable: true }
                         }
                     }
                     Ok(local!(Token::Key(KeyWord::SelfParameter))) => {
                         parser.next_token()?;
+                        let m = modifiers.clone();
+                        modifiers.clear();
                         AstSelfParameter {
                             pos,
-                            modifier: AstFnSelfParamModifier::Ref,
+                            modifiers: m,
+                            ty: AstFnSelfParamType::Ref { mutable: false }
                         }
                     }
                     Ok(s) => {
@@ -340,12 +421,20 @@ impl AstFnSignature {
             }
         }
 
-        let ret = if let Ok(local!(Token::Punct(Punct::RightArrow))) = parser.peak() {
+        let (ret, ret_async) = if let Ok(local!(Token::Punct(Punct::RightArrow))) = parser.peak() {
             parser.next_token()?;
-            Some(AstType::parse(parser)?)
+            let ret_async = if let Ok(local!(Token::Key(KeyWord::Async))) = parser.peak() {
+                let tok = parser.next_token()?;
+                Some(tok.pos)
+            } else {
+                None
+            };
+            (Some(AstType::parse(parser)?), ret_async)
         } else {
-            None
+            (None, None)
         };
+
+        let constraints = AstWhere::try_parse(parser)?;
 
         parser.env.pop();
         Ok(AstFnSignature {
@@ -356,26 +445,28 @@ impl AstFnSignature {
             env,
             params,
             ret,
+            ret_async,
             annotations: Vec::new(),
             env_id: None,
             modifiers: fn_modifiers,
             self_parameter,
             doc: None,
+            type_constraints: constraints,
         })
     }
 }
 
-impl IntoHir for AstFnParam {
-    type Output = HirFnParam;
+impl AstFnParam {
 
-    fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
-        let (mutable, comptime) = self.flatten_modifiers();
+    fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
+        let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
-        let edl_type = hir_type.edl_repr(parser)?;
+        let edl_type = hir_type.edl_repr(parser).wrap_ast(src)?;
 
         let EdlMaybeType::Fixed(ty) = edl_type else {
             return Err(AstTranslationError::FunctionParameterType {
                 pos: self.pos,
+                src: src.clone(),
                 name: self.name,
             });
         };
@@ -386,20 +477,22 @@ impl IntoHir for AstFnParam {
             ty,
             mutable,
             comptime,
+            async_: asy,
             info: None,
         })
     }
 }
 
 impl AstFnParam {
-    fn trait_hir_repr(self, parser: &mut HirPhase) -> Result<HirTraitFnParam, AstTranslationError> {
-        let (mutable, comptime) = self.flatten_modifiers();
+    fn trait_hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirTraitFnParam, AstTranslationError> {
+        let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
-        let ty = hir_type.edl_extended_repr(parser)?;
+        let ty = hir_type.edl_extended_repr(parser).wrap_ast(src)?;
 
         if matches!(ty, EdlExtendedType::Unknown) {
             return Err(AstTranslationError::FunctionParameterType {
                 pos: self.pos,
+                src: src.clone(),
                 name: self.name,
             });
         }
@@ -410,23 +503,14 @@ impl AstFnParam {
             ty,
             mutable,
             comptime,
+            async_: asy,
         })
     }
 }
 
 impl AstFnParam {
-    fn flatten_modifiers(&self) -> (bool, bool) {
-        // flatten modifiers
-        let mut mutable = false;
-        let mut comptime = false;
-        for m in self.modifiers.iter() {
-            match m {
-                AstFnParamModifier::Mutable => mutable = true,
-                AstFnParamModifier::CompTime => comptime = true,
-                AstFnParamModifier::None => (),
-            }
-        }
-        (mutable, comptime)
+    fn flatten_modifiers(&self) -> (bool, bool, bool) {
+        AstFnParamModifier::flatten_modifiers(self.modifiers.iter())
     }
 }
 
@@ -440,7 +524,7 @@ impl AstFnSignature {
         }
 
         let mut hir_env = self.env.clone().hir_repr(parser)?;
-        let edl_env = hir_env.edl_repr(parser)?;
+        let edl_env = hir_env.edl_repr(parser).wrap_ast(&self.src)?;
         self.env_id = Some(parser.types.insert_parameter_env(edl_env));
         Ok(())
     }
@@ -456,13 +540,15 @@ impl AstFnSignature {
         parser.res.revert_to_scope(&self.scope);
         parser.res.pop();
         // register function
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         let sig = EdlPreSignature {
             name: self.name.clone(),
             env: env_id,
             scope: self.scope,
             comptime,
-            comptime_only
+            comptime_only,
+            async_,
+            async_return: self.ret_async.is_some(),
         };
         parser.res.push_top_level_item(
             self.name.clone(),
@@ -472,20 +558,51 @@ impl AstFnSignature {
                 scope: self.scope,
             },
             &mut parser.types,
-        ).map_err(|err| HirError {
-            pos: self.pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
-        })?;
+        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone())).wrap_ast(&self.src)?;
         Ok(())
     }
 
     /// Flattens the modifiers of the function into a tuple of booleans.
-    fn flatten_modifiers(&self, parser: &mut HirPhase) -> Result<(bool, bool), AstTranslationError> {
+    fn flatten_modifiers(&self, parser: &mut HirPhase) -> Result<(bool, bool, bool), AstTranslationError> {
         let mut comptime_pos = None;
         let mut comptime = false;
         let mut comptime_only = false;
+        let mut async_pos = None;
+        let mut async_ = false;
         for m in self.modifiers.iter() {
             match m {
+                AstFnModifier::Async(pos) => {
+                    if let Some(async_pos) = async_pos.as_ref() {
+                        // modifier is already set, which is wierd
+                        parser.report_error(
+                            issue::format_type_args!(
+                                format_args!("Detected function qualifier `async`, but the \
+                                function was already declared as `async`")
+                            ),
+                            &[
+                                SrcError::Double {
+                                    first: SrcRange::from(*async_pos),
+                                    second: SrcRange::from(*pos),
+                                    src: self.src.clone(),
+                                    error_first: issue::format_type_args!(
+                                        format_args!("function was first declared as `async` \
+                                        here")
+                                    ),
+                                    error_second: issue::format_type_args!(
+                                        format_args!("and then later redeclared as `async` here")
+                                    )
+                                }
+                            ],
+                            Some(issue::format_type_args!(
+                                format_args!("To fix this, just remove the additional, unnecessary \
+                                `async` qualifier")
+                            ))
+                        );
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
+                    }
+                    async_ = true;
+                    async_pos = Some(*pos);
+                },
                 AstFnModifier::CompTime(pos) => {
                     if let Some(comptime_pos) = comptime_pos.as_ref() {
                         // modifier is already set, which is wierd
@@ -510,10 +627,10 @@ impl AstFnSignature {
                             ],
                             Some(issue::format_type_args!(
                                 format_args!("To fix this, just remove the additional, unnecessary \
-                                `comptime` qualifier")
+                                `?comptime` qualifier")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, m: m.clone() });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
                     }
                     comptime_pos = Some(*pos);
                     comptime = true;
@@ -548,14 +665,39 @@ impl AstFnSignature {
                                 are unnecessary and make the code less readable.")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, m: m.clone() });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
                     }
+                    comptime_pos = Some(*pos);
                     comptime_only = true
                 },
                 AstFnModifier::None => (),
             }
         }
-        Ok((comptime, comptime_only))
+
+        if (comptime || comptime_only) && async_ {
+            parser.report_error(
+                issue::format_type_args!(
+                    format_args!("comptime function cannot be `async`\n")
+                ),
+                &[
+                    SrcError::Double {
+                        first: SrcRange::from(comptime_pos.unwrap()),
+                        second: SrcRange::from(async_pos.unwrap()),
+                        src: self.src.clone(),
+                        error_first: issue::format_type_args!(
+                            format_args!("function was declared as `comptime` here")
+                        ),
+                        error_second: issue::format_type_args!(
+                            format_args!("and declared as `async` here")
+                        )
+                    }
+                ],
+                None,
+            );
+            return Err(AstTranslationError::InvalidFunctionModifier { pos: comptime_pos.unwrap(), src: self.src.clone() });
+        }
+
+        Ok((comptime, comptime_only, async_))
     }
 }
 
@@ -563,7 +705,7 @@ impl IntoHir for AstFnSignature {
     type Output = HirFnSignature;
 
     fn hir_repr(mut self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         self.register_edl_env(parser)?;
         let Some(env_id) = self.env_id else {
             panic!();
@@ -571,23 +713,26 @@ impl IntoHir for AstFnSignature {
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         let mut params = Vec::new();
+        if let Some(self_param) = self.self_parameter {
+            params.push(self_param.hir_repr(parser, &self.src)?);
+        }
         for param in self.params.into_iter() {
-            params.push(param.hir_repr(parser)?);
+            params.push(param.hir_repr(parser, &self.src)?);
         }
 
         let ret = if let Some(ret) = self.ret {
             let pos = *ret.pos();
             let mut hir_ret = ret.hir_repr(parser)?;
-            let edl_ret = hir_ret.edl_repr(parser)?;
+            let edl_ret = hir_ret.edl_repr(parser).wrap_ast(&self.src)?;
 
             if let EdlMaybeType::Fixed(ret) = edl_ret {
                 ret
             } else {
-                return Err(AstTranslationError::FunctionReturnType { pos });
+                return Err(AstTranslationError::FunctionReturnType { pos, src: self.src.clone() });
             }
         } else {
             parser.types.empty()
@@ -604,6 +749,8 @@ impl IntoHir for AstFnSignature {
             annotations: self.annotations,
             comptime,
             comptime_only,
+            async_,
+            async_return: self.ret_async.is_some(),
             src: self.src,
             doc: self.doc,
         })
@@ -612,7 +759,7 @@ impl IntoHir for AstFnSignature {
 
 impl AstFnSignature {
     pub fn trait_signature(mut self, parser: &mut HirPhase) -> Result<HirTraitFnSignature, AstTranslationError> {
-        let (comptime, comptime_only) = self.flatten_modifiers(parser)?;
+        let (comptime, comptime_only, async_) = self.flatten_modifiers(parser)?;
         self.register_edl_env(parser)?;
         let Some(env_id) = self.env_id else {
             panic!();
@@ -620,21 +767,24 @@ impl AstFnSignature {
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         let mut params = Vec::new();
+        if let Some(self_param) = self.self_parameter {
+            params.push(self_param.trait_hir_repr(parser)?);
+        }
         for param in self.params.into_iter() {
-            params.push(param.trait_hir_repr(parser)?);
+            params.push(param.trait_hir_repr(parser, &self.src)?);
         }
 
         let ret = if let Some(ret) = self.ret {
             let pos = *ret.pos();
             let mut hir_ret = ret.hir_repr(parser)?;
-            let edl_ret = hir_ret.edl_extended_repr(parser)?;
+            let edl_ret = hir_ret.edl_extended_repr(parser).wrap_ast(&self.src)?;
 
             if matches!(edl_ret, EdlExtendedType::Unknown) {
-                return Err(AstTranslationError::FunctionReturnType { pos });
+                return Err(AstTranslationError::FunctionReturnType { pos, src: self.src.clone() });
             } else {
                 edl_ret
             }
@@ -652,6 +802,8 @@ impl AstFnSignature {
             annotations: self.annotations,
             comptime,
             comptime_only,
+            async_,
+            async_return: self.ret_async.is_some(),
             src: self.src,
             doc: self.doc,
         })

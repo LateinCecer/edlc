@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 use log::{debug, info};
@@ -19,6 +21,7 @@ use crate::ast::ItemDoc;
 use crate::core::edl_fn::{EdlFnParam, EdlFnSignature, EdlFunctionBody, EdlPreSignature};
 use crate::core::edl_param_env::{EdlParameterDef, EdlParamStack};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlMaybeType, EdlType, EdlTypeId, EdlTypeInstance, FmtType, FunctionState};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::edl_var::EdlVar;
 use crate::core::EdlVarId;
 use crate::core::type_analysis::*;
@@ -26,16 +29,18 @@ use crate::documentation::{DocCompilerState, DocElement, FuncDoc, FuncParamDoc, 
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
-use crate::hir::hir_expr::{HirExpression, HirTreeWalker};
-use crate::hir::translation::{HirTranslationError, IntoMir};
+use crate::hir::hir_expr::{HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
+use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
 use crate::mir::mir_type::TMirFnCallInfo;
+use crate::mir::mir_vars::VariableMapper;
 use crate::mir::MirPhase;
-use crate::prelude::{report_infer_error, ExecType, HirContext};
+use crate::prelude::{edl_type, report_infer_error, ExecType, HirContext};
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 
 
@@ -56,6 +61,8 @@ pub struct HirFnSignature {
     pub annotations: Vec<String>,
     pub comptime: bool,
     pub comptime_only: bool,
+    pub async_: bool,
+    pub async_return: bool,
     pub src: ModuleSrc,
     pub doc: Option<ItemDoc>,
 }
@@ -67,6 +74,7 @@ pub struct HirFnParam {
     pub ty: EdlTypeInstance,
     pub mutable: bool,
     pub comptime: bool,
+    pub async_: bool,
     pub info: Option<EdlVarId>,
 }
 
@@ -74,6 +82,7 @@ pub struct HirFnParam {
 struct InferInfo {
     node: NodeId,
     type_uid: TypeUid,
+    mutable: ExtConstUid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,10 +121,7 @@ impl HirFnSignature {
                 scope: self.scope,
             },
             &mut phase.types
-        ).map_err(|err| HirError {
-            pos: self.pos,
-            ty: Box::new(HirErrorType::Resolver(err)),
-        })?;
+        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
 
         let func = phase.res.find_top_level_function(
             &vec![self.name.clone()].into(), &phase.types).unwrap();
@@ -165,7 +171,7 @@ impl ResolveNames for HirFn {
             });
             phase.res.revert_to_scope(&self.body.scope);
             phase.res.push_local_var(param.name.clone(), var_id)
-                .map_err(|err| HirError::new_res(param.pos, err))?;
+                .map_err(|err| HirError::new_res(param.pos, err, self.signature.src.clone()))?;
             param.info = Some(var_id);
         }
         // resolve names inside the functions' body
@@ -256,10 +262,13 @@ impl ResolveTypes for HirFn {
             inferer.at(node)
                 .eq(&type_uid, &self.signature.ret)
                 .unwrap();
+            let mutable = inferer.new_ext_const_with_type(node, edl_type::EDL_BOOL);
+            inferer.at(node).eq(&mutable, &EdlConstValue::from_bool(false)).unwrap();
 
             self.info = Some(InferInfo {
                 node,
                 type_uid,
+                mutable,
             });
             type_uid
         }
@@ -271,6 +280,11 @@ impl ResolveTypes for HirFn {
 
     fn as_const(&mut self, _inferer: &mut Infer<'_, '_>) -> Option<ExtConstUid> {
         None
+    }
+
+    fn mutability(&mut self, inferer: &mut Infer<'_, '_>) -> ExtConstUid {
+        self.get_type_uid(inferer);
+        self.info.as_ref().unwrap().mutable
     }
 }
 
@@ -288,7 +302,28 @@ impl IntoEdl for HirFnParam {
             name: self.name.clone(),
             mutable: self.mutable,
             comptime: self.comptime,
+            async_: self.async_,
             ty: self.ty.clone(),
+        })
+    }
+}
+
+impl HirFnParam {
+    fn as_mir(
+        &self,
+        hir_phase: &HirPhase,
+        mir_phase: &mut MirPhase,
+    ) -> Result<MirFnParam, HirTranslationError> {
+        let ty = mir_phase.types.mir_id(&self.ty, &hir_phase.types)?;
+        Ok(MirFnParam {
+            ty,
+            pos: self.pos,
+            id: mir_phase.new_id(),
+            var_id: self.info.unwrap(),
+            comptime: self.comptime,
+            mutable: self.mutable,
+            async_: self.async_,
+            name: self.name.clone(),
         })
     }
 }
@@ -347,6 +382,8 @@ impl IntoEdl for HirFnSignature {
             scope: self.scope,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
             ret: self.ret.clone(),
             params,
         })
@@ -362,6 +399,8 @@ impl HirFnSignature {
             scope: self.scope,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
         })
     }
 }
@@ -419,41 +458,22 @@ impl DocElement for HirFnParam {
     }
 }
 
-impl IntoMir for HirFnParam {
-    type MirRepr = MirFnParam;
-
-    fn mir_repr<B: Backend>(
-        &self,
-        phase: &mut HirPhase,
-        mir_phase: &mut MirPhase,
-        _mir_funcs: &mut MirFuncRegistry<B>
-    ) -> Result<Self::MirRepr, HirTranslationError> {
-        let ty = mir_phase.types.mir_id(&self.ty, &phase.types)
-            .map_err(HirTranslationError::EdlError)?;
-
-        Ok(MirFnParam {
-            pos: self.pos,
-            name: self.name.clone(),
-            id: mir_phase.new_id(),
-            ty,
-            mutable: self.mutable,
-            comptime: self.comptime,
-            var_id: self.info.ok_or(HirTranslationError::UnresolvedParameterName {
-                pos: self.pos,
-                name: self.name.clone(),
-            })?,
-        })
-    }
-}
 
 impl HirFnSignature {
     /// This creates a MIR representation of the function signature, with the specified parameter
     /// definitions to generate the specific function implementation.
+    ///
+    /// # Parameter Env
+    ///
+    /// A side effect of this function is that it mushes the parameter environment of the signature
+    /// to the mir phases type registry.
+    /// So, somewhere after calling this function, [MirTypeRegistry::pop_layer] should be called to
+    /// reset the parameter environment.
     fn mir_repr<B: Backend>(
         &self,
         phase: &mut HirPhase,
         mir_phase: &mut MirPhase,
-        mir_funcs: &mut MirFuncRegistry<B>,
+        _mir_funcs: &mut MirFuncRegistry<B>,
         param_def: EdlParameterDef,
     ) -> Result<MirFnSignature, HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
@@ -470,7 +490,7 @@ impl HirFnSignature {
         let mut params = Vec::new();
         let mut comptime_params = Vec::new();
         for param in self.params.iter() {
-            let mut mir_param = param.mir_repr(phase, mir_phase, mir_funcs)?;
+            let mut mir_param = param.as_mir(phase, mir_phase)?;
             mir_param.comptime &= !self.comptime_only; // make sure that
 
             if !mir_param.comptime {
@@ -484,6 +504,7 @@ impl HirFnSignature {
 
         Ok(MirFnSignature {
             pos: self.pos,
+            src: self.src.clone(),
             scope: self.scope,
             id: mir_phase.new_id(),
             name: self.name.clone(),
@@ -493,6 +514,8 @@ impl HirFnSignature {
             ret,
             comptime: self.comptime,
             comptime_only: self.comptime_only,
+            async_: self.async_,
+            async_return: self.async_return,
         })
     }
 }
@@ -610,9 +633,8 @@ impl HirFn {
         // compiler state, which makes the parameter stack visible in the following contexts:
         let signature = self.signature.mir_repr(
             phase, mir_phase, mir_funcs, param)?;
-        // translate body
-        let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
 
+        let mut ctx = Context::default();
         if !signature.comptime_only {
             // insert comptime parameters as `let` statements at the top of the function body
             // for param in comptime_params.iter() {
@@ -636,13 +658,79 @@ impl HirFn {
                         "comptime parameters are illegal in `comptime` functions");
                 // figure out if this is a `?comptime` function called in a `comptime` context and
                 // make the body of the function `comptime` if this is the case
-                body.comptime = true;
+                // body.comptime = true;
+                ctx = Context::MaybeComptime;
             }
         } else {
             force_comptime = true;
+            ctx = Context::Comptime;
             assert!(comptime_params.is_empty(),
                     "comptime parameters are illegal in `comptime` functions");
         }
+        // translate body
+        // let mut body = self.body.mir_repr(phase, mir_phase, mir_funcs)?;
+        let mut parameters = signature
+            .params
+            .iter()
+            .map(|param| param.ty)
+            .collect::<Vec<_>>();
+        // we add the compile parameters after
+        parameters
+            .extend(signature.comptime_params
+                .iter()
+                .map(|param| param.ty));
+
+        let return_type = signature.ret;
+        let mut body = MirFlowGraph::new(
+            parameters.into_iter(),
+            return_type,
+            ctx,
+            self.signature.src.clone(),
+            DebugSymbols { pos: self.signature.pos },
+            self.signature.scope,
+        );
+        let ret_value = body.create_temp_variable(return_type);
+
+        // create variable mapper and inset function parameters
+        let mut var_mapper = VariableMapper::new();
+        signature
+            .params
+            .iter()
+            .zip(body.get_root_parameters()[..signature.params.len()].iter())
+            .for_each(|(param, value)| {
+                var_mapper.insert_mapping(param.var_id, *value)
+            });
+        signature
+            .comptime_params
+            .iter()
+            .zip(body.get_root_parameters()[signature.params.len()..].iter())
+            .for_each(|(param, value)| {
+                var_mapper.insert_mapping(param.var_id, *value)
+            });
+
+        let mut loop_mapper = LoopMapper::new();
+        let current_block = {
+            let mut graph_writer = MirGraph {
+                current_block: body.root(),
+                graph: &mut body,
+                mir_phase,
+                hir_phase: phase,
+                mir_funcs,
+                var_mapper: &mut var_mapper,
+                loop_mapper: &mut loop_mapper,
+            };
+            self.body.write_to_graph(&mut graph_writer, ret_value)?;
+            graph_writer.current_block
+        };
+        if !body.is_block_sealed(&current_block) {
+            body.insert_return(
+                current_block,
+                ret_value,
+                DebugSymbols { pos: self.body.find_last_item_position() },
+            );
+        }
+        body.seal();
+
         // in `mir_repr` for the signature, the type layer is pushed.
         // make sure that we pop it here
         mir_phase.types.pop_layer();

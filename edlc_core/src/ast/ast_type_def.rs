@@ -1,17 +1,19 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 //! Type definitions in EDL are somewhat different than in Rust.
@@ -33,7 +35,7 @@
 //! Tuple-like structures and enum variants may be implemented in the future, but are not supported
 //! for the first release of EDL.
 
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type_def::alias_def::AliasDef;
 pub use crate::ast::ast_type_def::enum_def::EnumDef;
@@ -59,6 +61,7 @@ mod alias_def;
 use crate::core::edl_param_env::EdlParameterEnv;
 use crate::prelude::edl_type::{EdlTypeId, EdlTypeRegistry};
 pub use struct_def::AstStructMember;
+use crate::ast::ast_where::AstWhere;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstTypeDef {
@@ -69,6 +72,7 @@ pub struct AstTypeDef {
     env: AstParamEnv,
     variant: AstTypeVariant,
     pub doc: Option<ItemDoc>,
+    type_constraints: Option<AstWhere>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +93,7 @@ impl Parsable for AstTypeDef {
         let scope = *parser.env.current_scope().wrap(pos)?;
         let src = parser.module_src.clone();
 
+        let constraints = AstWhere::try_parse(parser)?;
         expect_token!(parser; (Token::Punct(Punct::Assign))
             expected "`=` preceding RHS of type definition")?;
 
@@ -122,6 +127,7 @@ impl Parsable for AstTypeDef {
             env: parameter_env,
             variant,
             doc: None,
+            type_constraints: constraints,
         })
     }
 }
@@ -168,12 +174,13 @@ impl AstTypeDef {
         ).map_err(|err| AstTranslationError::ResolveError {
             err,
             pos: self.pos,
+            src: self.src.clone(),
         })?;
 
         // go back into the parent scope to find the type id
         phase.res.revert_to_scope(&self.scope);
         phase.res.pop();
-        let mut full_name = phase.res.current_level_name().wrap(self.pos)?;
+        let mut full_name = phase.res.current_level_name().wrap(self.pos).wrap_ast(&self.src)?;
         full_name.push(self.name.clone());
         Ok(phase.res.find_top_level_type(&full_name, &phase.types).unwrap())
     }
@@ -212,14 +219,14 @@ impl AstTypeDef {
     pub fn push_to_resolver(&self, phase: &mut HirPhase) -> Result<TypeState, AstTranslationError> {
         phase.res.revert_to_scope(&self.scope);
         let mut hir_env = self.env.clone().hir_repr(phase)?;
-        let edl_env = hir_env.edl_repr(phase)?;
+        let edl_env = hir_env.edl_repr(phase).wrap_ast(&self.src)?;
 
         match &self.variant {
             AstTypeVariant::Alias(alias) => {
                 let env_id = phase.types.insert_parameter_env(edl_env);
                 phase.res.revert_to_scope(&self.scope);
                 phase.res.push_env(env_id, &mut phase.types)
-                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
                 // go back to the parent scope to insert the alis definition into the name resolver
                 phase.res.revert_to_scope(&self.scope);
@@ -230,7 +237,7 @@ impl AstTypeDef {
                     ItemSrc::Intrinsic("".to_string()),
                     ItemInit::Alias(env_id, self.src.clone(), self.pos),
                     &mut phase.types,
-                ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos })?;
+                ).map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
                 let alias_id = phase.res
                     .find_top_level_alias(&vec![self.name.clone()].into())
@@ -251,14 +258,14 @@ impl AstTypeDef {
     pub fn translate_as_associate(&self, mut base_name: QualifierName, phase: &mut HirPhase) -> Result<TypeState, AstTranslationError> {
         phase.res.revert_to_scope(&self.scope);
         let mut hir_env = self.env.clone().hir_repr(phase)?;
-        let edl_env = hir_env.edl_repr(phase)?;
+        let edl_env = hir_env.edl_repr(phase).wrap_ast(&self.src)?;
 
         match &self.variant {
             AstTypeVariant::Alias(alias) => {
                 let env_id = phase.types.insert_parameter_env(edl_env);
                 phase.res.revert_to_scope(&self.scope);
                 phase.res.push_env(env_id, &mut phase.types)
-                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+                    .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
                 base_name.push(self.name.clone());
                 let alias_id = phase.types.insert_alias_type(
@@ -296,6 +303,7 @@ impl TypeState {
                 phase.res.push_env(*param, &mut phase.types)
                     .map_err(|err| AstTranslationError::EdlError {
                         pos: *pos,
+                        src: def.src.clone(),
                         err,
                     })?;
 
@@ -308,7 +316,7 @@ impl TypeState {
                 };
                 // insert
                 phase.types.update_type_state(*ty, layout)
-                    .map_err(|err| AstTranslationError::EdlError { pos: *pos, err })?;
+                    .map_err(|err| AstTranslationError::EdlError { pos: *pos, src: def.src.clone(), err })?;
                 Ok(Self::Done)
             }
             Self::Enum(ty, def, pos, scope, _) => {
@@ -321,6 +329,7 @@ impl TypeState {
                 phase.res.push_env(*param, &mut phase.types)
                     .map_err(|err| AstTranslationError::EdlError {
                         pos: *pos,
+                        src: def.src.clone(),
                         err,
                     })?;
 
@@ -336,7 +345,7 @@ impl TypeState {
                 };
                 // insert
                 phase.types.update_type_state(*ty, layout)
-                    .map_err(|err| AstTranslationError::EdlError { pos: *pos, err })?;
+                    .map_err(|err| AstTranslationError::EdlError { pos: *pos, src: def.src.clone(), err })?;
                 Ok(Self::Done)
             }
             Self::Alias(_, _, _, _) => {
@@ -372,15 +381,15 @@ impl TypeState {
             Err(err) => return match err.ty.as_ref() {
                 // error E061 is only returned when an alias type is not resolved
                 HirErrorType::EdlError(EdlError::E061(dep)) => Ok((self, Some(*dep))),
-                _ => Err(AstTranslationError::HirError { err }),
+                _ => Err(AstTranslationError::HirError { err, src: def.1.clone() }),
             }
         };
         let EdlMaybeType::Fixed(rhs_name_edl) = edl_ty else {
-            return Err(AstTranslationError::ElicitType { pos: *pos });
+            return Err(AstTranslationError::ElicitType { pos: *pos, src: def.1.clone() });
         };
 
         phase.types.finish_alias_type(*id, rhs_name_edl)
-            .map_err(|err| AstTranslationError::EdlError { err, pos: *pos })?;
+            .map_err(|err| AstTranslationError::EdlError { err, pos: *pos, src: def.1.clone() })?;
         Ok((TypeState::Done, Some(*id)))
     }
 

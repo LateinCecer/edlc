@@ -1,19 +1,21 @@
 /*
- *    Copyright 2025 Adrian Paskert
+ *     EDLc, a compiler for the EDL programming language.
+ *     Copyright (C) 2026  Adrian Paskert
  *
- *    Licensed under the Apache License, Version 2.0 (the "License");
- *    you may not use this file except in compliance with the License.
- *    You may obtain a copy of the License at
+ *     This program is free software: you can redistribute it and/or modify
+ *     it under the terms of the GNU Affero General Public License as published by
+ *     the Free Software Foundation, either version 3 of the License, or
+ *     (at your option) any later version.
  *
- *        http://www.apache.org/licenses/LICENSE-2.0
+ *     This program is distributed in the hope that it will be useful,
+ *     but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *     GNU Affero General Public License for more details.
  *
- *    Unless required by applicable law or agreed to in writing, software
- *    distributed under the License is distributed on an "AS IS" BASIS,
- *    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *    See the License for the specific language governing permissions and
- *    limitations under the License.
+ *     You should have received a copy of the GNU Affero General Public License
+ *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
+use std::any::Any;
 use std::cell::{Ref, RefMut};
 use std::collections::HashMap;
 use std::error::Error;
@@ -21,11 +23,13 @@ use std::fmt::{Display, Formatter};
 use std::ops::AddAssign;
 use log::debug;
 use crate::core::EdlVarId;
-use crate::hir::HirPhase;
-use crate::mir::mir_expr::MirExpr;
+use crate::mir::mir_expr::{MirFlowGraph, MirLoc, MirValue};
 use crate::mir::{MirError, MirPhase};
-use crate::mir::mir_funcs::{MirFuncId, MirFuncRegistry};
-
+use crate::mir::debug::DebugInformation;
+use crate::mir::mir_expr::mir_call::MirCall;
+use crate::mir::mir_funcs::{CallSrc, MirFuncId, MirFuncRegistry};
+use crate::mir::mir_type::{MirTypeRegistry};
+use crate::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, TypeError};
 
 pub enum WriteDest<Addr> {
     Tmp(&'static str),
@@ -35,35 +39,73 @@ pub enum WriteDest<Addr> {
     Addr(Addr)
 }
 
+pub enum StaticData {
+    Edl(AmorphusDataCopy),
+    Rust(Box<(dyn Any + 'static)>),
+    Raw(Box<[u8]>),
+}
+
+impl StaticData {
+    pub fn as_ptr(&self) -> *const u8 {
+        match self {
+            Self::Edl(a) => a.as_data().as_ptr(),
+            Self::Rust(val) => val.as_ref() as *const dyn Any as *const u8,
+            Self::Raw(val) => val.as_ptr(),
+        }
+    }
+}
+
+impl PartialEq for StaticData {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Edl(a), Self::Edl(b)) => a.eq(b),
+            (Self::Raw(a), Self::Raw(b)) => a.eq(b),
+            _ => false,
+        }
+    }
+}
+
+pub enum IntrinsicExecutionError {
+    TypeError(TypeError),
+    Panic,
+}
+
+impl From<TypeError> for IntrinsicExecutionError {
+    fn from(value: TypeError) -> Self {
+        IntrinsicExecutionError::TypeError(value)
+    }
+}
+
+impl Eq for StaticData {}
+
 /// A backend is used in dynamic code generation.
 pub trait Backend: Sized {
     type Error: Error;
-    type Module;
-    type Addr;
     type FuncGen<'a>;
-    
-    fn eval_const_expr(&mut self, element: MirExpr, phase: &mut MirPhase, hir_phase: &mut HirPhase) -> Result<MirExpr, MirError<Self>>;
-    fn eval_const_bytes(&mut self, element: MirExpr, phase: &mut MirPhase, hir_phase: &mut HirPhase) -> Result<Vec<u8>, MirError<Self>>;
 
     fn func_reg(&self) -> Ref<'_, MirFuncRegistry<Self>>;
     fn func_reg_mut(&mut self) -> RefMut<'_, MirFuncRegistry<Self>>;
 
-    /// Returns true if the backend is currently in the process of generating a symbol for the
-    /// specified function.
-    /// In other words, if this function returns `true`, then the backend is currently in the
-    /// process of generating the executable code for the specified function.
-    fn is_generating_symbol(&self, func_id: &MirFuncId) -> bool;
-}
+    fn intrinsic_runtime(&self, func: &MirFuncId) -> Option<u16>;
+    fn call_intrinsic(
+        &self,
+        func: &MirFuncId,
+        params: &[AmorphusData<'_>],
+        ret_buffer: AmorphusDataMut<'_>,
+        reg: &MirTypeRegistry,
+    ) -> Result<(), IntrinsicExecutionError>;
+    fn is_call_intrinsic(&self, func: &MirFuncId) -> bool;
 
+    fn global_var_mut(&mut self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
+    fn global_var(&self, var: EdlVarId) -> Option<std::ptr::NonNull<()>>;
 
-pub trait InstructionCount<B: Backend> {
-    /// Returns an approximation for the number of instructions emitted by an item during codegen.
-    /// This approximation should be conservative in the sense that it should never be **lower**
-    /// than the actual number of generated instructions.
-    /// However, since it is often hard to predict the exact number of instructions due to
-    /// optimizations, some padding should be applied when this method is used to allocate storage
-    /// for the instructions in memory.
-    fn count_instructions(&self, phase: &MirPhase, func_reg: &MirFuncRegistry<B>) -> Result<usize, MirError<B>>;
+    /// Allocate a chunk of static data.
+    fn alloc_static(&self, data: StaticData) -> std::ptr::NonNull<()>;
+
+    /// A runtime can be passed to intrinsics when called.
+    /// The runtime ordinal that is to be passed to the intrinsic must be marked to the function
+    /// at compile time.
+    fn runtime(&self, ordinal: u16) -> Option<std::ptr::NonNull<()>>;
 }
 
 
@@ -71,13 +113,24 @@ pub trait InstructionCount<B: Backend> {
 /// The code is usually emitted to the backend itself.
 /// From there, the backend can be used to either build an executable module, or interpret
 /// code directly.
-pub trait CodeGen<B>: InstructionCount<B>
+pub trait CodeGen<B>
 where B: Backend {
     fn code_gen(
         &self,
         backend: &mut B::FuncGen<'_>,
         type_reg: &mut MirPhase,
+        cfg: &MirFlowGraph,
+        call: &MirCall,
+        target: Option<&MirValue>,
+        call_src: &CallSrc,
     ) -> Result<(), MirError<B>>;
+
+    /// Attaches the debug information about this MIR function call to the output buffer.
+    fn debug_info(
+        &self,
+        info: &mut DebugInformation,
+        loc: &MirLoc,
+    );
 }
 
 
