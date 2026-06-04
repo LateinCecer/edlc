@@ -16,7 +16,7 @@
 
 use std::mem;
 use log::warn;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_fn::{AstFn, AstFnModifier};
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type::AstType;
@@ -240,7 +240,7 @@ impl Parsable for AstImpl {
 impl AstImpl {
     fn find_base_scope(&self, phase: &mut HirPhase) -> Option<ScopeId> {
         // find type scope
-        if let AstType::Base(_, name) = &self.base_name {
+        if let AstType::Base(_, _, name) = &self.base_name {
             let name: QualifierName = name.clone().into();
             phase.res.find_top_level_type_scope(&name)
         } else {
@@ -273,13 +273,14 @@ impl AstImpl {
     ) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
         let edl_ty = ty.edl_repr(phase)
-            .map_err(|err| AstTranslationError::HirError { err })?;
+            .map_err(|err| AstTranslationError::HirError { err, src: c.src.clone() })?;
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => {
                 return Err(AstTranslationError::EdlError {
                     pos: c.pos,
+                    src: c.src.clone(),
                     err: EdlError::E031,
                 });
             }
@@ -288,6 +289,7 @@ impl AstImpl {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty)
             });
         }
@@ -315,18 +317,18 @@ impl IntoHir for AstImpl {
         let base_scope = self.find_base_scope(parser);
 
         let mut hir_env = self.env.hir_repr(parser)?;
-        let edl_env = hir_env.edl_repr(parser)?;
+        let edl_env = hir_env.edl_repr(parser).wrap_ast(&self.src)?;
         let env_id = parser.types.insert_parameter_env(edl_env);
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         // parse base name and trait (if present)
         let mut base_name_hir = self.base_name.hir_repr(parser)?;
-        let EdlMaybeType::Fixed(base_name_edl) = base_name_hir.edl_repr(parser)? else {
-            return Err(AstTranslationError::ElicitType { pos: self.pos });
+        let EdlMaybeType::Fixed(base_name_edl) = base_name_hir.edl_repr(parser).wrap_ast(&self.src)? else {
+            return Err(AstTranslationError::ElicitType { pos: self.pos, src: self.src.clone() });
         };
         // push `Self` type to the resolver
         parser.res.revert_to_scope(&self.scope);
@@ -335,7 +337,7 @@ impl IntoHir for AstImpl {
 
         let trait_name_edl = if let Some(trait_name) = self.trait_name {
             let mut trait_name_hir = trait_name.trait_repr(parser)?;
-            let edl_id = trait_name_hir.edl_repr(parser)?;
+            let edl_id = trait_name_hir.edl_repr(parser).wrap_ast(&self.src)?;
             // push trait as an association to the base type, for the scope of the impl body
             let trait_name = &parser.types.get_trait(edl_id.trait_id).unwrap().name;
             parser.res.revert_to_scope(&self.scope);

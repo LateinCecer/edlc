@@ -14,7 +14,7 @@
  *    limitations under the License.
  */
 
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_expression::AstExpr;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir};
@@ -536,17 +536,20 @@ impl AstPreParams {
 /// As a result, only fully parsed parameter definitions are contained in the final result.
 impl AstPreParams {
     pub fn hir_repr_env(self, env: EdlEnvId, parser: &mut HirPhase) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse_env(env, parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse_env(env, parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 
     pub fn hir_repr(self, parser: &mut HirPhase, path: &QualifierName) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse(path, parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse(path, parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 
     pub fn hir_repr_self(self, parser: &mut HirPhase) -> Result<HirParamDef, AstTranslationError> {
-        let root_level = self.parse_self(parser)?;
+        let src = self.module_src.clone();
+        let root_level = self.parse_self(parser).wrap_ast(&src)?;
         root_level.hir_repr(parser)
     }
 }
@@ -596,13 +599,13 @@ impl IntoHir for ParamDef {
 
     fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         match self {
-            ParamDef::Const(AstExpr::Elicit(_)) => {
+            ParamDef::Const(AstExpr::Elicit(_, _)) => {
                 Ok(HirParamValue::ElicitConst)
             }
             ParamDef::Const(expr) => {
                 Ok(HirParamValue::Const(expr.hir_repr(parser)?))
             }
-            ParamDef::Type(AstType::Elicit(_)) => {
+            ParamDef::Type(AstType::Elicit(_, _)) => {
                 Ok(HirParamValue::ElicitType)
             }
             ParamDef::Type(value) => {

@@ -18,14 +18,14 @@ use crate::ast::ast_expression::ast_block::AstBlock;
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_where::AstWhere;
 use crate::core::edl_fn::EdlPreSignature;
 use crate::core::edl_type::{EdlExtendedType, EdlMaybeType};
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::{HirFn, HirFnParam, HirFnSignature};
-use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl};
+use crate::hir::{HirError, HirPhase, IntoEdl};
 use crate::hir::hir_trait_fn::{HirTraitFnParam, HirTraitFnSignature};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
@@ -211,10 +211,9 @@ impl AstFnParam {
     }
 }
 
-impl IntoHir for AstSelfParameter {
-    type Output = HirFnParam;
+impl AstSelfParameter {
 
-    fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
+    fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
         let (mutable, comptime, asy) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
         let SelfType::Type(hir_type) = parser.res.find_self_type().clone() else {
             panic!("`Self` type for implementation was not defined properly");
@@ -225,6 +224,7 @@ impl IntoHir for AstSelfParameter {
                     .new_ref(EdlMaybeType::Fixed(hir_type), Some(EdlConstValue::from_bool(mutable)))
                     .map_err(|err| AstTranslationError::EdlError {
                         pos: self.pos,
+                        src: src.clone(),
                         err,
                     })?
             }
@@ -454,17 +454,17 @@ impl AstFnSignature {
     }
 }
 
-impl IntoHir for AstFnParam {
-    type Output = HirFnParam;
+impl AstFnParam {
 
-    fn hir_repr(self, parser: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
+    fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
         let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
-        let edl_type = hir_type.edl_repr(parser)?;
+        let edl_type = hir_type.edl_repr(parser).wrap_ast(src)?;
 
         let EdlMaybeType::Fixed(ty) = edl_type else {
             return Err(AstTranslationError::FunctionParameterType {
                 pos: self.pos,
+                src: src.clone(),
                 name: self.name,
             });
         };
@@ -482,14 +482,15 @@ impl IntoHir for AstFnParam {
 }
 
 impl AstFnParam {
-    fn trait_hir_repr(self, parser: &mut HirPhase) -> Result<HirTraitFnParam, AstTranslationError> {
+    fn trait_hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirTraitFnParam, AstTranslationError> {
         let (mutable, comptime, asy) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
-        let ty = hir_type.edl_extended_repr(parser)?;
+        let ty = hir_type.edl_extended_repr(parser).wrap_ast(src)?;
 
         if matches!(ty, EdlExtendedType::Unknown) {
             return Err(AstTranslationError::FunctionParameterType {
                 pos: self.pos,
+                src: src.clone(),
                 name: self.name,
             });
         }
@@ -521,7 +522,7 @@ impl AstFnSignature {
         }
 
         let mut hir_env = self.env.clone().hir_repr(parser)?;
-        let edl_env = hir_env.edl_repr(parser)?;
+        let edl_env = hir_env.edl_repr(parser).wrap_ast(&self.src)?;
         self.env_id = Some(parser.types.insert_parameter_env(edl_env));
         Ok(())
     }
@@ -555,7 +556,7 @@ impl AstFnSignature {
                 scope: self.scope,
             },
             &mut parser.types,
-        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
+        ).map_err(|err| HirError::new_res(self.pos, err, self.src.clone())).wrap_ast(&self.src)?;
         Ok(())
     }
 
@@ -595,7 +596,7 @@ impl AstFnSignature {
                                 `async` qualifier")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
                     }
                     async_ = true;
                     async_pos = Some(*pos);
@@ -627,7 +628,7 @@ impl AstFnSignature {
                                 `?comptime` qualifier")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
                     }
                     comptime_pos = Some(*pos);
                     comptime = true;
@@ -662,7 +663,7 @@ impl AstFnSignature {
                                 are unnecessary and make the code less readable.")
                             ))
                         );
-                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos });
+                        return Err(AstTranslationError::InvalidFunctionModifier { pos: *pos, src: self.src.clone() });
                     }
                     comptime_pos = Some(*pos);
                     comptime_only = true
@@ -691,7 +692,7 @@ impl AstFnSignature {
                 ],
                 None,
             );
-            return Err(AstTranslationError::InvalidFunctionModifier { pos: comptime_pos.unwrap() });
+            return Err(AstTranslationError::InvalidFunctionModifier { pos: comptime_pos.unwrap(), src: self.src.clone() });
         }
 
         Ok((comptime, comptime_only, async_))
@@ -710,26 +711,26 @@ impl IntoHir for AstFnSignature {
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         let mut params = Vec::new();
         if let Some(self_param) = self.self_parameter {
-            params.push(self_param.hir_repr(parser)?);
+            params.push(self_param.hir_repr(parser, &self.src)?);
         }
         for param in self.params.into_iter() {
-            params.push(param.hir_repr(parser)?);
+            params.push(param.hir_repr(parser, &self.src)?);
         }
 
         let ret = if let Some(ret) = self.ret {
             let pos = *ret.pos();
             let mut hir_ret = ret.hir_repr(parser)?;
-            let edl_ret = hir_ret.edl_repr(parser)?;
+            let edl_ret = hir_ret.edl_repr(parser).wrap_ast(&self.src)?;
 
             if let EdlMaybeType::Fixed(ret) = edl_ret {
                 ret
             } else {
-                return Err(AstTranslationError::FunctionReturnType { pos });
+                return Err(AstTranslationError::FunctionReturnType { pos, src: self.src.clone() });
             }
         } else {
             parser.types.empty()
@@ -764,7 +765,7 @@ impl AstFnSignature {
 
         parser.res.revert_to_scope(&self.scope);
         parser.res.push_env(env_id, &mut parser.types).map_err(
-            |err| AstTranslationError::EdlError { err, pos: self.pos }
+            |err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() }
         )?;
 
         let mut params = Vec::new();
@@ -772,16 +773,16 @@ impl AstFnSignature {
             params.push(self_param.trait_hir_repr(parser)?);
         }
         for param in self.params.into_iter() {
-            params.push(param.trait_hir_repr(parser)?);
+            params.push(param.trait_hir_repr(parser, &self.src)?);
         }
 
         let ret = if let Some(ret) = self.ret {
             let pos = *ret.pos();
             let mut hir_ret = ret.hir_repr(parser)?;
-            let edl_ret = hir_ret.edl_extended_repr(parser)?;
+            let edl_ret = hir_ret.edl_extended_repr(parser).wrap_ast(&self.src)?;
 
             if matches!(edl_ret, EdlExtendedType::Unknown) {
-                return Err(AstTranslationError::FunctionReturnType { pos });
+                return Err(AstTranslationError::FunctionReturnType { pos, src: self.src.clone() });
             } else {
                 edl_ret
             }

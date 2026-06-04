@@ -15,7 +15,7 @@
  */
 use std::mem;
 use log::warn;
-use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_fn::{AstFnModifier, AstFnSignature};
 use crate::ast::ast_param_env::AstParamEnv;
 use crate::ast::ast_type_def::{AliasResolver};
@@ -323,11 +323,11 @@ impl TypeDef {
     ) -> Result<(), AstTranslationError> {
         phase.res.revert_to_scope(&self.scope);
         let mut hir_env = self.env.clone().hir_repr(phase)?;
-        let edl_env = hir_env.edl_repr(phase)?;
+        let edl_env = hir_env.edl_repr(phase).wrap_ast(&self.src)?;
         let env_id = phase.types.insert_parameter_env(edl_env);
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_env(env_id, &mut phase.types)
-            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
         base_name.push(self.name.clone());
         let ty = phase.types.insert_type(EdlType::Type {
@@ -349,13 +349,14 @@ impl AstTrait {
     ) -> Result<(), AstTranslationError> {
         let mut ty = c.ty.clone().hir_repr(phase)?;
         let edl_ty = ty.edl_repr(phase)
-            .map_err(|err| AstTranslationError::HirError { err })?;
+            .map_err(|err| AstTranslationError::HirError { err, src: c.src.clone() })?;
         // check that the type is specified explicitly
         let edl_ty = match edl_ty {
             EdlMaybeType::Fixed(ty) => ty,
             EdlMaybeType::Unknown => {
                 return Err(AstTranslationError::EdlError {
                     pos: c.pos,
+                    src: c.src.clone(),
                     err: EdlError::E031,
                 })
             }
@@ -364,6 +365,7 @@ impl AstTrait {
         if !HirConst::is_type_valid(edl_ty.ty) {
             return Err(AstTranslationError::EdlError {
                 pos: c.pos,
+                src: c.src.clone(),
                 err: EdlError::E032(edl_ty.ty),
             });
         }
@@ -391,11 +393,11 @@ impl AstTrait {
             .map_err(|err| AstTranslationError::ResolveError { err, pos: self.pos, src: self.src.clone() })?;
 
         let mut env = self.env.clone().hir_repr(phase)?;
-        let edl_env = env.edl_repr(phase)?;
+        let edl_env = env.edl_repr(phase).wrap_ast(&self.src)?;
         let env_id = phase.types.insert_parameter_env(edl_env.clone());
         phase.res.revert_to_scope(&self.scope);
         phase.res.push_env(env_id, &mut phase.types)
-            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+            .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
 
         // finish name
         base_name.push(self.name.clone());
@@ -432,7 +434,7 @@ impl AstTrait {
                 }
                 EdlGenericParamVariant::Type => {
                     let edl_id = phase.types.find_generic_type(env_id, index)
-                        .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos })?;
+                        .map_err(|err| AstTranslationError::EdlError { err, pos: self.pos, src: self.src.clone() })?;
                     *param = EdlGenericParamValue::Type(phase.types.new_type_instance(edl_id).unwrap());
                 }
             }

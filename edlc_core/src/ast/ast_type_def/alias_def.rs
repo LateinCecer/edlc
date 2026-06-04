@@ -15,13 +15,14 @@
  */
 
 use crate::ast::ast_type::AstType;
+use crate::file::ModuleSrc;
 use crate::parser::{Parsable, ParseError, Parser};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AliasDef(pub AstType);
+pub struct AliasDef(pub AstType, pub ModuleSrc);
 
 impl Parsable for AliasDef {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
-        AstType::parse(parser).map(|ty| AliasDef(ty))
+        AstType::parse(parser).map(|ty| AliasDef(ty, parser.module_src.clone()))
     }
 }

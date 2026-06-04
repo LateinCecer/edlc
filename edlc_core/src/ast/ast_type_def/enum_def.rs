@@ -18,6 +18,7 @@
 
 use crate::ast::ast_type_def::struct_def::StructDef;
 use crate::ast::ItemDoc;
+use crate::file::ModuleSrc;
 use crate::lexer::{Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
@@ -33,6 +34,7 @@ pub struct EnumVariant {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumDef {
+    pub src: ModuleSrc,
     pub variants: Vec<EnumVariant>,
 }
 
@@ -75,7 +77,8 @@ impl Parsable for EnumDef {
             break;
         }
         Ok(EnumDef {
-            variants
+            variants,
+            src: parser.module_src.clone(),
         })
     }
 }
