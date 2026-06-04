@@ -261,7 +261,7 @@ pub trait JoinState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
-struct NodeId(usize);
+pub struct NodeId(usize);
 
 impl Display for NodeId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

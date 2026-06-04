@@ -35,7 +35,6 @@ use crate::file::ModuleSrc;
 use crate::hir::HirPhase;
 use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
-use crate::parser::ReportError;
 use crate::report::ReportableError;
 use crate::resolver::namespace::Namespace;
 

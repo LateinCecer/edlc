@@ -15,24 +15,23 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::error::Error;
-use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlTypeInstance};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
-use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
 use crate::hir::translation::HirTranslationError;
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, HirUid, ResolveFn, ResolveNames, ResolveTypes};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{DebugSymbols, MirValue};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::resolver::ScopeId;
+use std::error::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {

@@ -21,26 +21,23 @@ use std::error::Error;
 use std::ops::BitAnd;
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
-use crate::core::edl_param_env::EdlGenericParamValue;
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::{HirContext, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::hir::hir_expr::{HirError, HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::hir_expr::hir_ref::InternalMutability;
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
+use crate::hir::{HirContext, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::MirValue;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
-use crate::mir::MirPhase;
-use crate::prelude::{edl_type, report_infer_error};
 use crate::prelude::mir_expr::DebugSymbols;
+use crate::prelude::{edl_type, report_infer_error};
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]

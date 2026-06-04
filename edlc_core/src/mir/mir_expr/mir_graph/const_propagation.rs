@@ -27,7 +27,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirRef, MirValue};
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement, TransferFn};
+use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;

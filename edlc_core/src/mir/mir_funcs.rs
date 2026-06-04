@@ -24,7 +24,6 @@ use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::index_map::IndexMap;
-use crate::core::type_analysis::{InferProvider, InferState};
 use crate::core::{edl_trait, EdlVarId};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
@@ -504,7 +503,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         // now that the code-gen is ready, place it into the function registry
         // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
-        let func = self.generators.get_mut(id.0).unwrap();;
+        let func = self.generators.get_mut(id.0).unwrap();
         func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
         Ok(self.conversion_map.get(&tmir).copied().unwrap())
     }

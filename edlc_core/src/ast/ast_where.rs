@@ -22,7 +22,7 @@ use crate::ast::IntoHir;
 use crate::file::ModuleSrc;
 use crate::hir::hir_where::{HirWhere, HirWhereConstraint};
 use crate::hir::HirPhase;
-use crate::lexer::{KeyWord, Punct, SrcPos, SrcToken, Token};
+use crate::lexer::{KeyWord, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
 

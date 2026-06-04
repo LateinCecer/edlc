@@ -16,26 +16,25 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::collections::HashSet;
-use std::error::Error;
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
-use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
+use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
 use crate::issue;
 use crate::issue::{SrcError, SrcRange};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{Context, DebugSymbols, MirValue, ValueScope};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
-use crate::mir::MirPhase;
 use crate::resolver::ScopeId;
+use std::collections::HashSet;
+use std::error::Error;
 
 #[derive(Clone, Debug, PartialEq)]
 struct CompilerInfo {

@@ -79,7 +79,7 @@ pub struct HirTrait {
 impl IntoEdl for HirTraitFnParam {
     type EdlRepr = EdlFnParam;
 
-    fn edl_repr(&mut self, phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
+    fn edl_repr(&mut self, _phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
         todo!()
     }
 }
@@ -87,7 +87,7 @@ impl IntoEdl for HirTraitFnParam {
 impl IntoEdl for HirTraitFnSignature {
     type EdlRepr = EdlFnSignature;
 
-    fn edl_repr(&mut self, phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
+    fn edl_repr(&mut self, _phase: &mut HirPhase) -> Result<Self::EdlRepr, HirError> {
         todo!()
     }
 }

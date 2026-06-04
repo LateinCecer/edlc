@@ -34,7 +34,7 @@ use crate::core::edl_fn::EdlFunctionBody;
 use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
 use crate::core::edl_param_env::{EdlParameterDef, EdlParameterEnv, EdlParamStack, EdlGenericParamVariant, EdlGenericParamValue};
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
-use crate::core::edl_type::{EdlConst, EdlEnvId, EdlFnInstance, EdlMaybeType, EdlTraitInstance, EdlType, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType, FunctionState};
+use crate::core::edl_type::{EdlConst, EdlEnvId, EdlFnInstance, EdlMaybeType, EdlType, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType, FunctionState};
 use crate::file::{ModuleSrc, ParserSupplier};
 use crate::hir::{HirError, HirErrorType, HirFmt, HirModule, HirPhase, IntoEdl};
 use crate::hir::hir_fn::HirFn;
@@ -756,7 +756,7 @@ edl init --bin
         &mut self,
         name: ModuleSrc,
         env: ModuleSrc,
-        funcs: &[ModuleSrc],
+        _funcs: &[ModuleSrc],
         associated_types: &[ModuleSrc],
         core_id: Option<EdlTraitId>,
     ) -> Result<EdlTraitId, CompilerError> {

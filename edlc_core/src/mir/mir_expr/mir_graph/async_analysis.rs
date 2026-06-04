@@ -19,6 +19,8 @@
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::index_map::IndexMap;
 use crate::core::EdlVarId;
+use crate::file::ModuleSrc;
+use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::mir_array_init::{MirArrayInit, MirArrayInitVariant};
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -27,6 +29,7 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::borrow::FlowState;
+use crate::mir::mir_expr::mir_graph::router::{DataDefinition, Router};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_expr::mir_graph::{ExprEval, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
@@ -35,15 +38,11 @@ use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::mir::mir_expr::{BlockLocalStatementUid, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::MirTypeRegistry;
+use crate::prelude::mir_funcs::MirFuncId;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
-use crate::mir::debug::CfgMap;
-use crate::mir::mir_expr::mir_graph::router::{DataDefinition, Router};
-use crate::prelude::mir_funcs::MirFuncId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -559,7 +558,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         &self,
         input: &mut HashNodeState<MirValue, AsyncConnState>,
         ctx: &mut AsyncConnContext<'reg, B>,
-        loc: &MirGraphLoc,
+        _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
         Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))))
@@ -1151,7 +1150,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
 
         for statement in block.statements.iter() {
             match statement {
-                Statement::VarDef { var: _, value, uid, debug } => {
+                Statement::VarDef { var: _, value, uid, debug: _ } => {
                     match until {
                         Some(until) if until == uid => break,
                         _ => (),

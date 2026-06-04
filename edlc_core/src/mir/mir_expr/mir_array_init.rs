@@ -17,8 +17,8 @@
  */
 
 use crate::core::edl_value::EdlConstValue;
-use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstEval, ConstFrame, ValueConstState};
-use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirLoc, MirValue, StackFrameLayout};
+use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
+use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeLayout, MirTypeRegistry};
 use crate::mir::MirUid;
 use crate::prelude::ExecutorVM;

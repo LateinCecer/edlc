@@ -15,21 +15,17 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+use crate::core::edl_value::EdlLiteralValue;
 use crate::core::EdlVarId;
-use crate::file::ModuleSrc;
-use crate::lexer::SrcPos;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::StackFrameLayout;
 use crate::mir::mir_str::{FatPtr, MemPtr};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirValue;
-use crate::resolver::ScopeId;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::ops;
-use crate::core::edl_type::EdlTypeRegistry;
-use crate::core::edl_value::EdlLiteralValue;
 
 pub struct AmorphusDataMut<'a> {
     data: &'a mut [u8],

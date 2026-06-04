@@ -24,18 +24,11 @@ use crate::core::type_analysis::*;
 use crate::documentation::{ConstDoc, DocCompilerState, DocElement, Modifiers};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirType;
-use crate::hir::hir_expr::{HirExpression, MakeGraph, MirGraph, SourceObject};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::hir_expr::{HirExpression, SourceObject};
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, IntoEdl, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{SrcError, TypeArguments};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_const::MirConstDef;
-use crate::mir::mir_expr::MirValue;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_type::MirTypeId;
-use crate::mir::MirPhase;
 use crate::resolver::{QualifierName, ResolveError, ScopeId};
 
 

@@ -16,9 +16,10 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
+use crate::core::edl_param_env::EdlGenericParamValue;
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, FmtType};
-use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
+use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_ref::{HirRef, InternalMutability};
@@ -35,7 +36,6 @@ use crate::mir::mir_type::MirTypeId;
 use crate::prelude::hir_expr::HirTreeWalker;
 use crate::resolver::ScopeId;
 use std::error::Error;
-use crate::core::edl_param_env::EdlGenericParamValue;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {

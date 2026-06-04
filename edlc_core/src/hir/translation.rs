@@ -25,9 +25,6 @@ use crate::core::edl_value::EdlConstValue;
 use crate::core::EdlVarId;
 use crate::hir::{HirError, HirFmt, HirPhase};
 use crate::lexer::SrcPos;
-use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
 
 #[derive(Clone, Debug)]
 pub enum HirTranslationError {

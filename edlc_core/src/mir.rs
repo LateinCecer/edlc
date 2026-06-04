@@ -19,7 +19,6 @@ use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlConstId, EdlTypeId};
 use crate::core::EdlVarId;
 use crate::hir::translation::HirTranslationError;
-use crate::hir::HirPhase;
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, StackError};
 use crate::mir::mir_funcs::{ComptimeValueId, MirFuncId};
@@ -28,7 +27,7 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::mem;
 
-pub use debug::{DebugInformation, SourceInfo, DebugDataId, TrapInfo};
+pub use debug::{DebugDataId, DebugInformation, SourceInfo, TrapInfo};
 
 pub mod mir_type;
 pub mod mir_funcs;

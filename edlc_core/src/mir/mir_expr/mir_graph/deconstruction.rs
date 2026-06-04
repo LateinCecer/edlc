@@ -16,16 +16,7 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::error::Error;
-use std::fmt::{Display, Formatter};
-use std::io::Write;
-use std::ops;
-use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
-use crate::ast::ast_module::AstModuleDescription;
 use crate::core::index_map::IndexMap;
-use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
-use crate::mir::mir_expr::{AsciPrinter, BorrowGraph, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirPrinter, MirRef, MirValue, Statement};
 use crate::mir::mir_expr::lifetime_analysis::{BlockRanges, RangeOverlap, RegionLifenessList};
 use crate::mir::mir_expr::mir_array_init::MirArrayInit;
 use crate::mir::mir_expr::mir_as::MirAs;
@@ -34,11 +25,19 @@ use crate::mir::mir_expr::mir_call::MirCall;
 use crate::mir::mir_expr::mir_constant::MirConstant;
 use crate::mir::mir_expr::mir_data::MirData;
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
+use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, TransferDrop, TransferMove, TransferRecord, TransferSync};
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
+use crate::mir::mir_expr::{AsciPrinter, BorrowGraph, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirLoc, MirPrinter, MirRef, MirValue, Statement};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
+use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::io::Write;
+use std::ops;
 
 pub struct PartialSsaDeconstruction {
     source_count: usize,
@@ -360,9 +359,7 @@ impl PartialSsaDeconstruction {
                 eprintln!("source value {value} is not mapped!");
                 panic!("value not mapped");
             };
-
-            let source_b = self.mapping[value.0];
-            self.try_merge_sources(source_a, source_b);
+            self.try_merge_sources(source_a, *source_b);
         }
     }
 
@@ -378,9 +375,9 @@ impl PartialSsaDeconstruction {
             mapping.entry(*ty).or_insert_with(HashSet::new).insert(*src);
         });
 
-        for (ty, sources) in mapping {
+        for (_ty, sources) in mapping {
             #[cfg(feature = "debug_printouts")]
-            println!("[debug] merging sources for type {ty}");
+            println!("[debug] merging sources for type {_ty}");
             for a in sources.iter() {
                 if self.is_source_empty(a) {
                     continue;

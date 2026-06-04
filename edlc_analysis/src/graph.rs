@@ -1126,11 +1126,17 @@ where E: TransferFn<Self, V, HashGraphState<LatticeId, V, Context>> + Clone {
         changed
     }
 
-    fn join_single_prec(&self, id: &LatticeId, predecessor: &LatticeId, state: &mut HashGraphState<LatticeId, V, Context>, op: fn(V, V) -> Result<V, V::Conflict>) -> bool {
+    fn join_single_prec(
+        &self,
+        _id: &LatticeId,
+        _predecessor: &LatticeId,
+        _state: &mut HashGraphState<LatticeId, V, Context>,
+        _op: fn(V, V) -> Result<V, V::Conflict>,
+    ) -> bool {
         todo!()
     }
 
-    fn join_succ(&self, id: &LatticeId, state: &mut HashGraphState<LatticeId, V, Context>, op: fn(V, V) -> Result<V, V::Conflict>) -> bool {
+    fn join_succ(&self, id: &LatticeId, state: &mut HashGraphState<LatticeId, V, Context>, _op: fn(V, V) -> Result<V, V::Conflict>) -> bool {
         // make sure a base state exists for `id`
         state.map.entry(*id).or_insert(HashNodeState::default());
 
@@ -1146,7 +1152,13 @@ where E: TransferFn<Self, V, HashGraphState<LatticeId, V, Context>> + Clone {
         changed
     }
 
-    fn join_single_succ(&self, id: &LatticeId, successor: &LatticeId, state: &mut HashGraphState<LatticeId, V, Context>, op: fn(V, V) -> Result<V, V::Conflict>) -> bool {
+    fn join_single_succ(
+        &self,
+        _id: &LatticeId,
+        _successor: &LatticeId,
+        _state: &mut HashGraphState<LatticeId, V, Context>,
+        _op: fn(V, V) -> Result<V, V::Conflict>,
+    ) -> bool {
         todo!()
     }
 
@@ -1199,10 +1211,7 @@ where
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
-        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
-            num_iters += 1;
-
             let prev_state = state.node_state(&v).unwrap().clone();
             let mut changed = cfg.join_prec(&v, state, op);
 
@@ -1220,7 +1229,6 @@ where
                 }
             }
         }
-        // println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1235,10 +1243,7 @@ where
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = VecDeque::from(cfg.all_nodes());
-        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop_front() {
-            num_iters += 1;
-
             let prev_state = state.node_state(&v).unwrap().clone();
             let mut changed = cfg.join_succ(&v, state, op);
 
@@ -1255,9 +1260,6 @@ where
                 }
             }
         }
-
-        // #[cfg(debug_assertions)]
-        // println!("[debug] fixpoint-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }
@@ -1272,9 +1274,7 @@ where
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
-        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
-            num_iters += 1;
             let node_state = if let Some(x) = state.node_state(&v) {
                 x
             } else {
@@ -1325,9 +1325,7 @@ where
 {
     fn solve(&mut self, cfg: &Cfg, state: &mut State, op: fn(V, V) -> Result<V, V::Conflict>) -> Result<(), V::Conflict> {
         let mut work_list = cfg.all_nodes();
-        let mut num_iters = 0usize;
         while let Some(v) = work_list.pop() {
-            num_iters += 1;
             let x = if let Some(x) = state.node_state(&v) {
                 x
             } else {
@@ -1352,8 +1350,6 @@ where
                 }
             }
         }
-
-        // println!("[debug] propagation-work-list-algorithm finished with {num_iters} iterations!");
         Ok(())
     }
 }

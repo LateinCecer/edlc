@@ -66,14 +66,14 @@ use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
 use crate::prelude::mir_expr::lifetime_analysis::RegionLifenessList;
 
-pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstEval, ConstFrame, ValueConstState};
+pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unknown, ConstFrame};
 pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
 pub use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncFlowAnalysis};
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_funcs::MirFuncRegistry;
-use crate::mir::{MirPhase, TrapInfo};
+use crate::mir::TrapInfo;
 use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncConnContext, AsyncConnState, AsyncConnectome};
 use crate::prelude::mir_funcs::MirFuncId;
 use crate::resolver::ScopeId;
@@ -1828,7 +1828,6 @@ impl MirFlowGraph {
         src: ModuleSrc,
         pos: DebugSymbols,
         scope_id: ScopeId,
-        mir_types: &MirTypeRegistry,
     ) -> Self {
         let mut out = Self {
             blocks: vec![],

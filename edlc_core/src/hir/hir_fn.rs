@@ -35,13 +35,12 @@ use crate::issue;
 use crate::issue::{format_type_args, SrcError};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph, MirValue};
+use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
 use crate::mir::mir_type::TMirFnCallInfo;
 use crate::mir::mir_vars::VariableMapper;
 use crate::mir::MirPhase;
 use crate::prelude::{edl_type, report_infer_error, ExecType, HirContext};
-use crate::prelude::mir_type::MirTypeRegistry;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 
 
@@ -689,7 +688,6 @@ impl HirFn {
             self.signature.src.clone(),
             DebugSymbols { pos: self.signature.pos },
             self.signature.scope,
-            &mir_phase.types,
         );
         let ret_value = body.create_temp_variable(return_type);
 

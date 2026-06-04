@@ -24,22 +24,19 @@ use crate::core::type_analysis::*;
 use crate::core::{edl_type, EdlVarId};
 use crate::documentation::{DocCompilerState, DocElement, LetDoc, Modifier, Modifiers};
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_deref::HirDeref;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
-use crate::issue::{SrcError, TypeArgument, TypeArguments};
+use crate::issue::{SrcError, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_let::MirLet;
-use crate::mir::MirPhase;
+use crate::mir::mir_expr::{DebugSymbols, MirValue};
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
+use crate::mir::mir_type::MirTypeId;
 use crate::resolver::{ItemInit, ItemSrc, QualifierName, ResolveError, ScopeId};
 use std::error::Error;
-use crate::core::binop::BinaryOp::Mul;
-use crate::hir::hir_expr::hir_deref::HirDeref;
-use crate::mir::mir_expr::{DebugSymbols, MirValue};
-use crate::mir::mir_type::MirTypeId;
 
 #[derive(Debug, Clone, PartialEq)]
 struct CompilerInfo {

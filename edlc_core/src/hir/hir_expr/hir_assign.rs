@@ -17,32 +17,30 @@
  */
 
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument, EdlRecoverableError};
+use crate::core::edl_type;
 use crate::core::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeRegistry, FmtType};
 use crate::core::edl_value::EdlConstValue;
+use crate::core::type_analysis::*;
 use crate::file::ModuleSrc;
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::hir_ref::InternalMutability;
 use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, MirGraph, SourceObject};
-use crate::hir::translation::{HirTranslationError};
+use crate::hir::hir_report::report_expect_mutable;
+use crate::hir::translation::HirTranslationError;
 use crate::hir::{HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::mir_assign::MirAssign;
-use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::MirPhase;
-use crate::resolver::ScopeId;
-use std::collections::HashSet;
-use std::error::Error;
-use crate::core::edl_type;
-use crate::core::type_analysis::*;
-use crate::hir::hir_expr::hir_as::HirAs;
-use crate::hir::hir_expr::hir_deref::HirDeref;
-use crate::hir::hir_expr::hir_ref::InternalMutability;
-use crate::hir::hir_report::report_expect_mutable;
 use crate::mir::mir_expr::MirValue;
+use crate::mir::mir_funcs::{FnCodeGen, MirFn};
 use crate::mir::mir_type::MirTypeId;
 use crate::prelude::mir_expr::DebugSymbols;
 use crate::prelude::report_infer_error;
+use crate::resolver::ScopeId;
+use std::collections::HashSet;
+use std::error::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AssignmentMode {

@@ -19,17 +19,23 @@ use crate::compiler::EdlCompiler;
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::index_map::IndexMap;
+use crate::hir::translation::HirTranslationError;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::lifetime_analysis::RegionError;
 use crate::mir::mir_expr::mir_graph::borrow::{BorrowConflict, BorrowGraph, FlowState, JoinState, ReferenceStateForest};
 use crate::mir::mir_expr::mir_graph::deconstruction::DeconstructionConflict;
 use crate::mir::mir_expr::mir_graph::drop_check::DropError;
+use crate::mir::mir_expr::mir_graph::scope_check::ScopeError;
+use crate::mir::mir_expr::mir_graph::validate::ContextError;
 use crate::mir::mir_expr::mir_graph::{Block, Seal, Statement};
 use crate::mir::mir_expr::{AsciPrinter, AsyncFlowAnalysis, BlockCall, BlockLocalStatementUid, BlockParameterIndex, Context, DebugSymbols, DefPoint, ExecutionError, MirBlockRef, MirExprId, MirExprVariant, MirGraphLoc, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions, VarUse};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::mir_expr::MirFlowGraph;
 use crate::prelude::{AmorphusDataCopy, ExecutorVM};
+use crate::report::{Report, ReportError};
 use edlc_analysis::graph::{IsDefault, LatticeElement};
 use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
@@ -39,13 +45,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
-use crate::hir::HirPhase;
-use crate::hir::translation::HirTranslationError;
-use crate::issue::{SrcError, TypeArgument, TypeArguments};
-use crate::mir::mir_expr::mir_graph::scope_check::ScopeError;
-use crate::mir::mir_expr::mir_graph::validate::ContextError;
-use crate::mir::MirPhase;
-use crate::report::{Report, ReportError};
 
 /// Lattice:
 ///
@@ -818,7 +817,7 @@ impl ConstEval {
 
         // remove all values that we can consider to be dropped
         let mut remove_counter = 0;
-        for (val_raw, info) in buf.iter() {
+        for (_val_raw, info) in buf.iter() {
             if !info.in_use && info.remove_allowed {
                 // eprintln!("removing var {}  ({:?})", MirValue(val_raw), info);
                 cfg.remove_def(&info.init);
@@ -1193,7 +1192,7 @@ impl MirFlowGraph {
     fn replace_constant_parameters(&mut self, consts: &ConstEval) {
         let mut retain_list = vec![]; // for each block, maintain a list of block parameter
         // indices that we *want to keep*
-        for (block_ref, block) in self.blocks.iter_mut().enumerate() {
+        for block in self.blocks.iter_mut() {
             let mut params = Vec::new();
             mem::swap(&mut params, &mut block.parameters);
             // check parameters
@@ -1633,7 +1632,7 @@ impl Statement {
             Self::VarCopy { var, value, uid: _, debug: _, implementation } => {
                 // check if value exists
                 Ok(if const_eval.block_frame.is_avail(value, &const_eval.borrow_graph) {
-                    if let Some(im) = implementation {
+                    if let Some(_im) = implementation {
                         todo!()
                     } else {
                         let dst = stack_frame.get_offset(var, vm).unwrap();

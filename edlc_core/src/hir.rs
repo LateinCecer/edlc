@@ -42,13 +42,10 @@ use crate::hir::hir_expr::hir_type::HirTypeName;
 use crate::hir::hir_expr::hir_use::HirUse;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
-use crate::hir::translation::{HirTranslationError};
 use crate::issue::{IssueFormatter, ReportTarget, SrcError, SrcRange, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
-use crate::mir::mir_item::MirItem;
-use crate::mir::MirPhase;
 use crate::parser::Parser;
 use crate::resolver::{QualifierName, ResolveError, ScopeId, TopLevelNameResolver};
 
@@ -69,7 +66,7 @@ pub mod hir_where;
 pub use context::HirContext;
 pub use context::ExecType;
 use crate::ast::ItemDoc;
-use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
+use crate::core::edl_value::{EdlConstValue};
 use crate::core::type_analysis::{Infer, InferError, InferProvider, InferState, TypeUid, ExtConstUid};
 use crate::documentation::{DocCompilerState, DocElement};
 use crate::hir::code_container::CodeContainer;
@@ -1363,7 +1360,7 @@ impl Display for HirErrorType {
             HirErrorType::FunctionCallArg => {
                 write!(f, "function call argument error.")
             },
-            HirErrorType::Resolver(res, src) => {
+            HirErrorType::Resolver(res, _src) => {
                 write!(f, "{res}")
             },
             HirErrorType::NameUnresolved(name) => {

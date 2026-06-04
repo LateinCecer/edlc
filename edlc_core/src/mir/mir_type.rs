@@ -863,7 +863,7 @@ impl TMirParams {
     }
 
     fn to_edl(&self) -> EdlParameterDef {
-        let mut params = self.params
+        let params = self.params
             .iter()
             .map(|param| param.to_edl())
             .collect();
