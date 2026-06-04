@@ -18,6 +18,7 @@ use crate::ast::ast_error::AstTranslationError;
 use crate::ast::ast_expression::AstExpr;
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::{AstElement, IntoHir};
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::core::edl_trait;
 use crate::core::edl_trait::EdlTraitId;
 use crate::file::ModuleSrc;
@@ -67,6 +68,7 @@ impl IntoHir for AstPrefixExpr {
 
         let generic_params = AstPreParams::empty(self.pos, self.src.clone());
         let params = vec![self.val.hir_repr(parser)?];
+        let modifiers = vec![CallParamModifier::None];
         let trait_instance = parser.types.new_trait_instance(trait_id).unwrap();
         let out = HirFunctionCall::with_trait(
             self.pos,
@@ -76,6 +78,7 @@ impl IntoHir for AstPrefixExpr {
             generic_params,
             trait_instance,
             params,
+            modifiers,
         );
         Ok(out.into())
     }

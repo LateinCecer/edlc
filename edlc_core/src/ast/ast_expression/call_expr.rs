@@ -121,6 +121,7 @@ impl IntoHir for AstCallExpr {
                     self.scope,
                     self.src,
                     params,
+                    self.modifiers,
                     name.clone(),
                 ))
             },

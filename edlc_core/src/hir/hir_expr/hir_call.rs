@@ -39,6 +39,7 @@ use crate::resolver::{QualifierName, ScopeId};
 use std::error::Error;
 use std::hash::DefaultHasher;
 use log::warn;
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::ast::ast_type::AstTypeName;
 use crate::ast::IntoHir;
 use crate::hir::hir_expr::hir_deref::HirDeref;
@@ -84,6 +85,7 @@ pub struct HirFunctionCall {
     pub scope: ScopeId,
     pub src: ModuleSrc,
     pub params: Vec<HirExpression>,
+    pub param_modifiers: Vec<CallParamModifier>,
     pub is_method_call: bool,
 
     raw_name: Option<AstTypeName>,
@@ -157,6 +159,7 @@ impl HirFunctionCall {
         scope: ScopeId,
         src: ModuleSrc,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
         name: AstTypeName,
     ) -> Self {
         HirFunctionCall {
@@ -164,6 +167,7 @@ impl HirFunctionCall {
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: false,
 
             raw_name: Some(name),
@@ -183,12 +187,14 @@ impl HirFunctionCall {
         generic_params: AstPreParams,
         associated_trait: EdlTraitInstance,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
     ) -> Self {
         HirFunctionCall {
             pos,
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: false,
 
             raw_name: None,
@@ -215,12 +221,14 @@ impl HirFunctionCall {
         name: QualifierName,
         generic_params: AstPreParams,
         params: Vec<HirExpression>,
+        param_modifiers: Vec<CallParamModifier>,
     ) -> Self {
         HirFunctionCall {
             pos,
             scope,
             src,
             params,
+            param_modifiers,
             is_method_call: true,
 
             raw_name: None,
@@ -479,6 +487,71 @@ impl HirFunctionCall {
             .unwrap_or(self.pos)
     }
 
+    fn verify_mut_ref(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        let mut res = Ok(());
+        let info = self.info.as_ref().unwrap();
+        if let Some(resolver_info) = info.resolver.res.as_ref() {
+            for (value, (auto_ref, modifier)) in self.params
+                .iter()
+                .zip(resolver_info.auto_ref
+                    .iter()
+                    .zip(self.param_modifiers.iter())) {
+
+                let AutoReference::Reference { mutability } = auto_ref else {
+                    continue;
+                };
+                let m = infer_state.find_ext_const(*mutability)
+                    .expect("failed to find mutability in type inferer state");
+                let m = m.unwrap_literal().unwrap_bool();
+                let func = resolver_info.sig.fn_id;
+
+                if m && *modifier != CallParamModifier::Mutable {
+                    // the value must be mutable
+                    phase.report_error(
+                        TypeArguments::new(&[
+                            TypeArgument::new_display(&"creation of mutable reference must be \
+                            marked as `mut`"),
+                        ]),
+                        &[
+                            SrcError::Double {
+                                src: self.src.clone(),
+                                first: self.pos.clone().into(),
+                                second: value.pos().clone().into(),
+                                error_first: TypeArguments::new(&[
+                                    TypeArgument::new_display(&"function call `"),
+                                    TypeArgument::new_edl(&func),
+                                    TypeArgument::new_display(&"` takes a mutable reference"),
+                                ]),
+                                error_second: TypeArguments::new(&[
+                                    TypeArgument::new_display(&"value needs to be referenced \
+                                    mutably, which requires prefixing the parameter value with the \
+                                    `mut` keyword"),
+                                ]),
+                            }
+                        ],
+                        Some(TypeArguments::new(&[
+                            TypeArgument::new_display(&"This language feature is there to \
+                            clearly communicate to the user that a value may be modified by the \
+                            callee."),
+                        ])),
+                    );
+                    if res.is_ok() {
+                        res = Err(HirError {
+                            pos: value.pos(),
+                            ty: Box::new(HirErrorType::NotMutable("mutable reference is created \
+                            but parameter is not marked as `mut`".to_string()))
+                        });
+                    }
+                }
+            }
+        }
+        res
+    }
+
     pub fn verify(
         &mut self,
         phase: &mut HirPhase,
@@ -604,6 +677,11 @@ impl HirFunctionCall {
             self.call_comptime_if_possible = true;
         }
         // println!("  [{}] result = {res:?}", self.pos);
+        if let Err(err) = self.verify_mut_ref(phase, infer_state) {
+            if res.is_ok() {
+                res = Err(err);
+            }
+        }
         res
     }
 

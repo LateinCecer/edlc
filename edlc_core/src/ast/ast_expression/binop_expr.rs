@@ -18,6 +18,7 @@ use crate::ast::ast_error::AstTranslationError;
 use crate::ast::ast_expression::{AstExpr, EdlExpr};
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::{AstElement, IntoHir};
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::core::binop::BinaryOp;
 use crate::core::edl_trait;
 use crate::file::ModuleSrc;
@@ -154,6 +155,10 @@ impl IntoHir for AstBinaryExpr {
             self.lhs.clone().hir_repr(parser)?,
             self.rhs.hir_repr(parser)?,
         ];
+        let modifiers = vec![
+            CallParamModifier::Mutable,
+            CallParamModifier::None,
+        ];
         let trait_instance = parser.types.new_trait_instance(trait_id).unwrap();
         let mut out: HirExpression = HirFunctionCall::with_trait(
             self.pos,
@@ -163,6 +168,7 @@ impl IntoHir for AstBinaryExpr {
             generic_params,
             trait_instance,
             params,
+            modifiers,
         ).into();
 
         if matches!(self.op, BinaryOp::Neq | BinaryOp::Geq | BinaryOp::Leq) {

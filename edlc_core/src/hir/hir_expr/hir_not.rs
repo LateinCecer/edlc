@@ -15,6 +15,7 @@
  */
 
 use crate::ast::ast_error::AstTranslationError;
+use crate::ast::ast_expression::call_expr::CallParamModifier;
 use crate::ast::ast_param_env::AstPreParams;
 use crate::core::edl_fn::EdlCompilerState;
 use crate::core::edl_trait;
@@ -37,6 +38,7 @@ pub fn not(
 ) -> Result<HirFunctionCall, AstTranslationError> {
     let generic_params = AstPreParams::empty(pos, src.clone());
     let params = vec![expr];
+    let modifiers = vec![CallParamModifier::None];
     let name: QualifierName = vec!["not".to_string()].into();
     let trait_id = state.type_registry()
         .new_trait_instance(edl_trait::EDL_NOT_TRAIT)
@@ -50,5 +52,6 @@ pub fn not(
         generic_params,
         trait_id,
         params,
+        modifiers,
     ))
 }

@@ -139,6 +139,9 @@ impl IntoHir for AstMethodExpr {
             params.push(param.hir_repr(parser)?);
         }
 
+        let mut param_modifiers = self.modifiers.clone();
+        param_modifiers.insert(0, CallParamModifier::Mutable);
+
         let name: QualifierName = vec![self.name.name].into();
         let generic_params = self.name.params;
 
@@ -149,6 +152,7 @@ impl IntoHir for AstMethodExpr {
             name,
             generic_params,
             params,
+            param_modifiers,
         ))
     }
 }
