@@ -11,7 +11,7 @@ keywords = ["compiler", "edl"]
 categories = ["compilers", "science"]
 
 [dependencies]
-edlc_core = { path="../edlc_core", version="0.2.0" }
+edlc_core = { path="../edlc_core" }
 
 tower-lsp = "0.20.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }

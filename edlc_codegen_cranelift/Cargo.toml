@@ -14,8 +14,8 @@ categories = ["compilers", "science"]
 serde = ["dep:serde"]
 
 [dependencies]
-edlc_core = { path="../edlc_core", version="0.2.0", features=[] }
-edlc_layout = { path="../edlc_layout", version="0.2.0" }
+edlc_core = { path="../edlc_core", features=[] }
+edlc_layout = { path="../edlc_layout" }
 
 log = "0.4.22"
 cranelift = { version="0.132.0", features=[] }
@@ -35,4 +35,4 @@ gimli = { version="0.33.0", features=["endian-reader", "read", "write"] }
 [dev-dependencies]
 fern = { version= "0.7.1", features=["colored"] }
 humantime = "2.1.0"
-edlc_docs = { path="../edlc_docs", version = "0.2.0" }
+edlc_docs = { path="../edlc_docs" }
