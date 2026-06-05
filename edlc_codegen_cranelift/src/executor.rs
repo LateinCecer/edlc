@@ -350,7 +350,11 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(hir)
     }
 
-    pub fn compile_module(&mut self, name: QualifierName, src: ModuleSrc) -> Result<(), anyhow::Error> {
+    pub fn compile_module(
+        &mut self,
+        name: QualifierName,
+        src: ModuleSrc,
+    ) -> Result<HirModule, anyhow::Error> {
         self.compiler.phase.report_mode.print_errors = true;
         self.compiler.phase.report_mode.print_warnings = true;
         let module = match self.compiler.parse_module(src, name) {
@@ -370,7 +374,18 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         module.register_function_definitions(&mut self.backend.func_reg.borrow_mut());
         let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
         self.compile_globals(&module, &mut vm)?;
-        Ok(())
+        Ok(module)
+    }
+
+    pub fn run_module_tests(
+        &mut self,
+        name: QualifierName,
+        src: ModuleSrc,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Result<TestReport, anyhow::Error> {
+        let module = self.compile_module(name, src)?;
+        self.test_module(&module, test_name, path)
     }
 
     fn compile_globals(&mut self, module: &HirModule, vm: &mut ExecutorVM) -> Result<(), anyhow::Error> {
@@ -641,21 +656,12 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(module)
     }
 
-    pub fn run_test<Src: SrcSupplier>(
+    fn test_module(
         &mut self,
-        name: &str,
-        supplier: &Src,
-        is_lib: bool,
+        module: &HirModule,
         test_name: &Regex,
         path: Option<&QualifierName>,
     ) -> Result<TestReport, anyhow::Error> {
-        let module = if is_lib {
-            self.load_lib(name, supplier)?
-        } else {
-            self.load_bin(name, supplier)?
-        };
-        self.prepare_module(&module)?;
-
         let mut report = TestReport::default();
         'outer: for (id, test, setup, teardown) in self
             .get_test_cases(test_name, &module, path, "test")? {
@@ -682,6 +688,23 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
             report.insert(id, FnReport::Ok);
         }
         Ok(report)
+    }
+
+    pub fn run_test<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+        is_lib: bool,
+        test_name: &Regex,
+        path: Option<&QualifierName>,
+    ) -> Result<TestReport, anyhow::Error> {
+        let module = if is_lib {
+            self.load_lib(name, supplier)?
+        } else {
+            self.load_bin(name, supplier)?
+        };
+        self.prepare_module(&module)?;
+        self.test_module(&module, test_name, path)
     }
 
     pub fn run_bench<Src: SrcSupplier>(
