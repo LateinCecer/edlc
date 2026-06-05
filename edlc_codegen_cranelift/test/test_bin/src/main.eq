@@ -234,6 +234,10 @@ fn write_value(x: &mut i32) {
     x = some_value;
 }
 
+fn write_float(x: &mut f64) {
+    x = 4.2;
+}
+
 fn write_literal(x: &mut i32) {
     x = 42;
 }
@@ -270,4 +274,7 @@ fn test_vec_mut_access() {
 
     vec.index_mut(1) = 204.1;
     core::assert(vec.index(1) == 204.1);
+
+    write_float(vec.index_mut(1));
+    core::assert(vec.index(1) == 4.2);
 }
