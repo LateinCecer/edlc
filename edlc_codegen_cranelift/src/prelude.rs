@@ -26,6 +26,6 @@ pub use crate::executor::OptSettings;
 pub use crate::executor::TestReport;
 pub use crate::error::JITError;
 pub use crate::error::JITErrorType;
-pub use crate::unwind::{RangeVec, RangeVecIter};
+pub use crate::unwind::{RangeVec, RangeVecIter, PanicMessage, PanicError, PanicType, PanicData};
 pub use std::sync::RwLock;
 pub use std::mem::MaybeUninit;
