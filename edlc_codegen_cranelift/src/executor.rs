@@ -656,7 +656,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(module)
     }
 
-    fn test_module(
+    /// Runs the tests in a JIT module.
+    pub fn test_module(
         &mut self,
         module: &HirModule,
         test_name: &Regex,
