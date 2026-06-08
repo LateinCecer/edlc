@@ -226,6 +226,48 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(())
     }
 
+    pub fn alloc_anonymous_string(&mut self, s: &str) -> Result<FatPtr, JITError> {
+        let bytes = s.into_boxed_bytes();
+        self.backend.data_description.define(bytes);
+        self.backend.data_description.align = Some(16);
+        let id = self.backend
+            .module
+            .declare_anonymous_data(false, false)?;
+        self.backend
+            .module
+            .define_data(id, &self.backend.data_description)?;
+        self.backend.module.finalize_definitions()?;
+        self.backend.data_description.clear();
+
+        let (adr, len) = self.backend.module
+            .get_finalized_data(id);
+        Ok(FatPtr {
+            ptr: MemPtr(adr),
+            size: len,
+        })
+    }
+
+    pub fn alloc_string(&mut self, s: &str, name: &str) -> Result<FatPtr, JITError> {
+        let bytes = s.into_boxed_bytes();
+        self.backend.data_description.define(bytes);
+        self.backend.data_description.align = Some(16);
+        let id = self.backend
+            .module
+            .declare_data(name, Linkage::Export, false, false)?;
+        self.backend
+            .module
+            .define_data(id, &self.backend.data_description)?;
+        self.backend.module.finalize_definitions()?;
+        self.backend.data_description.clear();
+
+        let (adr, len) = self.backend.module
+            .get_finalized_data(id);
+        Ok(FatPtr {
+            ptr: MemPtr(adr),
+            size: len,
+        })
+    }
+
     fn intrinsic_symbol_name(&mut self, name: &str) -> String {
         let mut counter = 0usize;
         let mut symbol = format!("__ext_{name}");

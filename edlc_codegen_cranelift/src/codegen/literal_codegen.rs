@@ -47,11 +47,11 @@ impl<Runtime> Compilable<Runtime> for MirLiteral {
                 backend.data_description.define(bytes.into_boxed_slice());
                 backend.data_description.align = Some(16);
                 let id = backend
-                    .module.declare_anonymous_data(false, false)
-                    .unwrap();
+                    .module
+                    .declare_anonymous_data(false, false)?;
                 backend
-                    .module.define_data(id, backend.data_description)
-                    .unwrap();
+                    .module
+                    .define_data(id, backend.data_description)?;
                 backend.data_description.clear();
 
                 let local_id = backend.module
