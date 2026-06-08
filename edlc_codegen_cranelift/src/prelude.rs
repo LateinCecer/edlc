@@ -23,6 +23,7 @@ pub use crate::compiler::*;
 pub use crate::executor::macros::*;
 pub use crate::executor::CraneliftJIT;
 pub use crate::executor::OptSettings;
+pub use crate::executor::TestReport;
 pub use crate::error::JITError;
 pub use crate::error::JITErrorType;
 pub use crate::unwind::{RangeVec, RangeVecIter};
