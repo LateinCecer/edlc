@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.2.10"
 repository = "https://github.com/LateinCecer/edlc"
 authors = ["Adrian Paskert"]
 license = "Apache-2.0"

@@ -18,6 +18,7 @@
 
 pub mod macros;
 mod test_setup;
+mod test_executor;
 
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -50,6 +51,8 @@ use crate::codegen::ItemCodegen;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
 use crate::error::{JITError, JITErrorType};
+use crate::executor::test_executor::UnitTest;
+pub use crate::executor::test_executor::TestExec;
 pub use crate::executor::test_setup::{TestReport, FnReport};
 use crate::prelude::{Program, JIT};
 use crate::unwind::{PanicData, PanicError, TrapHandler};
@@ -705,32 +708,9 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         test_name: &Regex,
         path: Option<&QualifierName>,
     ) -> Result<TestReport, anyhow::Error> {
-        let mut report = TestReport::default();
-        'outer: for (id, test, setup, teardown) in self
-            .get_test_cases(test_name, &module, path, "test")? {
-
-            for setup_fn in setup.into_iter() {
-                if let Err(err) = self.catch_unwind(setup_fn, ()) {
-                    report.insert(id, FnReport::SetupErr(err));
-                    continue 'outer;
-                }
-            }
-            match self.catch_unwind(test, ()) {
-                Ok(()) => (),
-                Err(err) => {
-                    report.insert(id, FnReport::Err(err));
-                    continue 'outer;
-                },
-            }
-            for teardown_fn in teardown.into_iter() {
-                if let Err(err) = self.catch_unwind(teardown_fn, ()) {
-                    report.insert(id, FnReport::TeardownError(err));
-                    continue 'outer;
-                }
-            }
-            report.insert(id, FnReport::Ok);
-        }
-        Ok(report)
+        self
+            .get_test_cases(test_name, &module, path, "test")?
+            .run(self)
     }
 
     pub fn run_test<Src: SrcSupplier>(
@@ -766,46 +746,27 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         };
         self.prepare_module(&module)?;
 
-        let mut report = TestReport::default();
-        for (id, bench, setup, teardown) in self
-            .get_test_cases(test_name, &module, path, "bench")? {
+        self
+            .get_test_cases(test_name, &module, path, "bench")?
+            .bench(bencher, self)
+    }
 
-            let full_name = self.compiler.phase.types.get_fn_qualifier(id)?
-                .as_ref()
-                .unwrap();
-            let n = bencher.start_bench(full_name);
-            let mut ok = true;
-            'outer: for _ in 0..n {
-                for setup_fn in setup.iter() {
-                    if let Err(err) = self.catch_unwind(*setup_fn, ()) {
-                        report.insert(id, FnReport::SetupErr(err));
-                        ok = false;
-                        break 'outer;
-                    }
-                }
-                bencher.start_round();
-                let res = self.catch_unwind(bench, ());
-                bencher.stop_round();
-                if let Err(err) = res {
-                    report.insert(id, FnReport::Err(err));
-                    ok = false;
-                    break 'outer;
-                }
+    pub fn test_cases(
+        &mut self,
+        name: &Regex,
+        module: &HirModule,
+        path: Option<&QualifierName>,
+    ) -> Result<TestExec, anyhow::Error> {
+        self.get_test_cases(name, module, path, "test")
+    }
 
-                for teardown_fn in teardown.iter() {
-                    if let Err(err) = self.catch_unwind(*teardown_fn, ()) {
-                        report.insert(id, FnReport::TeardownError(err));
-                        ok = false;
-                        break 'outer;
-                    }
-                }
-            }
-            if ok {
-                report.insert(id, FnReport::Ok);
-            }
-            bencher.end_bench();
-        }
-        Ok(report)
+    pub fn bench_cases(
+        &mut self,
+        name: &Regex,
+        module: &HirModule,
+        path: Option<&QualifierName>,
+    ) -> Result<TestExec, anyhow::Error> {
+        self.get_test_cases(name, module, path, "bench")
     }
 
     fn get_test_cases(
@@ -814,7 +775,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         module: &HirModule,
         path: Option<&QualifierName>,
         ident_str: &str,
-    ) -> Result<Vec<(EdlTypeId, extern "C" fn(), Vec<extern "C" fn()>, Vec<extern "C" fn()>)>, anyhow::Error> {
+    ) -> Result<TestExec, anyhow::Error> {
         let regex = Regex::new(&format!(
             r"^{}{}",
             ident_str,
@@ -825,7 +786,9 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         let teardown_regex = Regex::new(r"^teardown")?;
 
         let Some(test_cases) = module.find_function_with_annotation(&regex, name, path) else {
-            return Ok(vec![]);
+            return Ok(TestExec {
+                stubs: vec![],
+            });
         };
         let mut test_cases_out = Vec::new();
         for (test_function, annotation) in test_cases {
@@ -872,14 +835,16 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 }
             }
 
-            test_cases_out.push((
-                test_function,
-                func,
-                setup_functions,
-                teardown_functions,
-            ));
+            test_cases_out.push(UnitTest {
+                id: test_function,
+                stub: func,
+                setup: setup_functions,
+                teardown: teardown_functions,
+            });
         }
-        Ok(test_cases_out)
+        Ok(TestExec {
+            stubs: test_cases_out,
+        })
     }
 
     fn get_surface_function(&mut self, func: EdlTypeId) -> Result<Option<extern "C" fn()>, anyhow::Error> {
