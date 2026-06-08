@@ -204,6 +204,31 @@ impl HirRef {
                         "cannot create mutable reference from immutable expression".to_string()))
                 })
             }
+
+            if !self.value.is_internal_ref(phase)? {
+                // expr is not a reference and we cannot create a mutable, internal reference from it
+                phase.report_error(
+                    format_type_args!(
+                    format_args!("cannot create reference from expression")
+                ),
+                    &[
+                        SrcError::Single {
+                            pos: self.value.pos().clone().into(),
+                            src: self.value.src().clone(),
+                            error: format_type_args!(
+                            format_args!("expression cannot be treated as a reference")
+                        )
+                        }
+                    ],
+                    None,
+                );
+
+                return Err(HirError {
+                    pos: self.value.pos(),
+                    ty: Box::new(HirErrorType::NonReferencableExpression(
+                        "only name identifiers or dereferenced references are referencable".to_string()))
+                });
+            }
         }
 
         self.resolve_types(phase, state)?;
@@ -277,33 +302,6 @@ impl ResolveTypes for HirRef {
         let mut inferer = phase.infer_from(infer_state);
         let _own_uid = self.get_type_uid(&mut inferer); // <- we need this to ensure base
         // relations are established
-
-        // we assume that `target` is a reference type with `expr` being the plane type in that
-        // reference
-        if !self.value.is_internal_ref(phase)? {
-            // expr is not a reference and we cannot create an internal reference from it
-            phase.report_error(
-                format_type_args!(
-                    format_args!("cannot create reference from expression")
-                ),
-                &[
-                    SrcError::Single {
-                        pos: self.value.pos().clone().into(),
-                        src: self.value.src().clone(),
-                        error: format_type_args!(
-                            format_args!("expression cannot be treated as a reference")
-                        )
-                    }
-                ],
-                None,
-            );
-
-            return Err(HirError {
-                pos: self.value.pos(),
-                ty: Box::new(HirErrorType::NonReferencableExpression(
-                    "only name identifiers or dereferenced references are referencable".to_string()))
-            });
-        }
         self.value.resolve_types(phase, infer_state)
     }
 

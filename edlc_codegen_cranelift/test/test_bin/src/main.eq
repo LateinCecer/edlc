@@ -278,3 +278,10 @@ fn test_vec_mut_access() {
     write_float(vec.index_mut(1));
     core::assert(vec.index(1) == 4.2);
 }
+
+#[test]
+fn test_temp_reference() {
+    let value = [1_i32, 2, 3, 4, 5][2];
+    core::assert(value == 3_i32);
+    // [1_i32, 2, 3, 4, 5][2] = 3;  <-- this must *not* compile!
+}
