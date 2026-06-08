@@ -24,6 +24,7 @@ use cranelift_module::Module;
 use edlc_core::prelude::mir_expr::mir_literal::{MirLiteral, MirLiteralValue};
 use edlc_core::prelude::mir_expr::{MirExprId, MirFlowGraph, MirValue};
 use edlc_core::prelude::*;
+use crate::error::JITError;
 
 impl<Runtime> Compilable<Runtime> for MirLiteral {
     fn compile(
@@ -48,10 +49,12 @@ impl<Runtime> Compilable<Runtime> for MirLiteral {
                 backend.data_description.align = Some(16);
                 let id = backend
                     .module
-                    .declare_anonymous_data(false, false)?;
+                    .declare_anonymous_data(false, false)
+                    .unwrap();
                 backend
                     .module
-                    .define_data(id, backend.data_description)?;
+                    .define_data(id, backend.data_description)
+                    .unwrap();
                 backend.data_description.clear();
 
                 let local_id = backend.module

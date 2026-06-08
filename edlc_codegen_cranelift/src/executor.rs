@@ -227,8 +227,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
     }
 
     pub fn alloc_anonymous_string(&mut self, s: &str) -> Result<FatPtr, JITError> {
-        let bytes = s.into_boxed_bytes();
-        self.backend.data_description.define(bytes);
+        let bytes = s.to_string().into_bytes();
+        self.backend.data_description.define(bytes.into_boxed_slice());
         self.backend.data_description.align = Some(16);
         let id = self.backend
             .module
@@ -248,8 +248,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
     }
 
     pub fn alloc_string(&mut self, s: &str, name: &str) -> Result<FatPtr, JITError> {
-        let bytes = s.into_boxed_bytes();
-        self.backend.data_description.define(bytes);
+        let bytes = s.to_string().into_bytes();
+        self.backend.data_description.define(bytes.into_boxed_slice());
         self.backend.data_description.align = Some(16);
         let id = self.backend
             .module

@@ -52,3 +52,9 @@ impl Display for JITError {
 }
 
 impl Error for JITError {}
+
+impl From<ModuleError> for JITError {
+    fn from(e: ModuleError) -> Self {
+        JITError { ty: JITErrorType::ModuleErr(e) }
+    }
+}
