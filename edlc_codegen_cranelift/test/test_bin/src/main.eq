@@ -292,4 +292,7 @@ type CfdType = f64;
 fn test_associated_alias() {
     let x: CfdType = 2.0;
     println(CfdType::sqrt(x));
+    core::assert(CfdType::floor(CfdType::sqrt(x) * 100.0) == 141.0);
+    let x = x * 2.0;
+    core::assert(x == 4.0);
 }

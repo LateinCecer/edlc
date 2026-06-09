@@ -260,6 +260,7 @@ impl ResolveNames for HirName {
         if self.name.path.len() == 1 {
             let segment = &self.name.path[0];
             if !segment.params.is_empty() {
+                dbg!();
                 return self.resolve_as_fn_ptr(phase);
             }
 

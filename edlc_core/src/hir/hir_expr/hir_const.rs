@@ -148,7 +148,7 @@ impl ResolveNames for HirConst {
     fn resolve_names(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         phase.res.revert_to_scope(&self.scope);
         self.value.resolve_names(phase)?;
-        self.register(phase)
+        self.find_const_id(phase)
     }
 }
 
@@ -195,7 +195,7 @@ impl HirConst {
 
     /// This method will register the constant to the type registry such that the constant can be
     /// found in the name resolver
-    fn register(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+    fn find_const_id(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         // resolve the value of the HIR expression as a constant value
         let ty = self.ty.edl_repr(phase)?;
         if !ty.is_fully_resolved() {

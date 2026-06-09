@@ -29,7 +29,7 @@ use crate::hir::hir_expr::{HirExpr, HirExpression, HirTreeWalker, MakeGraph, Mir
 use crate::hir::translation::HirTranslationError;
 use crate::hir::{report_infer_error, HirContext, HirError, HirErrorType, HirPhase, ResolveFn, ResolveNames, ResolveTypes, TypeSource};
 use crate::issue;
-use crate::issue::{SrcError, TypeArguments};
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{DebugSymbols, MirValue};
@@ -221,11 +221,7 @@ impl ResolveNames for HirLet {
         phase.res.revert_to_scope(&self.scope);
         let res = self.value.resolve_names(phase);
         if let Err(err) = self.register(phase) {
-            if res.is_ok() {
-                Err(err)
-            } else {
-                res
-            }
+            Err(err)
         } else {
             res
         }
@@ -430,6 +426,7 @@ impl HirLet {
     /// Registers the variable in either the local, or in the global context of the module it is
     /// currently located in.
     fn register(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
+        phase.res.revert_to_scope(&self.scope);
         let mut level_name = phase.res.current_level_name()
             .map_err(|err| HirError::new_res(self.pos, err, self.src.clone()))?;
         level_name.push(self.name.clone());
@@ -446,6 +443,36 @@ impl HirLet {
         phase.res.revert_to_scope(&self.scope);
 
         if self.global {
+            let name = vec![self.name.clone()].into();
+            if phase.res.find_top_level_var(&name).is_some()
+                || phase.res.find_top_level_const(&name).is_some()
+                || phase.res.find_top_level_function(&name, &phase.types).is_some() {
+
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"redefinition of global variable, constant for function `"),
+                        TypeArgument::new_display(&self.name),
+                        TypeArgument::new_display(&"`"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: self.pos.into(),
+                            src: self.src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"global `let`s cannot redefine item names that already exist in the current scope"),
+                            ])
+                        }
+                    ],
+                    None,
+                );
+
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::GlobalNameRedefinition(self.name.clone()))
+                });
+            }
+
+            phase.res.revert_to_scope(&self.scope);
             phase.res.push_top_level_item(
                 self.name.clone(),
                 ItemSrc::File("".to_string(), self.pos),

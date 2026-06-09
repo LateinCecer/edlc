@@ -32,7 +32,7 @@ use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl, ReportResult, Resolv
 use crate::hir::hir_expr::{HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use crate::hir::translation::{HirTranslationError};
 use crate::issue;
-use crate::issue::{format_type_args, SrcError};
+use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph};
@@ -112,6 +112,63 @@ impl HirFnSignature {
 
     pub fn register_in_scope(&mut self, phase: &mut HirPhase) -> Result<(), HirError> {
         info!("registering function `{}` in scope {:?}", self.name, phase.res.current_scope());
+        let name = vec![self.name.clone()].into();
+        if self.info.is_none() && (
+            phase.res.find_top_level_var(&name).is_some() ||
+                phase.res.find_top_level_const(&name).is_some()
+                // phase.res.find_top_level_function(&name, &phase.types).is_some()
+        ) {
+
+            phase.report_error(
+                TypeArguments::new(&[
+                    TypeArgument::new_display(&"redefinition of global variable, constant for function `"),
+                    TypeArgument::new_display(&self.name),
+                    TypeArgument::new_display(&"`"),
+                ]),
+                &[
+                    SrcError::Single {
+                        pos: self.pos.into(),
+                        src: self.src.clone(),
+                        error: TypeArguments::new(&[
+                            TypeArgument::new_display(&"global functions cannot redefine item names that already exist in the current scope"),
+                        ])
+                    }
+                ],
+                None,
+            );
+
+            return Err(HirError {
+                pos: self.pos,
+                ty: Box::new(HirErrorType::GlobalNameRedefinition(self.name.clone()))
+            });
+        } else if let Some(func) = phase.res.find_top_level_function(&name, &phase.types) {
+            let type_def = phase.types.get_type(func).unwrap();
+            if !matches!(type_def, EdlType::Function { state: FunctionState::Pre { .. }, .. }) {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"redefinition of global variable, constant for function `"),
+                        TypeArgument::new_display(&self.name),
+                        TypeArgument::new_display(&"`"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: self.pos.into(),
+                            src: self.src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"global functions cannot redefine item names that already exist in the current scope"),
+                            ])
+                        }
+                    ],
+                    None,
+                );
+
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::GlobalNameRedefinition(self.name.clone()))
+                });
+            }
+        }
+
         let edl_repr = self.edl_repr(phase)?;
         phase.res.push_top_level_item(
             self.name.clone(),

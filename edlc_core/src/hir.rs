@@ -1240,6 +1240,7 @@ impl HirFmt for ImplSource {
 pub enum HirErrorType {
     EdlError(EdlError),
     TypeNotResolvable,
+    GlobalNameRedefinition(String),
     /// Floating point numbers can only be interpreted as `f32` or `f64`
     FloatingNumberType,
     /// Number types can only be interpreted as `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `i8`, `i16`, `i32`, `i64`,
@@ -1328,6 +1329,9 @@ impl Display for HirErrorType {
             HirErrorType::EdlError(err) => {
                 write!(f, "{err}")
             }
+            HirErrorType::GlobalNameRedefinition(name) => {
+                write!(f, "Redefinition of global item with name `{name}`")
+            },
             HirErrorType::TypeNotResolvable => {
                 write!(f, "Type not resolvable")
             }

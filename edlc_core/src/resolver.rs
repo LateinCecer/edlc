@@ -22,7 +22,7 @@ use std::collections::{HashMap};
 use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use rand::Rng;
-use log::debug;
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use crate::core::edl_error::EdlError;
 use crate::core::edl_fn::{EdlFnSignature, EdlFunctionBody, EdlPreSignature};
@@ -191,22 +191,44 @@ impl std::error::Error for ResolveError {}
 
 impl ReportableError for ResolveError {
     fn report_err(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc) {
-        // TODO implement this properly
-        phase.report_error(
-            TypeArguments::new(&[
-                TypeArgument::new_display(&"name resolver error"),
-            ]),
-            &[
-                SrcError::Single {
-                    src: src.clone(),
-                    pos: pos.clone().into(),
-                    error: TypeArguments::new(&[
-                        TypeArgument::new_display(&"error message not fully implemented yet"),
-                    ])
-                }
-            ],
-            None,
-        );
+        match self {
+            ResolveError::ItemRedefinition(name) => {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"redefinition of item with name `"),
+                        TypeArgument::new_display(&name),
+                        TypeArgument::new_display(&"`"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            src: src.clone(),
+                            pos: pos.clone().into(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"item is already defined in this scope"),
+                            ])
+                        }
+                    ],
+                    None,
+                );
+            }
+            _ => {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"name resolver error"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            src: src.clone(),
+                            pos: pos.clone().into(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"error message not fully implemented yet"),
+                            ])
+                        }
+                    ],
+                    None,
+                );
+            }
+        }
     }
 }
 
@@ -1330,7 +1352,8 @@ impl TopLevelNameResolver {
             };
 
             let ItemInit::Function { sig, .. } = variant else {
-                panic!("Expected item of kind `ItemInit::Function` to finalize function definition!");
+                error!("Expected item of kind `ItemInit::Function` to finalize function definition!");
+                return Err(ResolveError::ItemRedefinition(name.into()));
             };
 
             type_registry.finalize_function(*ty_id, sig, EdlFunctionBody::Intrinsic()).unwrap();
