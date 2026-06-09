@@ -23,13 +23,14 @@ use crate::core::edl_error::EdlError;
 use crate::core::edl_type::{EdlEnumVariant, EdlTypeInstance, EdlTypeRegistry};
 use crate::core::edl_var::EdlVarRegistry;
 use crate::file::ModuleSrc;
-use crate::hir::{HirError, HirPhase};
+use crate::hir::{HirError, HirErrorType, HirPhase};
 use crate::lexer::SrcPos;
 use crate::parser::ParseError;
 use crate::resolver::{QualifierName, ResolveError};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
+use crate::report::ReportableError;
 
 #[derive(Debug, Clone)]
 pub enum AstTranslationError {
@@ -183,8 +184,40 @@ impl Display for AstTranslationError {
 }
 
 impl AstTranslationError {
-    pub fn report_err(&self, _phase: &mut HirPhase) {
-        // TODO implement
+    pub fn report_err(&self, phase: &mut HirPhase) {
+        match self {
+            Self::HirError { err, src } => {
+                match err.ty.as_ref() {
+                    HirErrorType::NameUnresolved(name) => {
+                        phase.report_error(
+                            TypeArguments::new(&[
+                                TypeArgument::new_display(&"symbol unresolved"),
+                            ]),
+                            &[
+                                SrcError::Single {
+                                    pos: err.pos.into(),
+                                    src: src.clone(),
+                                    error: TypeArguments::new(&[
+                                        TypeArgument::new_display(&format!("symbol `{}` could not be resolved", name)),
+                                    ])
+                                }
+                            ],
+                            None,
+                        );
+                    },
+                    HirErrorType::Resolver(res, src) => {
+                        res.report_err(phase, &err.pos, src);
+                    },
+                    HirErrorType::EdlError(edl) => {
+                        edl.report_err(phase, &err.pos, src);
+                    }
+                    _ => {
+                        dbg!("other hir error:", err);
+                    },
+                }
+            },
+            _ => (),
+        }
     }
 }
 

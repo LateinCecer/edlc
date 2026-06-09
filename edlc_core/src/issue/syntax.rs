@@ -99,25 +99,27 @@ impl<'a, 'env> SyntaxHighlighter<'a, 'env> {
             let pos = SrcPos::new(line, col, size);
             col += size; // update line number
 
-            let snippet = self.parser.get_src_str(pos)
-                .unwrap();
-            if self.colored {
-                // format styling
-                let styling = match tok {
-                    local!(Token::Punct(_)) => self.styles.punct,
-                    local!(Token::Ident(_)) => self.styles.ident,
-                    local!(Token::Key(_)) => self.styles.key,
-                    local!(Token::NumLiteral(_, _, _, _)) => self.styles.num_lit,
-                    local!(Token::StrLiteral(_)) => self.styles.str_lit,
-                    local!(Token::CharLiteral(_)) => self.styles.char_lit,
-                    local!(Token::Comment(_)) => self.styles.comment,
-                    local!(Token::Annotate(_)) => self.styles.annotation,
-                    local!(Token::Doc(_, _)) => self.styles.doc,
-                };
+            if let Some(snippet) = self.parser.get_src_str(pos) {
+                if self.colored {
+                    // format styling
+                    let styling = match tok {
+                        local!(Token::Punct(_)) => self.styles.punct,
+                        local!(Token::Ident(_)) => self.styles.ident,
+                        local!(Token::Key(_)) => self.styles.key,
+                        local!(Token::NumLiteral(_, _, _, _)) => self.styles.num_lit,
+                        local!(Token::StrLiteral(_)) => self.styles.str_lit,
+                        local!(Token::CharLiteral(_)) => self.styles.char_lit,
+                        local!(Token::Comment(_)) => self.styles.comment,
+                        local!(Token::Annotate(_)) => self.styles.annotation,
+                        local!(Token::Doc(_, _)) => self.styles.doc,
+                    };
 
-                out.push_str(&styling.ansi(snippet, self.get_bg(line)));
+                    out.push_str(&styling.ansi(snippet, self.get_bg(line)));
+                } else {
+                    out.push_str(snippet);
+                }
             } else {
-                out.push_str(snippet);
+                out.push_str("");
             }
         }
         self.end_line(col, &mut out, line);

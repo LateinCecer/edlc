@@ -24,6 +24,10 @@ use crate::core::edl_type::{EdlAliasId, EdlConstId, EdlEnvId, EdlFnInstance, Edl
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::edl_var::EdlVarRegistry;
 use crate::core::EdlVarId;
+use crate::file::ModuleSrc;
+use crate::hir::HirPhase;
+use crate::issue::{SrcError, TypeArgument, TypeArguments};
+use crate::lexer::SrcPos;
 use crate::resolver::{QualifierName, ResolveError};
 
 
@@ -691,6 +695,29 @@ impl EdlError {
                 write!(f, "E074: Conflicting number typing constraints: type cannot be integer \
                 and floating point at the same time!")
             }
+        }
+    }
+
+    pub fn report_err(&self, phase: &mut HirPhase, pos: &SrcPos, src: &ModuleSrc) {
+        match self {
+            Self::E033(name) => {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"symbol unresolved"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: pos.clone().into(),
+                            src: src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&format!("symbol `{}` could not be resolved", name)),
+                            ]),
+                        }
+                    ],
+                    None,
+                )
+            },
+            _ => (),
         }
     }
 }

@@ -497,7 +497,10 @@ impl IntoHir for AstTypeName {
 
             qual.push(el.name.clone());
             parser.res.revert_to_scope(&el.scope);
-            if parser.res.find_top_level_type_or_function(&qual, &parser.types).is_some() || !el.params.is_empty() {
+
+            if parser.res.find_top_level_type_or_function(&qual, &parser.types).is_some()
+                || parser.res.find_top_level_alias(&qual).is_some()
+                || !el.params.is_empty() {
                 // let params = if el.params.is_empty() {
                 //     HirParamDef {
                 //         pos: el.pos,

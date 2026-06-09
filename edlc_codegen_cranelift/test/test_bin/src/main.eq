@@ -285,3 +285,11 @@ fn test_temp_reference() {
     core::assert(value == 3_i32);
     // [1_i32, 2, 3, 4, 5][2] = 3;  <-- this must *not* compile!
 }
+
+type CfdType = f64;
+
+#[test]
+fn test_associated_alias() {
+    let x: CfdType = 2.0;
+    println(CfdType::sqrt(x));
+}

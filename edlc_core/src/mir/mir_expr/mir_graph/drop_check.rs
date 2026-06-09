@@ -53,7 +53,7 @@ use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{AutoImplDetails, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
+use crate::mir::mir_expr::{AutoImplDetails, BlockCall, BlockLocalStatementUid, BlockParameterIndex, DebugSymbols, DefPoint, MirBlockRef, MirDeref, MirDowncastRef, MirExprContainer, MirExprId, MirExprVariant, MirFlowGraph, MirGraphLoc, MirRef, MirValue};
 use crate::mir::mir_funcs::{AutoFnLoc, FnCodeGen, MirFn, MirFuncRegistry, SpecialFunction};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::mir::MirPhase;
@@ -616,6 +616,35 @@ impl AnalyseDrop for MirGlobalVar {
 
 
 impl MirFlowGraph {
+    /// Empty parameters in the root of a function signature are invalid.
+    /// But, since empty parameters are zero-sized and do not actually carry any data, we can
+    /// replace these values with simple define statements at the top of the function body.
+    ///
+    /// These empty statements are sometimes generated during routing process for drops
+    pub fn replace_empty_root_param(&mut self, types: &MirTypeRegistry) {
+        let root_id = self.root();
+        let root: &mut Block = &mut self.blocks[root_id.0];
+        let mut index: usize = 0;
+        while index < root.parameters.len() {
+            let rev_index = root.parameters.len() - 1 - index;
+            let param = root.parameters[rev_index];
+            let ty: MirTypeId = self.temp_vars[param.0].ty;
+            if ty == types.empty() {
+                root.parameters.remove(rev_index);
+                let def = self.expressions.insert_empty(types);
+                let uid = root.new_uid();
+                root.statements.insert(0, Statement::VarDef {
+                    var: param,
+                    value: def,
+                    debug: root.pos.clone(),
+                    uid,
+                })
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     pub fn generate_copy_implementation(
         &mut self,
         mir_phase: &mut MirPhase,

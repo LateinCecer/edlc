@@ -42,9 +42,11 @@ use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
+use std::hash::DefaultHasher;
 use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
+use log::error;
 
 /// Lattice:
 ///
@@ -1910,6 +1912,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
         &compiler.phase.vars,
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.body.replace_empty_root_param(&compiler.mir_phase.types);
 
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
@@ -2004,11 +2007,28 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
 
     // insert constant eval results where possible
     body.body.eliminate_dead_code(&const_eval);
-    assert_eq!(
-        body.body.get_root_parameters().len(),
-        body.signature.params.len(),
-        "after optimization, any comptime parameters need to disappear from the functions entry block"
-    );
+    if body.body.get_root_parameters().len() != body.signature.params.len() {
+        error!("function entry block parameters do not match function signature!");
+        error!("function signature parameters:");
+        for param in body.signature.params.iter() {
+            let ty = compiler.mir_phase.types
+                .get_edl_type(param.ty)
+                .unwrap();
+            let a = [TypeArgument::new_edl(&ty)];
+            let msg: TypeArguments<DefaultHasher> = TypeArguments::new(&a);
+            error!("  - {}", msg.to_string(&compiler.phase.types, &compiler.phase.vars));
+        }
+        error!("vs. entry block parameters:");
+        for param in body.body.get_root_parameters().iter() {
+            let ty = compiler.mir_phase.types
+                .get_edl_type(*body.body.get_var_type(param))
+                .unwrap();
+            let a = [TypeArgument::new_edl(&ty)];
+            let msg: TypeArguments<DefaultHasher> = TypeArguments::new(&a);
+            error!("  - {}", msg.to_string(&compiler.phase.types, &compiler.phase.vars));
+        }
+        panic!("after optimization, any comptime parameters need to disappear from the functions entry block");
+    }
     const_eval.validate_comptime_context(&body.body, &mut compiler.phase)
         .ok::<OptimizationError>()?;
 
@@ -2189,6 +2209,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &compiler.phase.vars,
     )?;
     body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.replace_empty_root_param(&compiler.mir_phase.types);
 
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome

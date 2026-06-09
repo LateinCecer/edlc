@@ -867,8 +867,7 @@ impl<'a, 'env> Parser<'a, 'env> {
             .nth(line_id);
         if let Some(line) = line {
             if col + size > line.len() {
-                dbg!(col + size, line.len());
-                return None;
+                return Some(&line[col..]);
             }
             Some(&line[col..(col + size)])
         } else {
