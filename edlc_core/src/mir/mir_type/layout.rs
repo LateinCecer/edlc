@@ -115,6 +115,38 @@ impl<T: ?Sized + DeviceCopy + 'static> MirLayout for DevicePointer<T> {
     }
 }
 
+#[cfg(feature = "cudarc")]
+use clow::prelude::{ClowPtr, ClowView, ClowViewMut};
+
+#[cfg(feature = "cudarc")]
+impl<T: ?Sized + 'static> MirLayout for ClowPtr<T> {
+    fn layout(types: &MirTypeRegistry) -> Layout {
+        let mut builder = StructLayoutBuilder::default();
+        builder.add_type::<cudarc::driver::sys::CUdeviceptr>("ptr".to_string(), types);
+        builder.add_type::<PhantomData<*mut T>>("marker".to_string(), types);
+        builder.make::<Self>()
+    }
+}
+
+#[cfg(feature = "cudarc")]
+impl<T: ?Sized + 'static> MirLayout for ClowView<T> {
+    fn layout(types: &MirTypeRegistry) -> Layout {
+        let mut builder = StructLayoutBuilder::default();
+        builder.add_type::<ClowPtr<T>>("ptr".to_string(), types);
+        builder.add_type::<u64>("len".to_string(), types);
+        builder.make::<Self>()
+    }
+}
+
+#[cfg(feature = "cudarc")]
+impl<T: ?Sized + 'static> MirLayout for ClowViewMut<T> {
+    fn layout(types: &MirTypeRegistry) -> Layout {
+        let mut builder = StructLayoutBuilder::default();
+        builder.add_type::<ClowView<T>>("0".to_string(), types);
+        builder.make::<Self>()
+    }
+}
+
 
 impl<T: ?Sized + 'static> MirLayout for *const T {
     fn layout(types: &MirTypeRegistry) -> Layout {

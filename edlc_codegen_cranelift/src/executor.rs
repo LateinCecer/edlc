@@ -1992,9 +1992,15 @@ impl BoundaryField {
 }
 
 // -- mock device stubs; these would be implemented as callbacks usually
-async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
-async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {}
-async fn init_field(field: DevicePointer<Field>) {}
+async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
+    print("  >> doing some gradient calculations! <<\n");
+}
+async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
+    print("  >> doing some laplace calculations! <<\n");
+}
+async fn init_field(async field: DevicePointer<Field>) {
+    print("  >> initializing field <<\n");
+}
 
 // -- simplified higher-level functions
 impl BoundaryField {

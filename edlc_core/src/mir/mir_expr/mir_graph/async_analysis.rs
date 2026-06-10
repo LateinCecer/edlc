@@ -1506,7 +1506,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             let debug = debug.clone();
 
             let uid = block.new_uid();
-            block.statements.insert(id, Statement::Record {
+            // insert *after* the async function call - streams record the work currently submitted
+            block.statements.insert(id + 1, Statement::Record {
                 event: event.sync_event,
                 uid,
                 debug,
@@ -1558,18 +1559,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     match loc {
                         MirLoc::GraphLoc(MirGraphLoc(block_ref_, uid)) => {
                             assert_eq!(&block_ref, block_ref_);
-                            let mut idx = block.find_current_index(uid)
+                            let idx = block.find_current_index(uid)
                                 .expect("failed to find referring statement for sync");
-                            // walk backwards if the prev statement is a record statement as we want
-                            // to insert before the records on the current function
-                            while idx > 0 {
-                                let prev_id = idx - 1;
-                                if let Statement::Record { .. } = &block.statements[prev_id] {
-                                    idx -= 1;
-                                } else {
-                                    break;
-                                }
-                            }
                             block.statements.insert(idx, sync);
                         },
                         MirLoc::Seal(block_ref_) => {
