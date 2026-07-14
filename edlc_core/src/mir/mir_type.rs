@@ -1159,9 +1159,9 @@ impl MirTypeRegistry {
             f64: self.register::<f64>(types.f64(), types)?,
             bool: self.register::<bool>(types.bool(), types)?,
             char: self.register::<char>(types.char(), types)?,
+            never: self.register::<()>(types.never(), types)?,
             empty: self.register::<()>(types.empty(), types)?,
             str: self.register::<FatPtr>(types.str(), types)?,
-            never: self.register::<()>(types.never(), types)?,
         });
         Ok(())
     }

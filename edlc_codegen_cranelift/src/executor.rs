@@ -20,15 +20,16 @@ pub mod macros;
 mod test_setup;
 mod test_executor;
 
+use std::any::TypeId;
 use std::collections::HashSet;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use anyhow::{anyhow};
 use edlc_core::inline_code;
 use edlc_core::parser::{InFile, Parsable};
-use edlc_core::prelude::{edl_type, CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcSupplier};
+use edlc_core::prelude::{edl_type, CompilerError, EdlCompiler, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, IntoHir, JitCompiler, MirError, MirLayout, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcError, SrcSupplier, TypeArgument, TypeArguments};
 use edlc_core::prelude::ast_expression::AstExpr;
-use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance};
+use edlc_core::prelude::edl_type::{EdlFnInstance, EdlMaybeType, EdlTypeId, EdlTypeInstance, EdlTypeRegistry};
 use edlc_core::prelude::hir_expr::{DefaultMut, HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
 use edlc_core::prelude::mir_str::{FatPtr, MemPtr};
 use edlc_core::resolver::{ItemVariant, QualifierName};
@@ -47,6 +48,8 @@ use edlc_core::prelude::mir_type::abi::ByteLayout;
 use edlc_core::prelude::mir_vars::VariableMapper;
 use edlc_core::prelude::type_analysis::{InferEq, InferProvider, InferState};
 use regex::{Regex, RegexBuilder};
+use edlc_core::prelude::edl_error::EdlError;
+use edlc_core::prelude::mir_type::MirTypeRegistry;
 use crate::codegen::ItemCodegen;
 use crate::compiler::external_func::JITExternCall;
 use crate::compiler::{GlobalVar, RuntimeId, TypedProgram};
@@ -69,6 +72,136 @@ pub trait FunctionContainer<F> {
         &mut self,
         name: ModuleSrc,
     ) -> Result<F, anyhow::Error>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TypeWithLayout {
+    Minimal {
+        size: usize,
+        align: usize,
+    },
+    Full(TypeId),
+}
+
+pub enum TypeSafetyRating {
+    /// Definitely safe.
+    Safe,
+    /// Size and alignment are OK, but other than that type safety cannot be guaranteed.
+    Limited,
+    /// Type guard does not match.
+    Unsafe,
+}
+
+impl TypeSafetyRating {
+    fn safe(&self, allow_limited: bool) -> bool {
+        match self {
+            TypeSafetyRating::Safe => true,
+            TypeSafetyRating::Limited => allow_limited,
+            TypeSafetyRating::Unsafe => false,
+        }
+    }
+}
+
+impl TypeWithLayout {
+    fn from_type(
+        edl: &EdlTypeInstance,
+        mir_types: &mut MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+    ) -> Result<Self, EdlError> {
+        let mir_id = mir_types.mir_id(edl, edl_types)?;
+        if let Some(rust_id) = mir_types.get_rust_from_type(mir_id) {
+            Ok(Self::Full(rust_id))
+        } else {
+            Ok(Self::Minimal {
+                align: mir_types.byte_alignment(mir_id).unwrap(),
+                size: mir_types.byte_size(mir_id).unwrap(),
+            })
+        }
+    }
+
+    fn is_type_safe<T: 'static>(&self) -> TypeSafetyRating {
+        match self {
+            TypeWithLayout::Minimal { size, align } => if *size == size_of::<T>() && *align == align_of::<T>() {
+                TypeSafetyRating::Limited
+            } else {
+                TypeSafetyRating::Unsafe
+            }
+            TypeWithLayout::Full(id) => if *id == TypeId::of::<T>() {
+                TypeSafetyRating::Safe
+            } else {
+                dbg!(id, TypeId::of::<T>());
+                TypeSafetyRating::Unsafe
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtoFunction {
+    ptr: *const u8,
+    parameters: Vec<TypeWithLayout>,
+    ret_ty: TypeWithLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtoFunctionError {
+    SafetyError,
+    ParameterSafetyError(u8),
+}
+
+impl Display for ProtoFunctionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProtoFunctionError::SafetyError => {
+                write!(f, "safety error in return type")
+            }
+            ProtoFunctionError::ParameterSafetyError(param_idx) => {
+                write!(f, "safety error in parameter type {param_idx}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProtoFunctionError {}
+
+pub trait ProtoFunctionInvoke<F> {
+    /// Casts the proto function into a Rust function while honoring the type-safety guardrails.
+    ///
+    /// # Safety
+    ///
+    /// The [TypeSafetyRating::Limited] is not enough to ensure safe behavior, but this safety
+    /// rating is accepted when `allow_limited_safety == true`.
+    /// This means that this function might produce unsafe behavior if that flag is set.
+    /// Proceed with cation if you need that flag to be enabled.
+    /// It is far safer to just register the necessary Rust type IDs in the EDL compiler and pass
+    /// `allow_limited_safety = false`.
+    fn invoke(&self, allow_limited_safety: bool) -> Result<F, ProtoFunctionError>;
+}
+
+pub trait FunctionContainerProto {
+    fn get_proto_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<ProtoFunction, anyhow::Error>;
+
+    fn get_named_proto_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<ProtoFunction, anyhow::Error>;
+
+    fn get_function_return_type(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<EdlMaybeType, anyhow::Error>;
+
+    fn get_named_function_return_type(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<EdlMaybeType, anyhow::Error>;
 }
 
 pub trait CatchUnwind<F, A, R> {
@@ -137,11 +270,110 @@ where
     ) -> Result<extern "C" fn($($P),*) -> $R, anyhow::Error> {
         let (id, associated_type, params) = self
             .find_function_from_name(name)?;
-        <Self as FunctionContainer<_>>::get_function(self, id, params, associated_type)
+        <Self as FunctionContainer<extern "C" fn($($P),*) -> $R>>::get_function(self, id, params, associated_type)
+    }
+}
+
+impl<$($P,)* $R> ProtoFunctionInvoke<extern "C" fn($($P),*) -> $R> for ProtoFunction
+where $($P: 'static,)* $R: 'static {
+    fn invoke(&self, allow_limited_safety: bool) -> Result<extern "C" fn($($P),*) -> $R, ProtoFunctionError> {
+        if !self.ret_ty.is_type_safe::<$R>().safe(allow_limited_safety) {
+            return Err(ProtoFunctionError::SafetyError);
+        }
+        #[allow(dead_code)]
+        let mut idx: usize = 0;
+        $(if !self.parameters[idx].is_type_safe::<$P>().safe(allow_limited_safety) {
+            return Err(ProtoFunctionError::ParameterSafetyError(idx as u8));
+        } else {
+            idx += 1;
+        })*
+        unsafe {
+            Ok(std::mem::transmute::<*const u8, extern "C" fn($($P),*) -> $R>(self.ptr))
+        }
     }
 }
     );
 );
+
+impl<Runtime: 'static> FunctionContainerProto for CraneliftJIT<Runtime> {
+    /// Returns a proto function with type guardrails for the provided function instance parameters.
+    fn get_proto_function(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<ProtoFunction, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(id)?
+            .clone();
+        let instance = self.format_function_instance(id, params, associated_type)?;
+        let ret = sig
+            .return_type()
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        if !ret.is_fully_resolved() {
+            return Err(anyhow!("return type mismatch"));
+        }
+        let ret_ty = TypeWithLayout::from_type(
+            &ret.unwrap(),
+            &mut self.compiler.mir_phase.types,
+            &self.compiler.phase.types,
+        )?;
+
+        let param_guards = sig.params.iter()
+            .map(|param| -> Result<TypeWithLayout, anyhow::Error> {
+                let param_ty = param.ty
+                    .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+                if !param_ty.is_fully_resolved() {
+                    return Err(anyhow!("return type mismatch"));
+                }
+                TypeWithLayout::from_type(
+                    &param_ty.unwrap(),
+                    &mut self.compiler.mir_phase.types,
+                    &self.compiler.phase.types,
+                ).map_err(|err| err.into())
+            })
+            .collect::<Result<Vec<TypeWithLayout>, anyhow::Error>>()?;
+
+        let ptr = unsafe { self.get_function_ptr(&instance) }?;
+        Ok(ProtoFunction {
+            ptr,
+            ret_ty,
+            parameters: param_guards,
+        })
+    }
+
+    fn get_named_proto_function(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<ProtoFunction, anyhow::Error> {
+        let (id, associated_type, params) = self
+            .find_function_from_name(name)?;
+        <Self as FunctionContainerProto>::get_proto_function(self, id, params, associated_type)
+    }
+
+    fn get_function_return_type(
+        &mut self,
+        id: EdlTypeId,
+        params: EdlParameterDef,
+        associated_type: Option<EdlTypeInstance>,
+    ) -> Result<EdlMaybeType, anyhow::Error> {
+        let sig = self.compiler.phase.types.get_fn_signature(id)?
+            .clone();
+        let instance = self.format_function_instance(id, params, associated_type)?;
+        let ret = sig
+            .return_type()
+            .resolve_generics_maybe(&instance.param, &self.compiler.phase.types);
+        Ok(ret)
+    }
+
+    fn get_named_function_return_type(
+        &mut self,
+        name: ModuleSrc,
+    ) -> Result<EdlMaybeType, anyhow::Error> {
+        let (id, associated_type, params) = self
+            .find_function_from_name(name)?;
+        <Self as FunctionContainerProto>::get_function_return_type(self, id, params, associated_type)
+    }
+}
 
 pub trait JITBencher {
     /// Start a benchmark for a specific function.
@@ -2032,7 +2264,9 @@ fn test() {
 }
         "#))?;
 
-        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        let proto_func = compiler.get_named_proto_function(inline_code!("test"))?;
+        let prog: extern "C" fn() = proto_func.invoke(true)?;
+        // let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
         assert!(compiler.catch_unwind(prog, ()).is_ok());
         Ok(())
     }
