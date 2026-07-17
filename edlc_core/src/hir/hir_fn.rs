@@ -36,7 +36,7 @@ use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_expr::{Context, DebugSymbols, MirFlowGraph};
-use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry};
+use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFnParam, MirFnSignature, MirFuncRegistry, SpecialFunction};
 use crate::mir::mir_type::TMirFnCallInfo;
 use crate::mir::mir_vars::VariableMapper;
 use crate::mir::MirPhase;
@@ -100,6 +100,14 @@ impl HirFn {
             body,
             info: None,
         }
+    }
+
+    pub fn validate(
+        &self,
+        phase: &mut HirPhase,
+        param_def: &EdlParamStack,
+    ) -> Result<(), HirTranslationError> {
+        self.signature.validate(phase, param_def)
     }
 }
 
@@ -517,6 +525,72 @@ impl DocElement for HirFnParam {
 
 
 impl HirFnSignature {
+    pub fn validate(
+        &self,
+        phase: &mut HirPhase,
+        param_def: &EdlParamStack,
+    ) -> Result<(), HirTranslationError> {
+        if self.comptime {
+            let ret = self.ret.resolve_generics_maybe(param_def, &phase.types);
+            if !ret.is_fully_resolved() {
+                return Err(HirError {
+                    pos: self.pos,
+                    ty: Box::new(HirErrorType::TypeNotFullyResolved {
+                        ty: ret,
+                    })
+                }.into());
+            }
+            let ret = ret.unwrap();
+            let custom_drop_impl = SpecialFunction::Drop.lookup(
+                &ret,
+                phase,
+                &self.src,
+                &self.pos,
+                self.scope,
+            );
+            if custom_drop_impl.is_some() {
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"`comptime` or `?comptime` function \
+                        returns type that implements custom drop"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            pos: self.pos.into(),
+                            src: self.src.clone(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"function defined here returns \
+                                type `"),
+                                TypeArgument::new_type(&ret),
+                                TypeArgument::new_display(&"` which implements the `core::Drop` \
+                                trait.")
+                            ]),
+                        }
+                    ],
+                    Some(TypeArguments::new(&[
+                        TypeArgument::new_display(&"A custom drop implementation means, that \
+                        the behavior during dropping the type instance (when the instance leaves \
+                        its scope) is non-trivial. Since drop implementations are fundamentally \
+                        runtime functions, the drop has to be executed at runtime. Creating an \
+                        instance of a type at compile-time means that its raw data representation \
+                        is embedded into the JIT-generated machine code at compile-time. Dropping \
+                        this at runtime is not well defined and therefore inconsistent with the \
+                        overall design decisions of EDL. Thus, types that implement a custom \
+                        drop function, must never be created at compile-time. \
+                        \
+                        dev-note: this does not apply to type inits, as type inits cannot have \
+                        side effects no matter what."),
+                    ])),
+                );
+                return Err(HirTranslationError::ComptimeFunctionReturnsCustomDrop {
+                    pos: self.pos,
+                    ty: ret,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// This creates a MIR representation of the function signature, with the specified parameter
     /// definitions to generate the specific function implementation.
     ///
@@ -634,6 +708,7 @@ impl HirFn {
         mut force_comptime: bool,
     ) -> Result<MirFn, HirTranslationError>
     where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
+        self.validate(phase, stack)?;
         // setup logging
         let prev_log_error = phase.report_mode.print_errors;
         let prev_log_warnings = phase.report_mode.print_warnings;

@@ -489,10 +489,9 @@ impl<B: Backend> MirFuncRegistry<B> {
             self.mir_id_from_func(edl, hir_phase, mir_phase, &tmir, comptime_params.clone(), force_comptime_call)
         } else {
             self.mir_id_from_impl(edl, hir_phase, mir_phase, &tmir, comptime_params.clone(), force_comptime_call)
-        }?;
-
-        self.mir_id_from_generators(edl, hir_phase, mir_phase, &tmir, comptime_params, force_comptime_call)?
-            .ok_or(HirTranslationError::CannotGenerateFunctionInstance(edl.clone()))
+        }
+        // self.mir_id_from_generators(edl, hir_phase, mir_phase, &tmir, comptime_params, force_comptime_call)?
+        //     .ok_or(HirTranslationError::CannotGenerateFunctionInstance(edl.clone()))
     }
 
     /// Generates a function instance on the fly. This is reserved for ad-hoc function call
@@ -1012,7 +1011,7 @@ pub enum SpecialFunction {
 }
 
 impl SpecialFunction {
-    fn lookup(
+    pub(crate) fn lookup(
         &self,
         ty: &EdlTypeInstance,
         hir_phase: &mut HirPhase,

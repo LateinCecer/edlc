@@ -43,6 +43,7 @@ pub enum HirTranslationError {
     CannotAssignToExpr { pos: SrcPos, msg: String },
     RecursionInHybridFunction { pos: SrcPos },
     ExpectedReference { pos: SrcPos, got: EdlTypeInstance },
+    ComptimeFunctionReturnsCustomDrop { pos: SrcPos, ty: EdlTypeInstance },
 }
 
 impl Display for HirTranslationError {
@@ -91,6 +92,10 @@ impl Display for HirTranslationError {
             }
             HirTranslationError::ExpectedReference { pos, got } => {
                 write!(f, "call at {pos} expected a reference but got type {got:?} instead")
+            }
+            HirTranslationError::ComptimeFunctionReturnsCustomDrop { pos, ty } => {
+                write!(f, "function defined at {pos} is marked as `comptime` or `?comptime` and \
+                returns a type ({ty:?}) that implements a custom drop implementation!")
             }
         }
     }
