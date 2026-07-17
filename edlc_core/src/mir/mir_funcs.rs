@@ -86,6 +86,26 @@ pub struct MirFuncInfo<B: Backend> {
     comptime_only: bool,
 }
 
+/// An adhoc generator can be used to generate native function implementations on the fly during
+/// codegen.
+/// This is usually used when a native function that takes generic type arguments is monomorphized
+/// to a previously unknown type combination that might be valid.
+/// A backend or an embedder can thus implement dynamic routines that deal with these kinds of
+/// situations without needing to link all possible combinations at compile time.
+/// Note that this is only really useful when the native target implementation is itself not
+/// generic - in that case the linking must happen at compile time as the target function itself
+/// must be monomorphized by the Rust compiler before the EDL compiler even runs.
+pub trait AdhocGenerator<B: Backend> {
+    fn try_gen(
+        &mut self,
+        edl: &EdlFnInstance,
+        hir_phase: &mut HirPhase,
+        mir_phase: &mut MirPhase,
+        comptime_params: &ComptimeParams,
+        force_comptime_call: bool,
+    ) -> Option<Box<dyn CodeGen<B>>>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Ord, Eq, Hash)]
 pub struct FnId(pub usize);
 
@@ -99,6 +119,8 @@ where B: Backend {
     impl_definitions: HashMap<EdlTypeId, usize>,
     impls: Vec<HirImpl>,
     func_id: FnId,
+
+    adhoc_generators: Vec<Box<dyn AdhocGenerator<B>>>,
 
     /// The compiler needs some function implementations to work properly.
     /// These are all functions that are registered as intrinsics and fulfill specialized and
@@ -122,6 +144,7 @@ impl<B: Backend> Default for MirFuncRegistry<B> {
             impls: Vec::new(),
 
             compiler_intrinsic_functions: HashMap::default(),
+            adhoc_generators: Vec::new(),
 
             comptime_mapper: ComptimeValueMapper::default(),
         }
@@ -463,10 +486,54 @@ impl<B: Backend> MirFuncRegistry<B> {
         }
 
         if edl.associated_ty.is_none() {
-            self.mir_id_from_func(edl, hir_phase, mir_phase, tmir, comptime_params, force_comptime_call)
+            self.mir_id_from_func(edl, hir_phase, mir_phase, &tmir, comptime_params.clone(), force_comptime_call)
         } else {
-            self.mir_id_from_impl(edl, hir_phase, mir_phase, tmir, comptime_params, force_comptime_call)
+            self.mir_id_from_impl(edl, hir_phase, mir_phase, &tmir, comptime_params.clone(), force_comptime_call)
+        }?;
+
+        self.mir_id_from_generators(edl, hir_phase, mir_phase, &tmir, comptime_params, force_comptime_call)?
+            .ok_or(HirTranslationError::CannotGenerateFunctionInstance(edl.clone()))
+    }
+
+    /// Generates a function instance on the fly. This is reserved for ad-hoc function call
+    /// generation.
+    /// The generated function id is also added to the conversion map for future reference.
+    ///
+    /// # State
+    ///
+    /// Since this method writes to the state of the conversion map if a new function body must be
+    /// implemented, the caller must ensure that the conversion map does not yet contain the
+    /// requested function.
+    /// This is asserted in debug builds, but not in release builds for performance reasons.
+    fn mir_id_from_generators(
+        &mut self,
+        edl: &EdlFnInstance,
+        hir_phase: &mut HirPhase,
+        mir_phase: &mut MirPhase,
+        tmir: &TMirFnInstance,
+        comptime_params: ComptimeParams,
+        force_comptime_call: bool,
+    ) -> Result<Option<MirFuncId>, HirTranslationError> {
+        debug_assert!(!self.conversion_map.contains_key(tmir));
+        let sig = hir_phase.types.get_fn_signature(edl.func)?;
+        let comptime = sig.comptime;
+        let comptime_only = sig.comptime_only;
+
+        for generator in self.adhoc_generators.iter_mut() {
+            if let Some(call_gen) = generator
+                .try_gen(edl, hir_phase, mir_phase, &comptime_params, force_comptime_call) {
+                let info = MirFuncInfo {
+                    code_gen: CodeGenState::Internal { call_gen },
+                    edl_version: tmir.clone(),
+                    comptime,
+                    comptime_only,
+                };
+                let mir_id = MirFuncId(self.generators.insert(info));
+                self.conversion_map.insert(tmir.clone(), mir_id);
+                return Ok(Some(mir_id));
+            }
         }
+        Ok(None)
     }
 
     fn mir_id_from_impl(
@@ -474,7 +541,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         edl: &EdlFnInstance,
         hir_phase: &mut HirPhase,
         mir_phase: &mut MirPhase,
-        tmir: TMirFnInstance,
+        tmir: &TMirFnInstance,
         comptime_params: ComptimeParams,
         force_comptime_call: bool,
     ) -> Result<MirFuncId, HirTranslationError>
@@ -505,7 +572,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
         let func = self.generators.get_mut(id.0).unwrap();
         func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
-        Ok(self.conversion_map.get(&tmir).copied().unwrap())
+        Ok(self.conversion_map.get(tmir).copied().unwrap())
     }
 
     fn mir_id_from_func(
@@ -513,7 +580,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         edl: &EdlFnInstance,
         hir_phase: &mut HirPhase,
         mir_phase: &mut MirPhase,
-        tmir: TMirFnInstance,
+        tmir: &TMirFnInstance,
         comptime_params: ComptimeParams,
         forced_comptime_call: bool,
     ) -> Result<MirFuncId, HirTranslationError>
@@ -544,7 +611,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         let func = self.generators.get_mut(id.0).unwrap();
         func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
-        Ok(self.conversion_map.get(&tmir).copied().unwrap())
+        Ok(self.conversion_map.get(tmir).copied().unwrap())
     }
 
     /// Collects all functions that are ready for code generation.
@@ -746,6 +813,10 @@ impl<B: Backend> MirFuncRegistry<B> {
 
     pub fn get_intrinsic(&self, name: &str) -> Option<&MirFuncId> {
         self.compiler_intrinsic_functions.get(name)
+    }
+
+    pub fn register_adhoc_generator(&mut self, generator: Box<dyn AdhocGenerator<B>>) {
+        self.adhoc_generators.push(generator);
     }
 
     /// Returns `true`, if the function is stateless and always returns the same value, if the same
