@@ -907,6 +907,32 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         Ok(module)
     }
 
+    /// Completes the first compilation stages for a binary.
+    /// If there are any errors in the source code that materialize during these compilation stages,
+    /// the will be reported using the current reporter target.
+    ///
+    /// # Incomplete Checks
+    ///
+    /// Please note that this check is complete; since a full compile would require actually
+    /// evaluating `comptime` expressions, only a part of the full pipeline can actually be run.
+    pub fn check_bin<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+    ) -> Result<(), anyhow::Error> {
+        let _module = self.compiler.parse_bin(name, supplier)?;
+        Ok(())
+    }
+
+    pub fn check_lib<Src: SrcSupplier>(
+        &mut self,
+        name: &str,
+        supplier: &Src,
+    ) -> Result<(), anyhow::Error> {
+        let _module = self.compiler.parse_lib(name, supplier)?;
+        Ok(())
+    }
+
     /// Compiles an entire **fracht** that compiles to a library.
     pub fn compile_lib<Src: SrcSupplier>(
         &mut self,

@@ -126,6 +126,7 @@ pub struct AstModule {
     pub name: QualifierName,
     pub scope: ScopeId,
     pub doc: String,
+    pub prepared_items: Vec<HirItem>,
 }
 
 impl AstModule {
@@ -402,6 +403,7 @@ impl AstModule {
             name,
             src,
             doc: module_doc,
+            prepared_items: Vec::new(),
         })
     }
 
@@ -638,6 +640,11 @@ impl AstModule {
         self.push_item_definitions(phase, &mut alias_resolver)?;
         self.resolve_use_statements(phase)?;
         alias_resolver.resolve(phase)?;
+        self.prepared_items = alias_resolver
+            .resolved_items()
+            .into_iter()
+            .map(HirItem::Type)
+            .collect::<Vec<_>>();
         Ok(())
     }
 }
@@ -647,7 +654,7 @@ impl IntoHir for AstModule {
 
     fn hir_repr(self, phase: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
         // self.push_constant_definitions(phase)?;
-        let mut items = Vec::new();
+        let mut items = self.prepared_items;
         for item in self.items.into_iter() {
             match item {
                 AstItem::Const(c) => items.push(HirItem::Const(c.hir_repr(phase)?)),

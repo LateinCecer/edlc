@@ -21,8 +21,9 @@ use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant};
 use crate::file::ModuleSrc;
-use crate::hir::hir_expr::hir_type::HirStructMember;
+use crate::hir::hir_expr::hir_type::HirDictMember;
 use crate::hir::{HirPhase, IntoEdl};
+use crate::hir::hir_type_def::{HirStructMember, HirStructVariant};
 use crate::lexer::{Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
@@ -102,6 +103,49 @@ impl StructDef {
             }
             StructType::Unit => {
                 Ok(EdlStructVariant::ZeroSized)
+            }
+        }
+    }
+
+    pub fn gen_docs(&self, phase: &mut HirPhase) -> Result<HirStructVariant, AstTranslationError> {
+        match self.init_ty {
+            StructType::List => {
+                let mut members = Vec::new();
+                for m in self.members.iter() {
+                    phase.res.revert_to_scope(&m.scope);
+                    let mut ty = m.clone().ty.hir_repr(phase)?;
+                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase).wrap_ast(&self.src)? else {
+                        return Err(AstTranslationError::ElicitType {
+                            pos: m.pos,
+                            src: self.src.clone(),
+                        });
+                    };
+                    members.push(HirStructMember {
+                        name: m.name.clone(),
+                        pos: m.pos,
+                        doc: m.doc.clone(),
+                        ty: edl_ty,
+                    });
+                }
+                Ok(HirStructVariant::Named(members))
+            }
+            StructType::Tuple => {
+                let mut members = Vec::new();
+                for m in self.members.iter() {
+                    phase.res.revert_to_scope(&m.scope);
+                    let mut ty = m.clone().ty.hir_repr(phase)?;
+                    let EdlMaybeType::Fixed(edl_ty) = ty.edl_repr(phase).wrap_ast(&self.src)? else {
+                        return Err(AstTranslationError::ElicitType {
+                            pos: m.pos,
+                            src: self.src.clone(),
+                        });
+                    };
+                    members.push(edl_ty);
+                }
+                Ok(HirStructVariant::Tuple(members))
+            }
+            StructType::Unit => {
+                Ok(HirStructVariant::ZeroSize)
             }
         }
     }
@@ -203,10 +247,10 @@ impl Parsable for StructDef {
 }
 
 impl IntoHir for AstStructMember {
-    type Output = HirStructMember;
+    type Output = HirDictMember;
 
     fn hir_repr(self, phase: &mut HirPhase) -> Result<Self::Output, AstTranslationError> {
-        Ok(HirStructMember {
+        Ok(HirDictMember {
             pos: self.pos,
             scope: self.scope,
             name: self.name,

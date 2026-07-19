@@ -42,7 +42,7 @@ use crate::hir::hir_expr::hir_type::HirTypeName;
 use crate::hir::hir_expr::hir_use::HirUse;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::hir_impl::HirImpl;
-use crate::issue::{IssueFormatter, ReportTarget, SrcError, SrcRange, TypeArguments};
+use crate::issue::{IssueFormatter, IssueHashContainer, ReportTarget, SrcError, SrcRange, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{FnCodeGen, MirFn, MirFuncRegistry};
@@ -61,6 +61,7 @@ pub mod hir_trait_fn;
 mod hir_report;
 mod lifetime;
 pub mod hir_where;
+pub mod hir_type_def;
 
 // export HIR context variables
 pub use context::HirContext;
@@ -68,10 +69,11 @@ pub use context::ExecType;
 use crate::ast::ItemDoc;
 use crate::core::edl_value::{EdlConstValue};
 use crate::core::type_analysis::{Infer, InferError, InferProvider, InferState, TypeUid, ExtConstUid};
-use crate::documentation::{DocCompilerState, DocElement};
+use crate::documentation::{DocCompilerState, DocElement, TypeDefDoc};
 use crate::hir::code_container::CodeContainer;
 use crate::issue;
 pub use crate::hir::hir_report::{report_infer_error, ReportResult, WithInferer, StateContainer, BundledInfererError};
+use crate::hir::hir_type_def::HirTypeDef;
 use crate::report::Report;
 
 pub trait HirElement {}
@@ -161,6 +163,7 @@ pub struct HirPhase {
     loop_stack: Vec<LoopIdentifier>,
     id_counter: usize,
     pub report_mode: ReportMode,
+    pub(crate) issue_hash_container: IssueHashContainer,
 
     /// code container, currently mostly for documentation purposes
     pub code: CodeContainer,
@@ -215,6 +218,7 @@ impl HirPhase {
             loop_stack: Vec::new(),
             id_counter: 0,
             report_mode: ReportMode::default(),
+            issue_hash_container: IssueHashContainer::default(),
 
             code: CodeContainer::default(),
         }
@@ -593,7 +597,8 @@ pub enum HirItem {
     Func(HirFn),
     Impl(HirImpl),
     Submod(Box<HirModule>, SrcPos),
-    Use(HirUse)
+    Use(HirUse),
+    Type(HirTypeDef),
 }
 
 impl HirItem {
@@ -605,6 +610,7 @@ impl HirItem {
             Self::Impl(val) => val.pos,
             Self::Submod(_val, pos) => *pos,
             Self::Use(u) => u.pos,
+            Self::Type(t) => t.pos,
         }
     }
 
@@ -616,6 +622,7 @@ impl HirItem {
             HirItem::Impl(val) => &val.src,
             HirItem::Submod(val, _) => &val.src,
             HirItem::Use(val) => &val.src,
+            HirItem::Type(t) => &t.src,
         }
     }
 }
@@ -868,6 +875,7 @@ impl HirModule {
                     Ok(())
                 },
                 HirItem::Use(_) => Ok(()),
+                HirItem::Type(_) => Ok(()),
             };
             if let Err(err) = res {
                 errors.push(err);
@@ -933,6 +941,7 @@ impl HirModule {
                     Ok(())
                 },
                 HirItem::Use(_) => Ok(()),
+                HirItem::Type(_) => Ok(()),
             };
             if let Err(err) = res {
                 errors.push(err);
@@ -951,6 +960,7 @@ impl HirModule {
                     val.finalize_types(phase, infer_state)
                 }
                 HirItem::Use(_) => (),
+                HirItem::Type(_) => (),
             }
         }
     }
@@ -992,6 +1002,7 @@ impl HirModule {
                     val.insert_default_mutability(phase, infer_state, errors);
                 }
                 HirItem::Use(_) => (),
+                HirItem::Type(_) => (),
             }
         }
     }
@@ -1013,6 +1024,7 @@ impl HirModule {
                     Ok(())
                 },
                 HirItem::Use(_) => Ok(()),
+                HirItem::Type(_) => Ok(()),
             };
             if let Err(err) = res {
                 if !partial || !err.is_type_resolve_recoverable() {
@@ -1070,6 +1082,7 @@ impl HirModule {
                     errors.append(&mut mod_errors);
                 }
                 HirItem::Use(_) => (),
+                HirItem::Type(_) => (),
             }
         }
 
@@ -1096,6 +1109,7 @@ impl HirModule {
                     Ok(())
                 },
                 HirItem::Use(_) => Ok(()),
+                HirItem::Type(_) => Ok(()),
             };
             if let Err(err) = res {
                 errors.push(err);
@@ -1150,6 +1164,7 @@ impl HirModule {
                     val.register_code(phase)?;
                 }
                 HirItem::Use(_) => (),
+                HirItem::Type(_) => (),
             }
         }
         Ok(())

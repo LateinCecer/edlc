@@ -399,12 +399,23 @@ impl IntoHir for AstImpl {
         }
         // --> resolving use statements would go here
         resolver.resolve(parser)?;
+        let type_defs = resolver.resolved_items();
 
         // parse functions
         let mut body = Vec::new();
         for func in self.funcs.into_iter() {
             body.push(func.hir_repr(parser)?);
         }
-        Ok(HirImpl::new(self.src.clone(), self.pos, self.scope, base_scope, trait_name_edl, base_name_edl, env_id, body ))
+        Ok(HirImpl {
+            src: self.src.clone(),
+            pos: self.pos,
+            scope: self.scope,
+            ty_scope: base_scope,
+            trait_name: trait_name_edl,
+            base_name: base_name_edl,
+            env: env_id,
+            funcs: body,
+            type_defs,
+        })
     }
 }

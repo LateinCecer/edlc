@@ -15,12 +15,12 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-
-
-
+use crate::ast::ast_error::AstTranslationError;
 use crate::ast::ast_type_def::struct_def::StructDef;
 use crate::ast::ItemDoc;
 use crate::file::ModuleSrc;
+use crate::hir::hir_type_def::HirEnumVariant;
+use crate::hir::HirPhase;
 use crate::lexer::{Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
@@ -38,6 +38,20 @@ pub struct EnumVariant {
 pub struct EnumDef {
     pub src: ModuleSrc,
     pub variants: Vec<EnumVariant>,
+}
+
+impl EnumDef {
+    pub fn gen_docs(&self, phase: &mut HirPhase) -> Result<Vec<HirEnumVariant>, AstTranslationError> {
+        let mut variants = Vec::new();
+        for m in self.variants.iter() {
+            variants.push(HirEnumVariant {
+                name: m.name.clone(),
+                pos: m.pos,
+                structure: m.body.gen_docs(phase)?,
+            });
+        }
+        Ok(variants)
+    }
 }
 
 impl Parsable for EnumVariant {

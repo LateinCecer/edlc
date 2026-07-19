@@ -529,7 +529,7 @@ impl HirTypeNameSegment {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct HirStructMember {
+pub struct HirDictMember {
     pub pos: SrcPos,
     pub scope: ScopeId,
     pub name: String,
@@ -546,9 +546,9 @@ pub enum HirType {
     Elicit(SrcPos),
     Empty(SrcPos),
     Ref(SrcPos, Box<HirType>, bool),
-    Tuple(SrcPos, Vec<HirStructMember>),
+    Tuple(SrcPos, Vec<HirDictMember>),
     Never(SrcPos),
-    Dict(SrcPos, Vec<HirStructMember>),
+    Dict(SrcPos, Vec<HirDictMember>),
 }
 
 impl IntoEdl for HirType {

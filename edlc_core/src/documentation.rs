@@ -282,6 +282,76 @@ impl Display for EnvParamDoc {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StructMemberDoc {
+    pub name: String,
+    pub pos: SrcPos,
+    pub doc: String,
+    pub ty: TypeDoc,
+}
+
+impl Display for StructMemberDoc {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum StructTypeDoc {
+    Named(Vec<StructMemberDoc>),
+    Tuple(Vec<TypeDoc>),
+    ZeroSized,
+}
+
+impl Display for StructTypeDoc {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EnumVariantDoc {
+    pub name: String,
+    pub members: StructTypeDoc,
+}
+
+impl Display for EnumVariantDoc {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum TypeDefVariant {
+    Struct(StructTypeDoc),
+    Enum(Vec<EnumVariantDoc>),
+    Union(Vec<StructMemberDoc>),
+    Alias(TypeDoc),
+}
+
+impl Display for TypeDefVariant {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TypeDefDoc {
+    pub name: QualifierName,
+    pub src: PortableModuleSrc,
+    pub pos: SrcPos,
+    pub doc: String,
+    pub env: EnvDoc,
+    pub params: FuncParamsDoc,
+    pub variant: TypeDefVariant,
+}
+
+impl Display for TypeDefDoc {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
 /// Defines the documentation of a type identifier.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TypeDoc {

@@ -26,6 +26,7 @@ use crate::documentation::{DocCompilerState, DocElement};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::{HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
+use crate::hir::hir_type_def::HirTypeDef;
 use crate::hir::translation::HirTranslationError;
 use crate::issue::{TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
@@ -44,30 +45,7 @@ pub struct HirImpl {
     pub base_name: EdlTypeInstance,
     pub env: EdlEnvId,
     pub funcs: Vec<HirFn>,
-}
-
-impl HirImpl {
-    pub fn new(
-        src: ModuleSrc,
-        pos: SrcPos,
-        scope: ScopeId,
-        ty_scope: Option<ScopeId>,
-        trait_name: Option<EdlTraitInstance>,
-        base_name: EdlTypeInstance,
-        env: EdlEnvId,
-        funcs: Vec<HirFn>,
-    ) -> Self {
-        HirImpl {
-            src,
-            pos,
-            scope,
-            ty_scope,
-            trait_name,
-            base_name,
-            env,
-            funcs,
-        }
-    }
+    pub type_defs: Vec<HirTypeDef>,
 }
 
 impl HirImpl {

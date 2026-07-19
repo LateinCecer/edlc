@@ -62,6 +62,8 @@ use crate::core::edl_param_env::EdlParameterEnv;
 use crate::prelude::edl_type::{EdlTypeId, EdlTypeRegistry};
 pub use struct_def::AstStructMember;
 use crate::ast::ast_where::AstWhere;
+use crate::core::edl_alias::EdlAlias;
+use crate::hir::hir_type_def::{HirTypeDef, HirTypeVariant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AstTypeDef {
@@ -134,10 +136,11 @@ impl Parsable for AstTypeDef {
 
 #[derive(Debug)]
 pub enum TypeState {
-    Alias(EdlAliasId, AliasDef, SrcPos, String),
-    Struct(EdlTypeId, StructDef, SrcPos, ScopeId, String),
-    Enum(EdlTypeId, EnumDef, SrcPos, ScopeId, String),
-    Done,
+    Alias(EdlAliasId, AliasDef, SrcPos, String, Option<ItemDoc>),
+    Struct(EdlTypeId, StructDef, SrcPos, ScopeId, String, Option<ItemDoc>),
+    Enum(EdlTypeId, EnumDef, SrcPos, ScopeId, String, Option<ItemDoc>),
+    Done(HirTypeDef),
+    Invalid,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -242,15 +245,15 @@ impl AstTypeDef {
                 let alias_id = phase.res
                     .find_top_level_alias(&vec![self.name.clone()].into())
                     .unwrap();
-                Ok(TypeState::Alias(alias_id, alias.clone(), self.pos, self.name.clone()))
+                Ok(TypeState::Alias(alias_id, alias.clone(), self.pos, self.name.clone(), self.doc.clone()))
             },
             AstTypeVariant::Struct(def) => {
                 let ty = self.insert_type(edl_env, phase)?;
-                Ok(TypeState::Struct(ty, def.clone(), self.pos, self.scope, self.name.clone()))
+                Ok(TypeState::Struct(ty, def.clone(), self.pos, self.scope, self.name.clone(), self.doc.clone()))
             }
             AstTypeVariant::Enum(def) => {
                 let ty = self.insert_type(edl_env, phase)?;
-                Ok(TypeState::Enum(ty, def.clone(), self.pos, self.scope, self.name.clone()))
+                Ok(TypeState::Enum(ty, def.clone(), self.pos, self.scope, self.name.clone(), self.doc.clone()))
             }
         }
     }
@@ -270,15 +273,15 @@ impl AstTypeDef {
                 base_name.push(self.name.clone());
                 let alias_id = phase.types.insert_alias_type(
                     env_id, base_name, self.src.clone(), self.pos);
-                Ok(TypeState::Alias(alias_id, alias.clone(), self.pos, self.name.clone()))
+                Ok(TypeState::Alias(alias_id, alias.clone(), self.pos, self.name.clone(), self.doc.clone()))
             }
             AstTypeVariant::Struct(def) => {
                 let ty = self.insert_associate_type(base_name, edl_env, phase)?;
-                Ok(TypeState::Struct(ty, def.clone(), self.pos, self.scope, self.name.clone()))
+                Ok(TypeState::Struct(ty, def.clone(), self.pos, self.scope, self.name.clone(),self.doc.clone()))
             }
             AstTypeVariant::Enum(def) => {
                 let ty = self.insert_associate_type(base_name, edl_env, phase)?;
-                Ok(TypeState::Enum(ty, def.clone(), self.pos, self.scope, self.name.clone()))
+                Ok(TypeState::Enum(ty, def.clone(), self.pos, self.scope, self.name.clone(), self.doc.clone()))
             }
         }
     }
@@ -293,14 +296,15 @@ impl TypeState {
         options: LayoutOptions
     ) -> Result<TypeState, AstTranslationError> {
         match &self {
-            Self::Struct(ty, def, pos, scope, _) => {
+            Self::Struct(ty, def, pos, scope, name, input_doc) => {
                 // -> translate as struct layout <-
                 // find type env and insert into the type scope for parsing
                 let EdlType::Type { param, .. } = phase.types.get_type(*ty).unwrap() else {
                     panic!("internal compiler error - illegal state");
                 };
                 phase.res.revert_to_scope(scope);
-                phase.res.push_env(*param, &mut phase.types)
+                let env_id = *param;
+                phase.res.push_env(env_id, &mut phase.types)
                     .map_err(|err| AstTranslationError::EdlError {
                         pos: *pos,
                         src: def.src.clone(),
@@ -309,6 +313,7 @@ impl TypeState {
 
                 // translate members
                 let members = def.translate_members(phase)?;
+                let docs = def.gen_docs(phase)?;
                 let layout = EdlTypeState::Struct {
                     members,
                     can_init: options.can_init,
@@ -317,16 +322,25 @@ impl TypeState {
                 // insert
                 phase.types.update_type_state(*ty, layout)
                     .map_err(|err| AstTranslationError::EdlError { pos: *pos, src: def.src.clone(), err })?;
-                Ok(Self::Done)
+                Ok(Self::Done(HirTypeDef {
+                    src: def.src.clone(),
+                    pos: *pos,
+                    scope: *scope,
+                    doc: input_doc.clone(),
+                    def: HirTypeVariant::Struct(docs),
+                    env: env_id,
+                    name: name.clone(),
+                }))
             }
-            Self::Enum(ty, def, pos, scope, _) => {
+            Self::Enum(ty, def, pos, scope, name, input_doc) => {
                 // -> translate as enum layout <-
                 // find type env and insert into the type scope for parsing
                 let EdlType::Type { param, .. } = phase.types.get_type(*ty).unwrap() else {
                     panic!("internal compiler error - illegal state");
                 };
                 phase.res.revert_to_scope(scope);
-                phase.res.push_env(*param, &mut phase.types)
+                let env_id = *param;
+                phase.res.push_env(env_id, &mut phase.types)
                     .map_err(|err| AstTranslationError::EdlError {
                         pos: *pos,
                         src: def.src.clone(),
@@ -338,6 +352,7 @@ impl TypeState {
                 for variant in def.variants.iter() {
                     variants.insert(variant.name.clone(), variant.body.translate_members(phase)?);
                 }
+                let variant_docs = def.gen_docs(phase)?;
                 let layout = EdlTypeState::Enum {
                     variants,
                     can_init: options.can_init,
@@ -346,15 +361,24 @@ impl TypeState {
                 // insert
                 phase.types.update_type_state(*ty, layout)
                     .map_err(|err| AstTranslationError::EdlError { pos: *pos, src: def.src.clone(), err })?;
-                Ok(Self::Done)
+                Ok(Self::Done(HirTypeDef {
+                    src: def.src.clone(),
+                    pos: *pos,
+                    scope: *scope,
+                    doc: input_doc.clone(),
+                    env: env_id,
+                    name: name.clone(),
+                    def: HirTypeVariant::Enum(variant_docs),
+                }))
             }
-            Self::Alias(_, _, _, _) => {
+            Self::Alias(_, _, _, _, _) => {
                 // -> cannot translate alias types into layouts <-
                 Ok(self)
             }
-            Self::Done => {
+            Self::Done(_) => {
                 Ok(self)
             }
+            Self::Invalid => Ok(self)
         }
     }
 
@@ -371,9 +395,13 @@ impl TypeState {
         self,
         phase: &mut HirPhase
     ) -> Result<(Self, Option<EdlAliasId>), AstTranslationError> {
-        let TypeState::Alias(id, def, pos, _name) = &self else {
+        let TypeState::Alias(id, def, pos, name, input_docs) = &self else {
             return Ok((self, None));
         };
+
+        let EdlAlias { env, .. } = phase.types.get_alias(*id).unwrap();
+        phase.res.revert_to_scope(&def.2);
+        let env_id = *env;
 
         let mut rhs = def.0.clone().hir_repr(phase)?;
         let edl_ty = match rhs.edl_repr(phase) {
@@ -388,9 +416,17 @@ impl TypeState {
             return Err(AstTranslationError::ElicitType { pos: *pos, src: def.1.clone() });
         };
 
-        phase.types.finish_alias_type(*id, rhs_name_edl)
+        phase.types.finish_alias_type(*id, rhs_name_edl.clone())
             .map_err(|err| AstTranslationError::EdlError { err, pos: *pos, src: def.1.clone() })?;
-        Ok((TypeState::Done, Some(*id)))
+        Ok((TypeState::Done(HirTypeDef {
+            src: def.1.clone(),
+            pos: *pos,
+            scope: def.2,
+            env: env_id,
+            name: name.clone(),
+            doc: input_docs.clone(),
+            def: HirTypeVariant::Alias(rhs_name_edl),
+        }), Some(*id)))
     }
 
     pub fn push_trait_associated_alias(
@@ -400,17 +436,17 @@ impl TypeState {
         type_reg: &EdlTypeRegistry,
     ) -> Result<(), ResolveError> {
         match self {
-            Self::Alias(id, _, _, name) => {
+            Self::Alias(id, _, _, name, _) => {
                 resolver.push_trait_associated_alias(ty, name.clone(), *id)
             }
-            Self::Struct(id, _, _, _, name) => {
+            Self::Struct(id, _, _, _, name, _) => {
                 resolver.push_trait_associated_type(
                     ty,
                     name.clone(),
                     type_reg.new_type_instance(*id).unwrap()
                 )
             }
-            Self::Enum(id, _, _, _, name) => {
+            Self::Enum(id, _, _, _, name, _) => {
                 resolver.push_trait_associated_type(
                     ty,
                     name.clone(),
@@ -428,17 +464,17 @@ impl TypeState {
         type_reg: &EdlTypeRegistry,
     ) -> Result<(), ResolveError> {
         match self {
-            Self::Alias(id, _, _, name) => {
+            Self::Alias(id, _, _, name, _) => {
                 resolver.push_associated_alias(ty, name.clone(), *id)
             },
-            Self::Struct(id, _, _, _, name) => {
+            Self::Struct(id, _, _, _, name, _) => {
                 resolver.push_associated_type(
                     ty,
                     name.clone(),
                     type_reg.new_type_instance(*id).unwrap()
                 )
             }
-            Self::Enum(id, _, _, _, name) => {
+            Self::Enum(id, _, _, _, name, _) => {
                 resolver.push_associated_type(
                     ty,
                     name.clone(),
@@ -459,7 +495,7 @@ impl AliasResolver {
     fn resolve_try(&mut self, phase: &mut HirPhase) -> Result<usize, AstTranslationError> {
         let mut dependencies = HashMap::<EdlAliasId, EdlAliasId>::new();
         for state in self.states.iter_mut() {
-            let mut new_state = TypeState::Done;
+            let mut new_state = TypeState::Invalid;
             mem::swap(&mut new_state, state);
 
             let (new_state, dep) = new_state.resolve_alias(phase)?;
@@ -479,10 +515,7 @@ impl AliasResolver {
             let mut trace = Vec::new();
             trace.push(*current);
 
-            loop {
-                let Some(next) = dependencies.get(current) else {
-                    break;
-                };
+            while let Some(next) = dependencies.get(current) {
                 current = next;
                 trace.push(*current);
                 if current == alias {
@@ -527,7 +560,7 @@ impl AliasResolver {
 
     fn update_layout(&mut self, phase: &mut HirPhase) -> Result<(), AstTranslationError> {
         for state in self.states.iter_mut() {
-            let mut new_state = TypeState::Done;
+            let mut new_state = TypeState::Invalid;
             mem::swap(&mut new_state, state);
 
             let mut options = LayoutOptions::default();
@@ -547,9 +580,21 @@ impl AliasResolver {
         self.update_layout(phase)?;
         Ok(())
     }
+    
+    pub fn resolved_items(self) -> Vec<HirTypeDef> {
+        self.states
+            .into_iter()
+            .map(|state| {
+                let TypeState::Done(d) = state else {
+                    panic!("state not resolved yet!")
+                };
+                d
+            })
+            .collect()
+    }
 
     pub fn insert(&mut self, state: TypeState) {
-        if !matches!(state, TypeState::Done) {
+        if !matches!(state, TypeState::Done(_)) {
             self.states.push(state);
         }
     }

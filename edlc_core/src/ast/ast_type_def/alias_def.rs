@@ -18,13 +18,17 @@
 
 use crate::ast::ast_type::AstType;
 use crate::file::ModuleSrc;
-use crate::parser::{Parsable, ParseError, Parser};
+use crate::lexer::SrcPos;
+use crate::parser::{Parsable, ParseError, Parser, WrapParserResult};
+use crate::resolver::ScopeId;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AliasDef(pub AstType, pub ModuleSrc);
+pub struct AliasDef(pub AstType, pub ModuleSrc, pub ScopeId, pub SrcPos);
 
 impl Parsable for AliasDef {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
-        AstType::parse(parser).map(|ty| AliasDef(ty, parser.module_src.clone()))
+        let pos = *parser.pos();
+        let scope_id = *parser.env.current_scope().wrap(pos)?;
+        AstType::parse(parser).map(|ty| AliasDef(ty, parser.module_src.clone(), scope_id, pos))
     }
 }

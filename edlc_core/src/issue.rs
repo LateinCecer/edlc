@@ -44,6 +44,27 @@ pub enum ReportTarget {
     Cache { cache: Sender<CompilerReport> },
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct IssueHashContainer {
+    container: Vec<u64>,
+}
+
+impl IssueHashContainer {
+    /// Inserts the hash state of a compiler report into the issue hash container.
+    /// If this returns true, the hash was newly inserted.
+    /// Otherwise, the hash was already present in the container and `false` will be returned.
+    fn insert<H: Hasher>(&mut self, state: &H) -> bool {
+        let hash = state.finish();
+        match self.container.binary_search(&hash) {
+            Ok(_) => false,
+            Err(index) => {
+                self.container.insert(index, hash);
+                true
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd)]
 pub enum ReportLevel {
     Error,
@@ -283,9 +304,9 @@ impl<'a, H: Hasher> TypeArgument<'a, H> {
 
     fn arg_hash(&self, state: &mut H) {
         match self {
-            TypeArgument::TypeArg(_) => panic!(),
-            TypeArgument::VarArg(_) => panic!(),
-            TypeArgument::Arg(_) => panic!(),
+            TypeArgument::TypeArg(_) => (),
+            TypeArgument::VarArg(_) => (),
+            TypeArgument::Arg(_) => (),
             TypeArgument::String(s) => s.hash(state),
             TypeArgument::Str(s) => s.hash(state),
             TypeArgument::General { ptr, hasher, .. } => {
@@ -389,6 +410,13 @@ use crate::core::EdlVarId;
 // main implementation of the issue formatter.
 impl<'a> IssueFormatter<'a> {
     pub fn error(&mut self, args: TypeArguments<'_, DefaultHasher>, errors: &[SrcError<'_, DefaultHasher>]) -> Result<(), FmtError> {
+        let mut state = DefaultHasher::new();
+        args.arg_hash(&mut state);
+        errors.iter().for_each(|err| err.arg_hash(&mut state));
+        if !self.phase.issue_hash_container.insert(&state) {
+            return Ok(());
+        }
+
         match &mut self.mode {
             ReportTarget::Printout => {
                 let color = TokenColors::color_from_hex(0xcbc9cfff);
@@ -411,6 +439,13 @@ impl<'a> IssueFormatter<'a> {
     }
 
     pub fn warn(&mut self, args: TypeArguments<'_, DefaultHasher>, errors: &[SrcError<'_, DefaultHasher>]) -> Result<(), FmtError> {
+        let mut state = DefaultHasher::new();
+        args.arg_hash(&mut state);
+        errors.iter().for_each(|err| err.arg_hash(&mut state));
+        if !self.phase.issue_hash_container.insert(&state) {
+            return Ok(());
+        }
+
         match &mut self.mode {
             ReportTarget::Printout => {
                 let color = TokenColors::color_from_hex(0xcbc9cfff);
@@ -714,7 +749,7 @@ impl<'a> IssueFormatter<'a> {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default, Hash)]
 pub struct SrcRange {
     pub start: SrcPos,
     pub end: SrcPos,
@@ -753,11 +788,38 @@ impl<'a, H: Hasher> SrcError<'a, H> {
     pub fn double(first: SrcPos, first_error: TypeArguments<'a, H>, second: SrcPos, second_error: TypeArguments<'a, H>, src: ModuleSrc) -> Self {
         SrcError::Double { first: first.into(), error_first: first_error, second: second.into(), error_second: second_error, src, }
     }
+
+    pub fn arg_hash(&self, hash: &mut H) {
+        match self {
+            Self::Single {
+                pos,
+                src,
+                error,
+            } => {
+                pos.hash(hash);
+                src.hash(hash);
+                error.arg_hash(hash);
+            }
+            Self::Double {
+                first,
+                second,
+                src,
+                error_first,
+                error_second,
+            } => {
+                first.hash(hash);
+                second.hash(hash);
+                src.hash(hash);
+                error_first.arg_hash(hash);
+                error_second.arg_hash(hash);
+            }
+        }
+    }
 }
 
 /// Like `SrcError` but without a lifetime.
 /// This can be used to cache error messages and warnings for deferred reporting.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash)]
 pub enum CachedError {
     Single {
         pos: SrcRange,
@@ -818,7 +880,6 @@ impl CachedError {
         }
     }
 }
-
 
 
 #[cfg(test)]

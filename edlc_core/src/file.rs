@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 use std::fmt::{Debug, Formatter};
+use std::hash::{Hash, Hasher};
 use crate::lexer::SrcPos;
 use crate::parser::Parser;
 
@@ -50,6 +51,21 @@ pub struct BufferedFile {
     pub buffer: String,
 }
 
+impl Hash for LocalFileSource {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.relative_path.hash(state);
+        self.pos.hash(state);
+        self.src.hash(state);
+    }
+}
+
+impl Hash for BufferedFile {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        // -> do not include the buffer; that should not change between invocations
+    }
+}
+
 impl Debug for BufferedFile {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "BufferedFile {}, buffer size: {} bytes", self.path.display(), self.buffer.as_bytes().len())
@@ -77,7 +93,7 @@ impl Debug for LocalFileSource {
 /// Since the structure is also thread save and its contents to not have to be `mut`, this means
 /// that we can attach the `ModuleSrc` to any file src position without fear of bricking the
 /// performance or memory consumption of the program.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModuleSrc {
     File(Arc<BufferedFile>),
     String(Arc<LocalFileSource>),
