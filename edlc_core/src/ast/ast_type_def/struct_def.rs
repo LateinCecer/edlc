@@ -24,7 +24,7 @@ use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirDictMember;
 use crate::hir::{HirPhase, IntoEdl};
 use crate::hir::hir_type_def::{HirStructMember, HirStructVariant};
-use crate::lexer::{Punct, SrcPos, Token};
+use crate::lexer::{KeyWord, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
 
@@ -35,6 +35,7 @@ pub struct AstStructMember {
     pub name: String,
     pub ty: AstType,
     pub doc: Option<ItemDoc>,
+    pub async_: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,15 +52,25 @@ pub struct StructDef {
     pub init_ty: StructType,
 }
 
+fn parse_async(parser: &mut Parser) -> Result<bool, ParseError> {
+    if matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
+        parser.next_token()?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 impl Parsable for AstStructMember {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
+        let async_ = parse_async(parser)?;
         let (name, pos) = expect_token!(parser; (Token::Ident(name)), pos => (name, pos)
                 expected "struct member name identifier")?;
         let scope_id = *parser.env.current_scope().wrap(pos)?;
         expect_token!(parser; (Token::Punct(Punct::Colon))
                 expected "struct member type hint starting with `:`")?;
         let ty = AstType::parse(parser)?;
-        Ok(AstStructMember { name, ty, pos, scope: scope_id, doc: None })
+        Ok(AstStructMember { name, ty, pos, scope: scope_id, doc: None, async_ })
     }
 }
 
@@ -190,6 +201,7 @@ impl StructDef {
             }
             // try parse member type
             let doc = ItemDoc::try_parse(parser)?;
+            let async_ = parse_async(parser)?;
             let mty = AstType::parse(parser)?;
             members.push(AstStructMember {
                 pos: *mty.pos(),
@@ -197,6 +209,7 @@ impl StructDef {
                 ty: mty,
                 name: members.len().to_string(),
                 doc,
+                async_,
             });
             // check for `,`
             if let Ok(local!(Token::Punct(Punct::Comma))) = parser.peak() {
