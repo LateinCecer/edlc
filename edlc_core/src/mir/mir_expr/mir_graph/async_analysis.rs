@@ -72,6 +72,14 @@ impl Display for AsyncSource {
 pub struct AsyncConnState {
     /// The sources that the MIR value attached to this state depends on.
     dependencies: HashSet<AsyncSource>,
+    /// A reference is a source that is attached to a MIR value.
+    /// In effect, this works exactly like the `dependencies` list, except that the references do
+    /// not get a state change when the state if this MIR value changes.
+    ///
+    /// For consistency: this set contains only sources that are not already contained in the
+    /// dependencies list, as it makes no sense to hold the same source twice in two separate
+    /// lists.
+    references: HashSet<AsyncSource>,
 }
 
 impl AsyncConnState {
@@ -79,11 +87,21 @@ impl AsyncConnState {
     pub fn new(source: AsyncSource) -> Self {
         Self {
             dependencies: HashSet::from([source]),
+            references: HashSet::new(),
         }
     }
 
     pub fn add_source(&mut self, source: AsyncSource) -> bool {
+        self.references.remove(&source);
         self.dependencies.insert(source)
+    }
+
+    pub fn add_reference(&mut self, source: AsyncSource) -> bool {
+        if !self.dependencies.contains(&source) {
+            self.references.insert(source)
+        } else {
+            false
+        }
     }
 
     /// Extends self with the sources from `other`.
@@ -91,7 +109,28 @@ impl AsyncConnState {
     pub fn extend(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for s in other.dependencies.iter() {
+            changed |= self.references.remove(s);
             changed |= self.dependencies.insert(*s);
+        }
+        for s in other.references.iter() {
+            if !self.dependencies.contains(s) {
+                changed |= self.references.insert(*s);
+            }
+        }
+        changed
+    }
+
+    /// Extends the internal references for this connection state with both the dependencies and
+    /// the references of `other`.
+    /// This means that the MIR value belonging to this state will synchronize the sources from
+    /// `other`, but if the state of this value, changes the sources from `other` will not be
+    /// updated.
+    /// This is helpful for aggregate types that only allow parts of their members to be async
+    /// mutable.
+    pub fn extend_as_reference(&mut self, other: &Self) -> bool {
+        let mut changed = false;
+        for s  in other.dependencies.iter().chain(other.references.iter()) {
+            changed |= self.references.insert(*s);
         }
         changed
     }
@@ -120,21 +159,35 @@ impl LatticeElement for AsyncConnState {
     fn lower(self, other: Self) -> Result<Self, Self::Conflict> {
         Ok(Self {
             dependencies: self.dependencies.intersection(&other.dependencies).cloned().collect(),
+            references: self.references.intersection(&other.references).cloned().collect(),
         })
     }
 
     fn upper(self, other: Self) -> Result<Self, Self::Conflict> {
+        let dependencies: HashSet<AsyncSource> = self.dependencies
+            .union(&other.dependencies)
+            .cloned()
+            .collect();
+        let mut refs: HashSet<AsyncSource> = self.references
+            .union(&other.references)
+            .cloned()
+            .collect();
+        refs.retain(|r| !dependencies.contains(r));
+
         Ok(Self {
-            dependencies: self.dependencies.union(&other.dependencies).cloned().collect(),
+            dependencies,
+            references: refs,
         })
     }
 
     fn is_lower_bound(&self, other: &Self) -> bool {
         self.dependencies.is_subset(&other.dependencies)
+            && self.references.is_subset(&other.references)
     }
 
     fn is_upper_bound(&self, other: &Self) -> bool {
         other.dependencies.is_subset(&self.dependencies)
+            && other.references.is_subset(&self.references)
     }
 
     fn bottom() -> Self {
@@ -218,17 +271,39 @@ impl<V> IndexMut<AsyncId> for AsyncSourceState<V> {
 }
 
 #[derive(Debug)]
+struct ConnectomeDependencies(PooledData<AsyncId>);
+#[derive(Debug)]
+struct ConnectomeReferences(PooledData<AsyncId>);
+
+impl Index<MirValue> for ConnectomeDependencies {
+    type Output = [AsyncId];
+
+    fn index(&self, index: MirValue) -> &Self::Output {
+        self.0.index(index.0)
+    }
+}
+
+impl Index<MirValue> for ConnectomeReferences {
+    type Output = [AsyncId];
+
+    fn index(&self, index: MirValue) -> &Self::Output {
+        self.0.index(index.0)
+    }
+}
+
+
+#[derive(Debug)]
 pub struct AsyncConnectome {
-    value_index: Vec<usize>,
-    ids: Vec<AsyncId>,
+    dependencies: ConnectomeDependencies,
+    references: ConnectomeReferences,
     id_to_source: Vec<AsyncSource>,
 }
 
 impl Display for AsyncConnectome {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        for value_raw in 0..self.value_index.len() {
+        for value_raw in 0..self.dependencies.0.indices.len() {
             let value = MirValue(value_raw);
-            let async_ids = &self[value];
+            let async_ids = &self.dependencies[value];
             if async_ids.is_empty() {
                 continue;
             }
@@ -258,8 +333,22 @@ impl AsyncConnectome {
         let mut value_index = vec![0];
         let mut ids = vec![];
 
+        let mut ref_value_index = vec![];
+        let mut ref_ids = vec![];
+
         let mut sorted_ids = map.keys().cloned().collect::<Vec<_>>();
         sorted_ids.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+
+        let mut find_id = |source: &AsyncSource| -> AsyncId {
+            if let Some(id) = source_to_id.get(source) {
+                *id
+            } else {
+                let id = AsyncId(id_to_source.len() as u32);
+                id_to_source.push(*source);
+                source_to_id.insert(*source, id);
+                id
+            }
+        };
 
         for (value, state) in sorted_ids
             .iter()
@@ -269,23 +358,28 @@ impl AsyncConnectome {
                 value_index.push(ids.len());
             }
             value_index[value.0] = ids.len();
-
             for source in &state.dependencies {
-                if let Some(id) = source_to_id.get(source) {
-                    ids.push(*id);
-                } else {
-                    let id = AsyncId(id_to_source.len() as u32);
-                    id_to_source.push(*source);
-                    source_to_id.insert(*source, id);
-                    ids.push(id);
-                }
+                ids.push(find_id(source));
             }
 
+            while ref_value_index.len() <= value.0 {
+                ref_value_index.push(ref_ids.len());
+            }
+            ref_value_index[value.0] = ref_ids.len();
+            for source in &state.references {
+                ref_ids.push(find_id(source));
+            }
         }
 
         Self {
-            value_index,
-            ids,
+            dependencies: ConnectomeDependencies(PooledData {
+                indices: value_index,
+                data: ids,
+            }),
+            references: ConnectomeReferences(PooledData {
+                indices: ref_value_index,
+                data: ref_ids,
+            }),
             id_to_source,
         }
     }
@@ -305,7 +399,10 @@ impl AsyncConnectome {
         state: &AsyncSourceState<V>,
     ) -> Option<V>
     where V: Clone {
-        let mut iter = self.index(*value).iter();
+        // for getting the state, we query from both the dependencies AND the references
+        let mut iter = self.dependencies
+            .index(*value).iter()
+            .chain(self.references.index(*value));
         let Some(first) = iter.next() else {
             return None;
         };
@@ -316,30 +413,20 @@ impl AsyncConnectome {
         Some(out)
     }
 
-    fn set_state<V>(&self, key: &MirValue, value: V, state: &mut AsyncSourceState<V>)
+    fn set_state<V>(
+        &self,
+        key: &MirValue,
+        value: V,
+        state: &mut AsyncSourceState<V>,
+    )
     where V: Clone {
-        for id in self.index(*key).iter() {
+        // for setting the state, we set only the dependencies, not the references
+        for id in self.dependencies.index(*key).iter() {
             state[*id] = value.clone();
         }
     }
 }
 
-impl Index<MirValue> for AsyncConnectome {
-    type Output = [AsyncId];
-
-    fn index(&self, index: MirValue) -> &Self::Output {
-        if index.0 < self.value_index.len() {
-            let end = if index.0 + 1 < self.value_index.len() {
-                self.value_index[index.0 + 1]
-            } else {
-                self.ids.len()
-            };
-            &self.ids[self.value_index[index.0]..end]
-        } else {
-            &self.ids[0..0]
-        }
-    }
-}
 
 /// Asynchronous connectome.
 /// Maps each MIR value to a set of asynchronous sources that dedicate the values' flow state.
@@ -506,7 +593,10 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
             .unwrap();
 
         if !sig.async_return {
-            return Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))));
+            return Ok(input.replace(
+                target,
+                AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))
+            ));
         }
         let mut state = input.element_value(target);
         let mut param_idx: usize = 0;
@@ -523,6 +613,9 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
             };
             if param_def.async_ {
                 state.extend(&input.element_value(&value));
+            } else {
+                // TODO this is the critical part. To be tested!
+                state.extend_as_reference(&input.element_value(&value));
             }
         }
         Ok(input.replace(target, state))
@@ -878,6 +971,7 @@ impl<V> PooledDataBuilder<V> {
     }
 }
 
+#[derive(Debug)]
 struct PooledData<V> {
     indices: Vec<usize>,
     data: Vec<V>,
@@ -1429,7 +1523,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                             // register event for all values that it syncs
                             if sig.async_return {
                                 // register for target_var
-                                self.conn[target_var].iter().for_each(|id| {
+                                self.conn.dependencies[target_var].iter().for_each(|id| {
                                     event_pool_builder.push_data(*id);
                                 });
                                 event_values_builder.push_data(target_var);
@@ -1449,7 +1543,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                 };
                                 if param.async_ {
                                     // register for this parameter
-                                    self.conn[value].iter().for_each(|id| {
+                                    self.conn.dependencies[value].iter().for_each(|id| {
                                         event_pool_builder.push_data(*id);
                                     });
                                     event_values_builder.push_data(value);
@@ -1713,8 +1807,9 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
-        self.conn[*value]
+        self.conn.dependencies[*value]
             .iter()
+            .chain(self.conn.references[*value].iter())
             .for_each(|val| {
                 self.event_sync
                     .find_data_indices(val)
