@@ -182,8 +182,10 @@ impl EdlFnParam {
         if self.comptime {
             write!(fmt, "comptime ")?;
         }
-        if self.async_ {
-            write!(fmt, "async ")?;
+        match self.async_ {
+            AsyncState::Async => write!(fmt, "async ")?,
+            AsyncState::Shared => write!(fmt, "shared ")?,
+            AsyncState::None => (),
         }
 
         write!(fmt, "{}: ", self.name)?;
@@ -199,12 +201,32 @@ impl FmtType for EdlFnParam {
         if self.comptime {
             write!(fmt, "comptime ")?;
         }
-        if self.async_ {
-            write!(fmt, "async ")?;
+        match self.async_ {
+            AsyncState::Async => write!(fmt, "async ")?,
+            AsyncState::Shared => write!(fmt, "shared ")?,
+            AsyncState::None => (),
         }
 
         write!(fmt, "{}: ", self.name)?;
         self.ty.fmt_type(fmt, types)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AsyncState {
+    Async,
+    Shared,
+    None,
+}
+
+impl AsyncState {
+    pub fn new(async_: bool, shared: bool) -> Self {
+        match (async_, shared) {
+            (true, false) => AsyncState::Async,
+            (false, true) => AsyncState::Shared,
+            (false, false) => AsyncState::None,
+            _ => panic!("invalid async state"),
+        }
     }
 }
 
@@ -213,7 +235,7 @@ pub struct EdlFnParam {
     pub name: String,
     pub mutable: bool,
     pub comptime: bool,
-    pub async_: bool,
+    pub async_: AsyncState,
     pub ty: EdlTypeInstance,
 }
 

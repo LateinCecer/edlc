@@ -25,7 +25,7 @@ use log::{error, info};
 use crate::ast::ast_expression::AstExpr;
 use crate::ast::{AstModule, IntoHir};
 use crate::ast::ast_param_env::{AstParamDef, AstParamEnv};
-use crate::core::edl_fn::{EdlFnArgument, EdlFnParam, EdlFnRet, EdlFnSignature};
+use crate::core::edl_fn::{AsyncState, EdlFnArgument, EdlFnParam, EdlFnRet, EdlFnSignature};
 use crate::core::edl_param_env::{EdlParameterEnv, EdlGenericParam, EdlGenericParamVariant};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlTypeRegistry};
@@ -109,7 +109,7 @@ fn populate_test_resolver(
                         ty: type_reg.generic(env, 0),
                         mutable: false,
                         comptime: false,
-                        async_: false,
+                        async_: AsyncState::None,
                     }
                 ],
                 comptime: true,
@@ -252,14 +252,14 @@ fn populate_test_resolver(
                         name: "config_file".to_string(),
                         mutable: false,
                         comptime: false,
-                        async_: false,
+                        async_: AsyncState::None,
                         ty: type_reg.str(),
                     },
                     EdlFnParam {
                         name: "index".to_string(),
                         mutable: false,
                         comptime: false,
-                        async_: false,
+                        async_: AsyncState::None,
                         ty: type_reg.usize(),
                     }
                 ],

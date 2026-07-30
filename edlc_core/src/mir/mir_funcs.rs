@@ -18,7 +18,7 @@
 mod comptime_value;
 
 use crate::core::edl_error::EdlError;
-use crate::core::edl_fn::FnArgumentConstraints;
+use crate::core::edl_fn::{AsyncState, FnArgumentConstraints};
 use crate::core::edl_impl::{CallResolver, GenericTypeHints};
 use crate::core::edl_param_env::EdlParameterDef;
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeId, EdlTypeInstance, EdlTypeRegistry, FmtType};
@@ -1329,7 +1329,7 @@ pub struct MirFnParam {
     pub ty: MirTypeId,
     pub mutable: bool,
     pub comptime: bool,
-    pub async_: bool,
+    pub async_: AsyncState,
     pub var_id: EdlVarId,
 }
 

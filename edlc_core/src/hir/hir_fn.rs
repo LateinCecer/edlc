@@ -18,7 +18,7 @@
 
 use log::{debug, info};
 use crate::ast::ItemDoc;
-use crate::core::edl_fn::{EdlFnParam, EdlFnSignature, EdlFunctionBody, EdlPreSignature};
+use crate::core::edl_fn::{AsyncState, EdlFnParam, EdlFnSignature, EdlFunctionBody, EdlPreSignature};
 use crate::core::edl_param_env::{EdlParameterDef, EdlParamStack};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlMaybeType, EdlType, EdlTypeId, EdlTypeInstance, FmtType, FunctionState};
 use crate::core::edl_value::EdlConstValue;
@@ -74,7 +74,7 @@ pub struct HirFnParam {
     pub ty: EdlTypeInstance,
     pub mutable: bool,
     pub comptime: bool,
-    pub async_: bool,
+    pub async_: AsyncState,
     pub info: Option<EdlVarId>,
 }
 

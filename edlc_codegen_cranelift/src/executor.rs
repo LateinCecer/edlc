@@ -2230,7 +2230,7 @@ impl Field {
         Field {}
     }
 
-    fn as_device_ptr(async self) -> async DevicePointer<Self> {
+    comptime fn as_device_ptr(async self) -> async DevicePointer<Self> {
         DevicePointer { ptr: 0 }
     }
 }
@@ -2240,11 +2240,11 @@ impl BoundaryField {
         BoundaryField {}
     }
 
-    fn as_device_ptr(async self) -> async DevicePointer<Self> {
+    comptime fn as_device_ptr(async self) -> async DevicePointer<Self> {
         DevicePointer { ptr: 0 }
     }
 
-    fn field_as_ptr(async self) -> async DevicePointer<Field> {
+    comptime fn field_as_ptr(async self) -> async DevicePointer<Field> {
         DevicePointer { ptr: 0 }
     }
 }
@@ -2260,14 +2260,33 @@ async fn init_field(async field: DevicePointer<Field>) {
     print("  >> initializing field <<\n");
 }
 
-// -- simplified higher-level functions
-impl BoundaryField {
-    async fn gradient(self, async dst: Field) {
-        gradient(self.as_device_ptr(), dst.as_device_ptr());
+type LaplaceAction = struct {
+    field: DevicePointer<BoundaryField>,
+    dst: DevicePointer<Field>,
+};
+
+impl LaplaceAction {
+    comptime fn new(shared field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) -> async Self {
+        LaplaceAction { field, dst }
     }
 
-    async fn laplace(self, async dst: Field) {
-        laplace(self.as_device_ptr(), dst.as_device_ptr());
+    async fn dispatch(async self) {
+        laplace(self.field, self.dst);
+    }
+}
+
+// -- simplified higher-level functions
+impl BoundaryField {
+    async fn gradient(comptime self, comptime async dst: Field) {
+        gradient(comptime { self.as_device_ptr() }, comptime { dst.as_device_ptr() });
+    }
+
+    async fn laplace(comptime self, comptime async dst: Field) {
+        laplace(comptime { self.as_device_ptr() }, comptime { dst.as_device_ptr() });
+    }
+
+    async fn log(self) {
+        print(" >> logging boundary field <<\n");
     }
 }
 
@@ -2279,14 +2298,20 @@ let scalar_field = Field::new();
 
 fn test() {
     print("starting synchronization tests...\n");
-    gradient(p.as_device_ptr(), grad_p.field_as_ptr());
+    gradient(comptime { p.as_device_ptr() }, comptime { grad_p.field_as_ptr() });
     print("gradient calculation dispatched\n");
-    init_field(u.field_as_ptr());
+    init_field(comptime { u.field_as_ptr() });
     print("velocity field init dispatched\n");
 
     // since we use the pressure gradient here, there should be a sync event
-    grad_p.laplace(scalar_field);
+    // grad_p.laplace(scalar_field);
+    let laplace_action = comptime {
+        LaplaceAction::new(grad_p.as_device_ptr(), scalar_field.as_device_ptr())
+    };
+    laplace_action.dispatch();
     print("laplace calculation dispatched\n");
+    grad_p.log();
+    print("logging dispatched\n");
 }
         "#))?;
 

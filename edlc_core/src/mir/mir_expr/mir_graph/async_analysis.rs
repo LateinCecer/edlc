@@ -35,7 +35,7 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, SealEval, TransferCopy, Transfer
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{BlockLocalStatementUid, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
+use crate::mir::mir_expr::{BlockLocalStatementUid, Context, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::prelude::mir_funcs::MirFuncId;
@@ -43,6 +43,7 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use crate::core::edl_fn::AsyncState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -80,6 +81,8 @@ pub struct AsyncConnState {
     /// dependencies list, as it makes no sense to hold the same source twice in two separate
     /// lists.
     references: HashSet<AsyncSource>,
+    /// Must sync on exit.
+    must_sync: bool,
 }
 
 impl AsyncConnState {
@@ -88,6 +91,7 @@ impl AsyncConnState {
         Self {
             dependencies: HashSet::from([source]),
             references: HashSet::new(),
+            must_sync: true,
         }
     }
 
@@ -160,6 +164,7 @@ impl LatticeElement for AsyncConnState {
         Ok(Self {
             dependencies: self.dependencies.intersection(&other.dependencies).cloned().collect(),
             references: self.references.intersection(&other.references).cloned().collect(),
+            must_sync: true,
         })
     }
 
@@ -177,6 +182,7 @@ impl LatticeElement for AsyncConnState {
         Ok(Self {
             dependencies,
             references: refs,
+            must_sync: true,
         })
     }
 
@@ -337,7 +343,7 @@ impl AsyncConnectome {
         let mut ref_ids = vec![];
 
         let mut sorted_ids = map.keys().cloned().collect::<Vec<_>>();
-        sorted_ids.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+        sorted_ids.sort_by_key(|lhs| lhs.0);
 
         let mut find_id = |source: &AsyncSource| -> AsyncId {
             if let Some(id) = source_to_id.get(source) {
@@ -472,7 +478,7 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
                 .chain(sig.params.iter().filter(|param| param.comptime))
                 .zip(cfg.get_root_parameters().iter()) {
                 let data = ctx.get_async_data(value);
-                ctx.parameters.push(if param.async_ {
+                ctx.parameters.push(if matches!(param.async_, AsyncState::Async) {
                     AsyncSource::AsyncParam(data)
                 } else {
                     AsyncSource::SyncParam(data)
@@ -611,11 +617,15 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
                 param_idx += 1;
                 value
             };
-            if param_def.async_ {
-                state.extend(&input.element_value(&value));
-            } else {
-                // TODO this is the critical part. To be tested!
-                state.extend_as_reference(&input.element_value(&value));
+
+            match param_def.async_ {
+                AsyncState::Async => {
+                    state.extend(&input.element_value(&value));
+                },
+                AsyncState::Shared => {
+                    state.extend_as_reference(&input.element_value(&value));
+                },
+                AsyncState::None => (),
             }
         }
         Ok(input.replace(target, state))
@@ -1242,41 +1252,44 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             source_states: source_state,
         };
 
-        for statement in block.statements.iter() {
-            match statement {
-                Statement::VarDef { var: _, value, uid, debug: _ } => {
-                    match until {
-                        Some(until) if until == uid => break,
-                        _ => (),
-                    }
+        if block.ctx == Context::Runtime {
+            // syncs and records are runtime functions and can only be inserted into a runtime context
+            for statement in block.statements.iter() {
+                match statement {
+                    Statement::VarDef { var: _, value, uid, debug: _ } => {
+                        match until {
+                            Some(until) if until == uid => break,
+                            _ => (),
+                        }
 
-                    if MirExprVariant::Call == value.ty {
-                        // If there is a function call, we sync all function arguments that are
-                        // currently floating.
-                        let loc = MirGraphLoc::new(*block_ref, *uid);
-                        let call = cfg.expressions.get_call(*value);
-                        call.transfer(
-                            &mut exit_state,
-                            self,
-                            &MirLoc::GraphLoc(loc),
-                        )?;
-                        self.record_event(&loc, &mut exit_state);
+                        if MirExprVariant::Call == value.ty {
+                            // If there is a function call, we sync all function arguments that are
+                            // currently floating.
+                            let loc = MirGraphLoc::new(*block_ref, *uid);
+                            let call = cfg.expressions.get_call(*value);
+                            call.transfer(
+                                &mut exit_state,
+                                self,
+                                &MirLoc::GraphLoc(loc),
+                            )?;
+                            self.record_event(&loc, &mut exit_state);
+                        }
                     }
-                }
-                Statement::VarMove { uid, .. }
-                | Statement::VarCopy { uid, .. }
-                | Statement::Drop { uid, .. } => {
-                    // drop statements do not influence the flow states of async sources
-                    match until {
-                        Some(until) if until == uid => break,
-                        _ => (),
+                    Statement::VarMove { uid, .. }
+                    | Statement::VarCopy { uid, .. }
+                    | Statement::Drop { uid, .. } => {
+                        // drop statements do not influence the flow states of async sources
+                        match until {
+                            Some(until) if until == uid => break,
+                            _ => (),
+                        }
                     }
-                }
-                Statement::Sync { .. } => {
-                    unreachable!("synchronization statements should not exist in the CFG at this stage")
-                }
-                Statement::Record { .. } => {
-                    unreachable!("event record statements should not exist in the CFG at this stage")
+                    Statement::Sync { .. } => {
+                        unreachable!("synchronization statements should not exist in the CFG at this stage")
+                    }
+                    Statement::Record { .. } => {
+                        unreachable!("event record statements should not exist in the CFG at this stage")
+                    }
                 }
             }
         }
@@ -1541,7 +1554,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                     param_idx += 1;
                                     value
                                 };
-                                if param.async_ {
+                                if matches!(param.async_, AsyncState::Async) {
                                     // register for this parameter
                                     self.conn.dependencies[value].iter().for_each(|id| {
                                         event_pool_builder.push_data(*id);

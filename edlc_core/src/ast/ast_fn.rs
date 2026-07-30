@@ -22,7 +22,7 @@ use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
 use crate::ast::ast_where::AstWhere;
-use crate::core::edl_fn::EdlPreSignature;
+use crate::core::edl_fn::{AsyncState, EdlPreSignature};
 use crate::core::edl_type::{EdlExtendedType, EdlMaybeType};
 use crate::core::edl_value::EdlConstValue;
 use crate::file::ModuleSrc;
@@ -30,7 +30,7 @@ use crate::hir::hir_fn::{HirFn, HirFnParam, HirFnSignature};
 use crate::hir::{HirError, HirPhase, IntoEdl};
 use crate::hir::hir_trait_fn::{HirTraitFnParam, HirTraitFnSignature};
 use crate::issue;
-use crate::issue::{SrcError, SrcRange};
+use crate::issue::{SrcError, SrcRange, TypeArgument, TypeArguments};
 use crate::lexer::{KeyWord, LexError, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::prelude::edl_type::EdlEnvId;
@@ -75,6 +75,7 @@ enum AstFnParamModifier {
     CompTime,
     Mutable,
     Async,
+    Shared,
     None,
 }
 
@@ -167,6 +168,10 @@ impl Parsable for AstFnParamModifier {
                 parser.next_token()?;
                 Ok(Self::Async)
             },
+            Ok(local!(Token::Key(KeyWord::Shared))) => {
+                parser.next_token()?;
+                Ok(Self::Shared)
+            }
             _ => Ok(Self::None),
         }
     }
@@ -213,10 +218,42 @@ impl AstFnParam {
     }
 }
 
+fn convert_async_state(
+    async_: bool,
+    shared: bool,
+    pos: &SrcPos,
+    src: &ModuleSrc,
+    phase: &mut HirPhase,
+) -> Result<AsyncState, AstTranslationError> {
+    if async_ && shared {
+        phase.report_error(
+            TypeArguments::new(&[
+                TypeArgument::new_display(&"function argument cannot be marked as `async` and `shared` at the same time as they are mutually exclusive"),
+            ]),
+            &[
+                SrcError::Single {
+                    src: src.clone(),
+                    pos: pos.clone().into(),
+                    error: TypeArguments::new(&[
+                        TypeArgument::new_display(&"self-parameter labeled as async and shared"),
+                    ])
+                }
+            ],
+            None,
+        );
+        Err(AstTranslationError::InvalidFunctionModifier {
+            pos: *pos,
+            src: src.clone(),
+        })
+    } else {
+        Ok(AsyncState::new(async_, shared))
+    }
+}
+
 impl AstSelfParameter {
 
     fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
-        let (mutable, comptime, asy) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
+        let (mutable, comptime, asy, shared) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
         let SelfType::Type(hir_type) = parser.res.find_self_type().clone() else {
             panic!("`Self` type for implementation was not defined properly");
         };
@@ -232,7 +269,7 @@ impl AstSelfParameter {
             }
             AstFnSelfParamType::Value => hir_type,
         };
-
+        let asy = convert_async_state(asy, shared, &self.pos, src, parser)?;
         Ok(HirFnParam {
             name: "self".to_string(),
             pos: self.pos,
@@ -246,11 +283,12 @@ impl AstSelfParameter {
 }
 
 impl AstSelfParameter {
-    fn trait_hir_repr(self, parser: &mut HirPhase) -> Result<HirTraitFnParam, AstTranslationError> {
-        let (mutable, comptime, asy) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
+    fn trait_hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirTraitFnParam, AstTranslationError> {
+        let (mutable, comptime, asy, shared) = AstFnParamModifier::flatten_modifiers(self.modifiers.iter());
         let SelfType::Trait(hir_type) = parser.res.find_self_type().clone() else {
             panic!("`Self` type for trait definition was not defined properly");
         };
+        let asy = convert_async_state(asy, shared, &self.pos, src, parser)?;
         // todo: deal with reference types to self here
 
         Ok(HirTraitFnParam {
@@ -265,19 +303,21 @@ impl AstSelfParameter {
 }
 
 impl AstFnParamModifier {
-    fn flatten_modifiers<'a, I: IntoIterator<Item=&'a Self>>(vec: I) -> (bool, bool, bool) {
+    fn flatten_modifiers<'a, I: IntoIterator<Item=&'a Self>>(vec: I) -> (bool, bool, bool, bool) {
         let mut mutable = false;
         let mut comptime = false;
         let mut asy = false;
+        let mut shared = false;
         for m in vec {
             match m {
                 AstFnParamModifier::Mutable => mutable = true,
                 AstFnParamModifier::CompTime => comptime = true,
                 AstFnParamModifier::Async => asy = true,
+                AstFnParamModifier::Shared => shared = true,
                 AstFnParamModifier::None => (),
             }
         }
-        (mutable, comptime, asy)
+        (mutable, comptime, asy, shared)
     }
 }
 
@@ -459,7 +499,7 @@ impl AstFnSignature {
 impl AstFnParam {
 
     fn hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirFnParam, AstTranslationError> {
-        let (mutable, comptime, asy) = self.flatten_modifiers();
+        let (mutable, comptime, asy, shared) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
         let edl_type = hir_type.edl_repr(parser).wrap_ast(src)?;
 
@@ -470,7 +510,7 @@ impl AstFnParam {
                 name: self.name,
             });
         };
-
+        let asy = convert_async_state(asy, shared, &self.pos, src, parser)?;
         Ok(HirFnParam {
             name: self.name,
             pos: self.pos,
@@ -485,7 +525,7 @@ impl AstFnParam {
 
 impl AstFnParam {
     fn trait_hir_repr(self, parser: &mut HirPhase, src: &ModuleSrc) -> Result<HirTraitFnParam, AstTranslationError> {
-        let (mutable, comptime, asy) = self.flatten_modifiers();
+        let (mutable, comptime, asy, shared) = self.flatten_modifiers();
         let mut hir_type = self.ty.hir_repr(parser)?;
         let ty = hir_type.edl_extended_repr(parser).wrap_ast(src)?;
 
@@ -496,7 +536,7 @@ impl AstFnParam {
                 name: self.name,
             });
         }
-
+        let asy = convert_async_state(asy, shared, &self.pos, src, parser)?;
         Ok(HirTraitFnParam {
             name: self.name,
             pos: self.pos,
@@ -509,7 +549,7 @@ impl AstFnParam {
 }
 
 impl AstFnParam {
-    fn flatten_modifiers(&self) -> (bool, bool, bool) {
+    fn flatten_modifiers(&self) -> (bool, bool, bool, bool) {
         AstFnParamModifier::flatten_modifiers(self.modifiers.iter())
     }
 }
@@ -772,7 +812,7 @@ impl AstFnSignature {
 
         let mut params = Vec::new();
         if let Some(self_param) = self.self_parameter {
-            params.push(self_param.trait_hir_repr(parser)?);
+            params.push(self_param.trait_hir_repr(parser, &self.src)?);
         }
         for param in self.params.into_iter() {
             params.push(param.trait_hir_repr(parser, &self.src)?);

@@ -16,7 +16,7 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::ast::ItemDoc;
-use crate::core::edl_fn::{EdlFnParam, EdlFnSignature};
+use crate::core::edl_fn::{AsyncState, EdlFnParam, EdlFnSignature};
 use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlEnvId, EdlExtendedType, EdlTypeInstance};
 use crate::file::ModuleSrc;
@@ -32,7 +32,7 @@ pub struct HirTraitFnParam {
     pub ty: EdlExtendedType,
     pub mutable: bool,
     pub comptime: bool,
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 pub struct HirTraitFnSignature {
