@@ -26,6 +26,8 @@ use crate::prelude::ExecutorVM;
 pub struct MirInitAssign {
     pub off: usize,
     pub val: MirValue,
+    /// For aggregate types: is the parameter defined as `async` in the type definition?
+    pub async_: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,7 +47,7 @@ impl MirTypeInit {
     ) -> Result<(), ExecutionError> {
         let (target_range, target_ty) = stack_frame.get_offset(target, vm).unwrap();
         assert_eq!(target_ty, self.ty);
-        for MirInitAssign { off, val } in self.inits.iter() {
+        for MirInitAssign { off, val, async_: _ } in self.inits.iter() {
             let source = stack_frame.get_offset(val, vm).unwrap();
             let dst_offset = target_range.start + *off;
             vm.memcpy(

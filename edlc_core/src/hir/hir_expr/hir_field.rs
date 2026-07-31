@@ -47,6 +47,7 @@ struct CompilerInfo {
     /// A field inherits its mutability from the parent.
     mutable: ExtConstUid,
     finalized_mutable: InternalMutability,
+    field_is_async: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -482,7 +483,7 @@ impl EdlStructVariant {
                 });
             }
         };
-        adapt_member_type(base_ty, ty, exp, type_reg, pos)
+        adapt_member_type(base_ty, ty.ty, exp, type_reg, pos)
     }
 
     fn verify_member(
@@ -636,7 +637,7 @@ impl EdlStructVariant {
             }
         };
 
-        if let Err(err) = adapt_member_type(base_ty, ty, exp, &phase.types, pos) {
+        if let Err(err) = adapt_member_type(base_ty, ty.ty, exp, &phase.types, pos) {
             phase.report_error(
                 issue::format_type_args!(
                     format_args!("failed to adapt member type to field access base type")
@@ -772,8 +773,11 @@ impl ResolveTypes for HirField {
                     };
 
                     // get parameter environment
-                    match infer.at_env(node, &stack).eq(&own_uid, &ty) {
-                        Ok(_) => Ok(()),
+                    match infer.at_env(node, &stack).eq(&own_uid, &ty.ty) {
+                        Ok(_) => {
+                            self.info.as_mut().unwrap().field_is_async = ty.async_;
+                            Ok(())
+                        },
                         Err(err) => Err(report_infer_error(err, infer_state, phase)),
                     }
                 }
@@ -828,6 +832,7 @@ impl ResolveTypes for HirField {
                 base_stencil,
                 mutable,
                 finalized_mutable: InternalMutability::Undetermined,
+                field_is_async: false,
             });
             own_uid
         }

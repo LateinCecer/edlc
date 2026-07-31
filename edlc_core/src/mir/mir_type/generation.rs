@@ -95,14 +95,14 @@ impl CTypeGenerator {
         match members {
             EdlStructVariant::List(list) => {
                 for (i, m) in list.iter().enumerate() {
-                    let ty = m.resolve_generics(params, edl_reg);
+                    let ty = m.ty.resolve_generics(params, edl_reg);
                     let ty = mir_reg.mir_id(&ty, edl_reg)?;
                     builder.add(i.to_string(), ty, mir_reg);
                 }
             }
             EdlStructVariant::Named(map) => {
                 for (name, m) in map.iter() {
-                    let ty = m.resolve_generics(params, edl_reg);
+                    let ty = m.ty.resolve_generics(params, edl_reg);
                     let ty = mir_reg.mir_id(&ty, edl_reg)?;
                     builder.add(name.clone(), ty, mir_reg);
                 }

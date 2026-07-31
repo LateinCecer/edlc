@@ -21,7 +21,7 @@ use crate::prelude::edl_type::EdlTypeId;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use crate::core::edl_error::EdlError;
-use crate::core::edl_type::{EdlEnvId, EdlRepresentation, EdlStructVariant, EdlTypeRegistry, EdlTypeState};
+use crate::core::edl_type::{EdlEnvId, EdlRepresentation, EdlStructVariant, EdlTypeRegistry, EdlTypeState, Member};
 
 #[derive(Debug, Clone, PartialEq)]
 /// A tuple is essentially a base type with a variable number of generic parameters.
@@ -31,7 +31,13 @@ struct EdlTuple {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EdlDictNameSet(Vec<String>);
+struct DictMember {
+    name: String,
+    async_: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EdlDictNameSet(Vec<DictMember>);
 
 impl Display for EdlDictNameSet {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -43,7 +49,7 @@ impl Display for EdlDictNameSet {
             } else {
                 first = false;
             }
-            write!(f, " {}", name)?;
+            write!(f, " {}", name.name)?;
         }
         if !self.0.is_empty() {
             write!(f, " ")?;
@@ -53,12 +59,16 @@ impl Display for EdlDictNameSet {
 }
 
 impl EdlDictNameSet {
-    pub fn new<I>(content: I) -> Self
-    where I: IntoIterator,
-          I::Item: AsRef<str> {
-
+    pub fn new<I, S>(content: I) -> Self
+    where
+        I: IntoIterator<Item=(S, bool)>,
+        S: AsRef<str>,
+    {
         let mut content = content.into_iter()
-            .map(|val| val.as_ref().to_string())
+            .map(|(name, async_)| DictMember {
+                name: name.as_ref().to_string(),
+                async_,
+            })
             .collect::<Vec<_>>();
         content.sort();
         EdlDictNameSet(content)
@@ -72,7 +82,10 @@ impl EdlDictNameSet {
         let mut members = HashMap::new();
         for (i, name) in self.0.iter().enumerate() {
             let ty = reg.find_generic_type(env_id, i)?;
-            members.insert(name.clone(), reg.new_type_instance(ty).unwrap());
+            members.insert(name.name.clone(), Member {
+                ty: reg.new_type_instance(ty).unwrap(),
+                async_: name.async_,
+            });
         }
         Ok(EdlTypeState::Struct {
             can_init: true,
@@ -90,7 +103,10 @@ pub fn create_tuple_state(
     let mut members = Vec::new();
     for i in 0..num_items {
         let ty = reg.find_generic_type(env_id, i)?;
-        members.push(reg.new_type_instance(ty).unwrap());
+        members.push(Member {
+            ty: reg.new_type_instance(ty).unwrap(),
+            async_: false,
+        });
     }
     Ok(EdlTypeState::Struct {
         can_init: true,
@@ -166,7 +182,7 @@ impl AnonymousTypes {
         let mut env = EdlParameterEnv::default();
         for i in members.0.iter() {
             env.params.push(EdlGenericParam {
-                name: i.to_uppercase(),
+                name: i.name.to_uppercase(),
                 variant: EdlGenericParamVariant::Type
             });
         }

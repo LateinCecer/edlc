@@ -16,7 +16,7 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
-use crate::core::edl_type::{EdlMaybeType, EdlType, EdlTypeInitError, EdlTypeInstance, EdlTypeState};
+use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInitError, EdlTypeInstance, EdlTypeState};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
 use crate::file::ModuleSrc;
@@ -61,6 +61,7 @@ pub struct NamedParameter {
     pub name: String,
     pub pos: SrcPos,
     pub value: HirExpression,
+    pub async_: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -744,7 +745,7 @@ impl HirTypeInit {
         infer_state: &mut InferState,
         ty: &EdlTypeInstance,
         params: &mut [HirExpression],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         // resolve parameters first to check for references
         let types = Self::pre_resolve_list_parameters(phase, infer_state, params)?;
         // insert constraints
@@ -768,7 +769,7 @@ impl HirTypeInit {
         infer_state: &mut InferState,
         ty: &EdlTypeInstance,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         // resolve parameters first to check for references
         let types = Self::pre_resolved_named_parameters(phase, infer_state, params)?;
         // insert constraints
@@ -793,7 +794,7 @@ impl HirTypeInit {
         ty: &EdlTypeInstance,
         variant: &str,
         params: &mut [HirExpression],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         let types = Self::pre_resolve_list_parameters(phase, infer_state, params)?;
         // insert constraints
         let mut infer = phase.infer_from(infer_state);
@@ -820,7 +821,7 @@ impl HirTypeInit {
         ty: &EdlTypeInstance,
         variant: &str,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         let types = Self::pre_resolved_named_parameters(phase, infer, params)?;
         // insert constraints
         let mut infer = phase.infer_from(infer);
@@ -845,7 +846,7 @@ impl HirTypeInit {
         phase: &mut HirPhase,
         infer: &mut InferState,
         params: &mut [HirExpression],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         let ty = phase.types.tuple((0..params.len())
             .map(|_| EdlMaybeType::Unknown))
             .map_err(|err| HirError::new_edl(pos, err))?;
@@ -859,9 +860,9 @@ impl HirTypeInit {
         phase: &mut HirPhase,
         infer: &mut InferState,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<bool>, HirError> {
+    ) -> Result<Vec<(bool, bool)>, HirError> {
         let ty = phase.types.dict(params.iter()
-            .map(|p| (p.name.clone(), EdlMaybeType::Unknown)))
+            .map(|p| (p.name.clone(), EdlMaybeType::Unknown, p.async_)))
             .map_err(|err| HirError::new_edl(pos, err))?;
         Self::constraint_struct_named_params(node, uid, pos, phase, infer, &ty, params)
     }
@@ -928,6 +929,11 @@ impl MakeGraph for HirTypeInit {
             });
         }
         let EdlMaybeType::Fixed(ty) = ty else { unreachable!() };
+        let EdlType::Type {
+            state: type_state, ..
+        } = graph.hir_phase.types.get_type(ty.ty).unwrap() else {
+            unreachable!()
+        };
 
         let mir_ty = graph.mir_phase.types.mir_id(ty, &graph.hir_phase.types)?;
         assert_eq!(&mir_ty, graph.graph.get_var_type(&target));
@@ -938,7 +944,17 @@ impl MakeGraph for HirTypeInit {
         match &self.variant {
             Variant::StructList { params, .. }
             | Variant::Tuple { params, .. } => {
-                for (index, element) in params.iter().enumerate() {
+                let EdlTypeState::Struct {
+                    can_init: true,
+                    members: EdlStructVariant::List(members),
+                    ..
+                } = type_state.clone() else {
+                    unreachable!()
+                };
+
+                for ((index, element), m) in params.iter().enumerate()
+                    .zip(members.iter()) {
+
                     let element_ty = element.mir_deref_type(graph)?;
                     let element_value = graph.graph
                         .create_temp_variable(element_ty);
@@ -948,12 +964,23 @@ impl MakeGraph for HirTypeInit {
                     inits.push(MirInitAssign {
                         off: offset.offset,
                         val: element_value,
+                        async_: m.async_,
                     });
                 }
             }
             Variant::StructNamed { params, .. }
             | Variant::Dict { params, .. } => {
+                let EdlTypeState::Struct {
+                    can_init: true,
+                    members: EdlStructVariant::Named(members),
+                    ..
+                } = type_state.clone() else {
+                    unreachable!()
+                };
+
                 for NamedParameter { name, value, .. } in params.iter() {
+                    let m = &members[name];
+
                     let element_ty = value.mir_deref_type(graph)?;
                     let element_value = graph.graph
                         .create_temp_variable(element_ty);
@@ -963,6 +990,7 @@ impl MakeGraph for HirTypeInit {
                     inits.push(MirInitAssign {
                         off: offset.offset,
                         val: element_value,
+                        async_: m.async_,
                     })
                 }
             }

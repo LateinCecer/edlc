@@ -719,7 +719,11 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
     ) -> Result<bool, AsyncConnConflict> {
         let mut state = AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)));
         for init in &self.inits {
-            state.extend(&input.element_value(&init.val));
+            if init.async_ {
+                state.extend(&input.element_value(&init.val));
+            } else {
+                state.extend_as_reference(&input.element_value(&init.val));
+            }
         }
         Ok(input.replace(target, state))
     }

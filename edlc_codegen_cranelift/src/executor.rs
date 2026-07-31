@@ -2262,11 +2262,14 @@ async fn init_field(async field: DevicePointer<Field>) {
 
 type LaplaceAction = struct {
     field: DevicePointer<BoundaryField>,
-    dst: DevicePointer<Field>,
+    async dst: DevicePointer<Field>,
 };
 
 impl LaplaceAction {
-    comptime fn new(shared field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) -> async Self {
+    comptime fn new(
+        shared field: DevicePointer<BoundaryField>,
+        async dst: DevicePointer<Field>,
+    ) -> async Self {
         LaplaceAction { field, dst }
     }
 
@@ -2308,6 +2311,12 @@ fn test() {
     let laplace_action = comptime {
         LaplaceAction::new(grad_p.as_device_ptr(), scalar_field.as_device_ptr())
     };
+    // let laplace_action = comptime {
+    //     LaplaceAction {
+    //         field: grad_p.as_device_ptr(),
+    //         dst: scalar_field.as_device_ptr(),
+    //     }
+    // };
     laplace_action.dispatch();
     print("laplace calculation dispatched\n");
     grad_p.log();

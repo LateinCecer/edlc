@@ -25,7 +25,7 @@ use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::InitType;
 use crate::hir::hir_expr::hir_type_init::{HirTypeInit, NamedParameter};
 use crate::hir::HirPhase;
-use crate::lexer::{LexError, Punct, SrcPos, Token};
+use crate::lexer::{KeyWord, LexError, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
 
@@ -48,6 +48,7 @@ pub struct AstStructMemberInit {
     name: String,
     pub pos: SrcPos,
     value: AstExpr,
+    async_: bool,
 }
 
 
@@ -263,7 +264,7 @@ impl Parsable for InitVariant {
 }
 
 impl AstStructMemberInit {
-    pub fn from_name(name: String, pos: SrcPos, scope: ScopeId, src: ModuleSrc) -> Self {
+    pub fn from_name(name: String, pos: SrcPos, scope: ScopeId, src: ModuleSrc, async_: bool) -> Self {
         let value: AstExpr = AstTypeName {
             path: vec![AstTypeNameEntry::new(
                 pos,
@@ -277,20 +278,29 @@ impl AstStructMemberInit {
             pos,
             name,
             value,
+            async_,
         }
     }
 
-    pub fn from_value(name: String, pos: SrcPos, value: AstExpr) -> Self {
+    pub fn from_value(name: String, pos: SrcPos, value: AstExpr, async_: bool) -> Self {
         AstStructMemberInit {
             name,
             pos,
             value,
+            async_,
         }
     }
 }
 
 impl Parsable for AstStructMemberInit {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
+        let async_ = if matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
+            parser.next_token()?;
+            true
+        } else {
+            false
+        };
+
         let (name, pos) = expect_token!(parser; (Token::Ident(name)), pos => (name, pos)
             expected "struct member name identifier")?;
         let value = if let Ok(local!(Token::Punct(Punct::Colon))) = parser.peak() {
@@ -312,6 +322,7 @@ impl Parsable for AstStructMemberInit {
             pos,
             name,
             value,
+            async_,
         })
     }
 }
@@ -430,6 +441,7 @@ impl TypeInitExpr {
                                                 pos: m.pos,
                                                 name: m.name.clone(),
                                                 value,
+                                                async_: m.async_,
                                             })
                                     })
                                     .collect::<Result<Vec<_>, AstTranslationError>>()?;
@@ -690,7 +702,12 @@ impl IntoHir for TypeInitExpr {
                     let parameters = members.into_iter()
                         .map(|item| {
                             let value = item.value.hir_repr(parser);
-                            value.map(|value| NamedParameter { pos: item.pos, name: item.name, value })
+                            value.map(|value| NamedParameter {
+                                pos: item.pos,
+                                name: item.name,
+                                value,
+                                async_: item.async_,
+                            })
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(HirTypeInit::dict(pos, self.src, self.scope, parameters))

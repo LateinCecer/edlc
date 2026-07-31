@@ -33,7 +33,7 @@ impl<Runtime> Compilable<Runtime> for MirTypeInit {
     ) -> Result<(), MirError<JIT<Runtime>>> {
         let target_ty = *backend.layout.get_ty(target).unwrap();
         assert_eq!(target_ty, self.ty);
-        for MirInitAssign { off, val } in &self.inits {
+        for MirInitAssign { off, val, .. } in &self.inits {
             backend.layout.cpy_offset(
                 val,
                 target,

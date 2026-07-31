@@ -25,7 +25,14 @@ use crate::core::edl_fn::{EdlFnSignature, EdlFunctionBody};
 use crate::core::edl_param_env::{AdaptOther, AdaptOtherWithStack, Adaptable, AdaptableWithStack, EdlGenericParam, EdlGenericParamValue, EdlGenericParamVariant, EdlParamStack, EdlParameterDef, EdlParameterEnv};
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
 use crate::core::edl_type::anon::AnonymousTypes;
-pub use crate::core::edl_type::type_def::{EdlEnumVariant, EdlRepresentation, EdlStructVariant, EdlTypeState, EdlTypeInitError};
+pub use crate::core::edl_type::type_def::{
+    EdlEnumVariant,
+    EdlRepresentation,
+    EdlStructVariant,
+    EdlTypeState,
+    EdlTypeInitError,
+    Member,
+};
 use crate::core::edl_value::{EdlConstValue, EdlLiteralValue};
 use crate::core::index_map::{IndexMap, IndexMapIter, IndexMapViewMut};
 use crate::documentation::{DocCompilerState, DocConstValue, DocElement, TypeDoc, TypeNameSegmentDoc};
@@ -1275,11 +1282,11 @@ impl EdlTypeRegistry {
     }
 
     pub fn dict<I>(&mut self, members: I) -> Result<EdlTypeInstance, EdlError>
-    where I: IntoIterator<Item=(String, EdlMaybeType)> {
+    where I: IntoIterator<Item=(String, EdlMaybeType, bool)> {
         let mut names = Vec::new();
         let mut types = Vec::new();
-        for (name, ty) in members.into_iter() {
-            names.push(name);
+        for (name, ty, async_) in members.into_iter() {
+            names.push((name, async_));
             types.push(if let EdlMaybeType::Fixed(t) = ty {
                 EdlGenericParamValue::Type(t)
             } else {

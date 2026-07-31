@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
-use crate::core::edl_type::{EdlMaybeType, EdlStructVariant};
+use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, Member};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirDictMember;
 use crate::hir::{HirPhase, IntoEdl};
@@ -93,7 +93,10 @@ impl StructDef {
                             src: self.src.clone(),
                         });
                     };
-                    members.insert(m.name.clone(), edl_ty);
+                    members.insert(m.name.clone(), Member {
+                        ty: edl_ty,
+                        async_: m.async_,
+                    });
                 }
                 Ok(EdlStructVariant::Named(members))
             }
@@ -108,7 +111,7 @@ impl StructDef {
                             src: self.src.clone(),
                         });
                     };
-                    members.push(edl_ty);
+                    members.push(Member { ty: edl_ty, async_: m.async_ });
                 }
                 Ok(EdlStructVariant::List(members))
             }
@@ -269,6 +272,7 @@ impl IntoHir for AstStructMember {
             name: self.name,
             ty: self.ty.hir_repr(phase)?,
             doc: self.doc,
+            async_: self.async_,
         })
     }
 }

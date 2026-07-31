@@ -25,7 +25,7 @@ use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::hir_expr::HirExpression;
 use crate::hir::HirPhase;
-use crate::lexer::{Punct, SrcPos, SrcToken, Token};
+use crate::lexer::{KeyWord, Punct, SrcPos, SrcToken, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
 use crate::resolver::ScopeId;
 
@@ -207,6 +207,15 @@ impl AstBlockOrInit {
                 }
             }
 
+            let async_ = if content.is_empty()
+                && allow_init
+                && matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
+
+                Some(parser.next_token()?)
+            } else {
+                None
+            };
+
             // parse expression
             let expr = AstExpr::parse(parser)?;
             if content.is_empty() && allow_init {
@@ -223,7 +232,7 @@ impl AstBlockOrInit {
                         } = name.path.pop().unwrap();
 
                         let value = AstExpr::parse(parser)?;
-                        let m = AstStructMemberInit::from_value(name.clone(), pos, value);
+                        let m = AstStructMemberInit::from_value(name.clone(), pos, value, async_.is_some());
                         // continue with block init
                         return Self::continue_parse_block_init(vec![m], InitReason::NamedParameter(reason_pos, name), parser);
                     }
@@ -239,10 +248,18 @@ impl AstBlockOrInit {
                             ..
                         } = name.path.pop().unwrap();
 
-                        let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src);
+                        let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src, async_.is_some());
                         // continue with block init
                         return Self::continue_parse_block_init(vec![m], InitReason::Comma(reason_pos, name), parser);
                     }
+                }
+
+                if let Some(async_) = async_ {
+                    // we're not entering init mode, but there was an `async`
+                    return Err(ParseError::UnexpectedToken(
+                        Box::new(async_),
+                        "statement or expression in body block".to_string(),
+                    ));
                 }
             }
             need_termination = !expr.is_self_terminated();

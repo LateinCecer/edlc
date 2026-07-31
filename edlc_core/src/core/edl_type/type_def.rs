@@ -96,13 +96,19 @@ pub enum EdlTypeState {
 }
 
 #[derive(Clone, Debug)]
+pub struct Member {
+    pub ty: EdlTypeInstance,
+    pub async_: bool,
+}
+
+#[derive(Clone, Debug)]
 pub enum EdlStructVariant {
     /// A struct or enum variant with unnamed, positional members.
     ///
     /// ```
     /// struct List(i32, usize, f32);
     /// ```
-    List(Vec<EdlTypeInstance>),
+    List(Vec<Member>),
     /// A struct or enum variant with named members
     ///
     /// ```
@@ -112,7 +118,7 @@ pub enum EdlStructVariant {
     ///     val: f32,
     /// }
     /// ```
-    Named(HashMap<String, EdlTypeInstance>),
+    Named(HashMap<String, Member>),
     /// A zero-sized struct or enum variant.
     ///
     /// ```
@@ -164,7 +170,7 @@ impl EdlStructVariant {
         &self,
         values: I,
         infer_at: &mut InferAt<'_, '_, '_>,
-    ) -> Result<Vec<bool>, EdlTypeInitError> {
+    ) -> Result<Vec<(bool, bool)>, EdlTypeInitError> {
         match self {
             EdlStructVariant::List(list) => {
                 let mut deref = Vec::new();
@@ -173,8 +179,8 @@ impl EdlStructVariant {
                     .enumerate() {
                     // check for dereferencing
                     let (base, auto_dereference) = infer_at.auto_deference(value);
-                    deref.push(auto_dereference);
-                    if let Err(err) = infer_at.eq(&base, template) {
+                    deref.push((auto_dereference, template.async_));
+                    if let Err(err) = infer_at.eq(&base, &template.ty) {
                         return Err(EdlTypeInitError::ListInfer(idx, err));
                     }
                 }
@@ -196,7 +202,7 @@ impl EdlStructVariant {
         &self,
         values: I,
         infer_at: &mut InferAt<'_, '_, '_>,
-    ) -> Result<Vec<bool>, EdlTypeInitError> {
+    ) -> Result<Vec<(bool, bool)>, EdlTypeInitError> {
         match self {
             EdlStructVariant::List(_) => Err(EdlTypeInitError::ExpectedNamed),
             EdlStructVariant::Named(map) => {
@@ -205,8 +211,8 @@ impl EdlStructVariant {
                     let template = map.get(&name)
                         .ok_or(EdlTypeInitError::NoSuchParameter(name.clone()))?;
                     let (base, auto_dereference) = infer_at.auto_deference(value);
-                    deref.push(auto_dereference);
-                    infer_at.eq(&base, template)
+                    deref.push((auto_dereference, template.async_));
+                    infer_at.eq(&base, &template.ty)
                         .map_err(|err| EdlTypeInitError::NamedInfer(name, err))?;
                 }
                 Ok(deref)

@@ -535,6 +535,7 @@ pub struct HirDictMember {
     pub name: String,
     pub ty: HirType,
     pub doc: Option<ItemDoc>,
+    pub async_: bool,
 }
 
 
@@ -605,7 +606,7 @@ impl IntoEdl for HirType {
             HirType::Dict(pos, members) => {
                 let members = members.iter()
                     .map(|mem| mem.ty.clone().edl_repr(phase)
-                        .map(|ty| (mem.name.clone(), ty)))
+                        .map(|ty| (mem.name.clone(), ty, mem.async_)))
                     .collect::<Result<Vec<_>, _>>()?;
                 phase.types.dict(members)
                     .map_err(|err| HirError::new_edl(*pos, err))
