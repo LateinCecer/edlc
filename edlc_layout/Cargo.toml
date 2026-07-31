@@ -14,7 +14,7 @@ categories = ["compilers", "science"]
 proc-macro = true
 
 [dependencies]
-edlc_core = { path="../edlc_core" }
+edlc_core = { workspace = true }
 
 syn = "2.0.61"
 quote = "1.0.36"

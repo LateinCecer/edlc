@@ -11,8 +11,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.12"
+version = "0.2.13"
 repository = "https://github.com/LateinCecer/edlc"
 authors = ["Adrian Paskert"]
 license = "Apache-2.0"
+
+[workspace.dependencies]
+edlc_analysis = { version = "0.2.13", path = "edlc_analysis" }
+edlc_core = { version = "0.2.13", path = "edlc_core" }
+edlc_layout = { version = "0.2.13", path = "edlc_layout" }
+edlc_codegen_cranelift = { version = "0.2.13", path = "edlc_codegen_cranelift" }
+edlc_lsp = { version = "0.2.13", path = "edlc_lsp" }
+edlc_docs = { version = "0.2.13", path = "edlc_docs" }
 
