@@ -2169,6 +2169,10 @@ impl MirFlowGraph {
         Scope(scope)
     }
 
+    fn get_root_ctx(&self) -> Option<&Context> {
+        self.get_block(&self.root()).map(|block| &block.ctx)
+    }
+
     /// Creates a new block.
     /// Since this block does not inherit any scopes as it has no parent to inherit from, this
     /// function will always creat a block with a new scope.
@@ -2917,7 +2921,7 @@ impl MirFlowGraph {
         let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types, func_id);
         let mut state = context.create_state();
         WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
-        Ok(AsyncConnectome::new(&state.0.map))
+        Ok(AsyncConnectome::new(&state.0.map, state.1.track_functions))
     }
 
     /// Find SESE regions in the call graph.

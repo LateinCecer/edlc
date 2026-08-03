@@ -936,6 +936,7 @@ impl MakeGraph for HirField {
                 .insert_ref(MirRef::shared_field(
                     base_value,
                     &self.name,
+                    self.info.as_ref().unwrap().field_is_async,
                     self_ty,
                     graph.graph,
                     &graph.mir_phase.types,
@@ -945,6 +946,7 @@ impl MakeGraph for HirField {
                 .insert_ref(MirRef::mut_field(
                     base_value,
                     &self.name,
+                    self.info.as_ref().unwrap().field_is_async,
                     self_ty,
                     graph.graph,
                     &graph.mir_phase.types,

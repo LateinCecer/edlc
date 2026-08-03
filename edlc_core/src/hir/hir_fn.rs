@@ -591,6 +591,53 @@ impl HirFnSignature {
         Ok(())
     }
 
+    pub fn verify(&self, phase: &mut HirPhase) -> Result<(), HirError> {
+        if self.async_ && self.async_return {
+            phase.report_error(
+                TypeArguments::new(&[
+                    TypeArgument::new_display(&"invalid `async` function definition"),
+                ]),
+                &[
+                    SrcError::Single {
+                        pos: self.pos.into(),
+                        src: self.src.clone(),
+                        error: TypeArguments::new(&[
+                            TypeArgument::new_display(&"function is defined as `async` and also has `async` return value"),
+                        ]),
+                    }
+                ],
+                None,
+            );
+            return Err(HirError {
+                pos: self.pos,
+                ty: Box::new(HirErrorType::InvalidAsyncState),
+            });
+        }
+
+        if self.async_ && (self.comptime || self.comptime_only) {
+            phase.report_error(
+                TypeArguments::new(&[
+                    TypeArgument::new_display(&"`async` function must be runtime"),
+                ]),
+                &[
+                    SrcError::Single {
+                        pos: self.pos.into(),
+                        src: self.src.clone(),
+                        error: TypeArguments::new(&[
+                            TypeArgument::new_display(&"function is defined as `comptime` or `?comptime`"),
+                        ])
+                    }
+                ],
+                None,
+            );
+            return Err(HirError {
+                pos: self.pos,
+                ty: Box::new(HirErrorType::InvalidAsyncState),
+            });
+        }
+        Ok(())
+    }
+
     /// This creates a MIR representation of the function signature, with the specified parameter
     /// definitions to generate the specific function implementation.
     ///
@@ -665,7 +712,8 @@ impl HirFn {
         } else {
             HirContext::new(ExecType::Runtime)
         };
-        self.body.verify(phase, &mut ctx, infer_state)
+        self.body.verify(phase, &mut ctx, infer_state)?;
+        self.signature.verify(phase)
     }
 
     pub fn collect_dependencies<B: Backend>(

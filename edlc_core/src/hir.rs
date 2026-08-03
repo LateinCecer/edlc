@@ -1330,6 +1330,7 @@ pub enum HirErrorType {
     TypeInit(EdlTypeInitError),
     NonReferencableExpression(String),
     NotMutable(String),
+    InvalidAsyncState,
 }
 
 impl Display for HirError {
@@ -1479,6 +1480,10 @@ impl Display for HirErrorType {
             }
             HirErrorType::NotMutable(msg) => {
                 write!(f, "Expression is not mutable; {msg}")
+            }
+            HirErrorType::InvalidAsyncState => {
+                write!(f, "Invalid async state: both the entire function and the return value are \
+                marked as `async`")
             }
         }
     }

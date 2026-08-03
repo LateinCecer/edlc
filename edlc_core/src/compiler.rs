@@ -308,6 +308,7 @@ impl EdlCompiler {
         ast_sig.doc = docs;
 
         let mut hir_sig = report_translation!(ast_sig.hir_repr(&mut self.phase), self);
+        hir_sig.verify(&mut self.phase)?;
         // insert function signature into code container
         let full_name = hir_sig.full_name(&mut self.phase).map_err(CompilerError::ResolveError)?;
         let mut func_doc = hir_sig.doc(&DocCompilerState {
@@ -1069,6 +1070,8 @@ edl init --bin
             &[],
             Some(edl_trait::EDL_SEND_TRAIT),
         )?;
+
+        // the `sync` trait marks types that are except from the `async` dependency rules.
         self.parse_trait(
             inline_code!("Sync"),
             inline_code!(""),

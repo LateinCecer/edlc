@@ -46,6 +46,7 @@ pub struct MirRef {
     pub offset: RefOffset,
     pub ty: MirTypeId,
     src_ty: MirTypeId,
+    pub async_field: bool,
 }
 
 impl MirGraphElement for MirRef {
@@ -153,6 +154,7 @@ impl MirRef {
             offset: RefOffset::Entire,
             src_ty,
             mutable: false,
+            async_field: false,
         }
     }
 
@@ -173,12 +175,14 @@ impl MirRef {
             offset: RefOffset::Entire,
             src_ty,
             mutable: true,
+            async_field: false,
         }
     }
 
     pub fn shared_field(
         value: MirValue,
         field: &str,
+        async_: bool,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -197,6 +201,7 @@ impl MirRef {
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
+            async_field: async_,
         }
     }
 
@@ -204,6 +209,7 @@ impl MirRef {
         value: MirValue,
         variant: &str,
         field: &str,
+        async_: bool,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -219,6 +225,7 @@ impl MirRef {
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
+            async_field: async_,
         }
     }
 
@@ -240,6 +247,7 @@ impl MirRef {
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
+            async_field: false,
         }
     }
 
@@ -263,6 +271,7 @@ impl MirRef {
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
+            async_field: false,
         }
     }
 
@@ -285,13 +294,15 @@ impl MirRef {
             value,
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
-            src_ty
+            src_ty,
+            async_field: false,
         }
     }
 
     pub fn mut_field(
         value: MirValue,
         field: &str,
+        async_: bool,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -308,6 +319,7 @@ impl MirRef {
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
+            async_field: async_,
         }
     }
 
@@ -315,6 +327,7 @@ impl MirRef {
         value: MirValue,
         variant: &str,
         field: &str,
+        async_: bool,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -331,6 +344,7 @@ impl MirRef {
             offset: RefOffset::Const(offset),
             ty,
             src_ty,
+            async_field: async_,
         }
     }
 
@@ -354,6 +368,7 @@ impl MirRef {
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
+            async_field: false,
         }
     }
 
@@ -378,6 +393,7 @@ impl MirRef {
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
+            async_field: false,
         }
     }
 
@@ -402,7 +418,8 @@ impl MirRef {
             value,
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
-            src_ty
+            src_ty,
+            async_field: false,
         }
     }
 

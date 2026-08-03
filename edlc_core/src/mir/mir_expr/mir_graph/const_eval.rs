@@ -1914,7 +1914,8 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
     body.body.replace_empty_root_param(&compiler.mir_phase.types);
 
-    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types)
+        && body.body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
         // create connectome
         let connectome = body.body.async_connectome(
             &compiler.mir_phase.types,
@@ -1937,6 +1938,10 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
         #[cfg(feature="debug_printouts")]
         async_analysis.debug_print(&body.body);
         async_analysis.canonize(&mut body.body);
+
+        if body.signature.async_ {
+
+        }
         // -- async analysis end here
     }
 
@@ -2211,7 +2216,8 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     body.insert_drops_with_dependencies(&borrow_graph)?;
     body.replace_empty_root_param(&compiler.mir_phase.types);
 
-    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types)
+        && body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
         // create connectome
         let connectome = body.async_connectome(
             &compiler.mir_phase.types,

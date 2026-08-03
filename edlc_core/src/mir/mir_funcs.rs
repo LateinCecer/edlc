@@ -42,7 +42,7 @@ use crate::prelude::edl_type::EdlMaybeType;
 use crate::prelude::{AmorphusData, AmorphusDataCopy, ExecutorVM};
 use crate::resolver::ScopeId;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::ops;
@@ -61,6 +61,12 @@ pub enum CallSrc {
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Eq, Ord, Hash)]
 pub struct MirFuncId(usize);
+
+impl Display for MirFuncId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:x}", self.0)
+    }
+}
 
 impl MirFuncId {
     pub fn ordinal(&self) -> usize {
@@ -1320,6 +1326,11 @@ pub struct MirFnSignature {
     pub async_return: bool,
 }
 
+impl MirFnSignature {
+    pub fn is_runtime(&self) -> bool {
+        !self.comptime && !self.comptime_only
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFnParam {

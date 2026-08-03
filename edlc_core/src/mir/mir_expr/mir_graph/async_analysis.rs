@@ -15,6 +15,7 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+mod verify;
 
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::index_map::IndexMap;
@@ -40,10 +41,13 @@ use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::prelude::mir_funcs::MirFuncId;
 use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefault, LatticeElement};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
 use crate::core::edl_fn::AsyncState;
+use crate::mir::mir_expr::mir_ref::RefOffset;
+
+pub use crate::mir::mir_expr::mir_graph::async_analysis::verify::{AsyncVerify};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -52,7 +56,10 @@ pub struct AsyncData(usize);
 /// These mark the sources that we can actually synchronize on.
 /// This is mainly global variables, only created local resources and function parameters.
 pub enum AsyncSource {
-    Local(AsyncData),
+    SyncLocal(AsyncData),
+    AsyncLocal(AsyncData),
+    /// Some functions have compile time locals that their return value may depend on.
+    FunctionLocal(MirFuncId),
     Global(EdlVarId),
     SyncParam(AsyncData),
     AsyncParam(AsyncData),
@@ -61,10 +68,12 @@ pub enum AsyncSource {
 impl Display for AsyncSource {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Local(data) => write!(f, "local #{:x}", data.0),
+            Self::SyncLocal(data) => write!(f, "local #{:x}", data.0),
+            Self::AsyncLocal(data) => write!(f, "async local #{:x}", data.0),
             Self::SyncParam(data) => write!(f, "param #{:x}", data.0),
             Self::AsyncParam(data) => write!(f, "async #{:x}", data.0),
             Self::Global(id) => write!(f, "global {}", id.0),
+            Self::FunctionLocal(id) => write!(f, "fn {}", id),
         }
     }
 }
@@ -81,8 +90,6 @@ pub struct AsyncConnState {
     /// dependencies list, as it makes no sense to hold the same source twice in two separate
     /// lists.
     references: HashSet<AsyncSource>,
-    /// Must sync on exit.
-    must_sync: bool,
 }
 
 impl AsyncConnState {
@@ -91,8 +98,14 @@ impl AsyncConnState {
         Self {
             dependencies: HashSet::from([source]),
             references: HashSet::new(),
-            must_sync: true,
         }
+    }
+
+    /// A connection state is fully async when _all_ dependencies are async.
+    pub fn fully_async(&self) -> bool {
+        self.dependencies
+            .iter()
+            .all(|dep| matches!(dep, AsyncSource::AsyncParam(_) | AsyncSource::AsyncLocal(_)))
     }
 
     pub fn add_source(&mut self, source: AsyncSource) -> bool {
@@ -164,7 +177,6 @@ impl LatticeElement for AsyncConnState {
         Ok(Self {
             dependencies: self.dependencies.intersection(&other.dependencies).cloned().collect(),
             references: self.references.intersection(&other.references).cloned().collect(),
-            must_sync: true,
         })
     }
 
@@ -182,7 +194,6 @@ impl LatticeElement for AsyncConnState {
         Ok(Self {
             dependencies,
             references: refs,
-            must_sync: true,
         })
     }
 
@@ -303,6 +314,8 @@ pub struct AsyncConnectome {
     dependencies: ConnectomeDependencies,
     references: ConnectomeReferences,
     id_to_source: Vec<AsyncSource>,
+    func_to_id: BTreeMap<MirFuncId, AsyncId>,
+    track_function_state: bool,
 }
 
 impl Display for AsyncConnectome {
@@ -332,7 +345,7 @@ impl Display for AsyncConnectome {
 }
 
 impl AsyncConnectome {
-    pub fn new(map: &HashMap<MirValue, AsyncConnState>) -> Self {
+    pub fn new(map: &HashMap<MirValue, AsyncConnState>, track_function_state: bool) -> Self {
         let mut id_to_source = vec![];
         let mut source_to_id = HashMap::<AsyncSource, AsyncId>::new();
 
@@ -345,6 +358,8 @@ impl AsyncConnectome {
         let mut sorted_ids = map.keys().cloned().collect::<Vec<_>>();
         sorted_ids.sort_by_key(|lhs| lhs.0);
 
+        let mut func_to_id = BTreeMap::<MirFuncId, AsyncId>::new();
+
         let mut find_id = |source: &AsyncSource| -> AsyncId {
             if let Some(id) = source_to_id.get(source) {
                 *id
@@ -352,6 +367,10 @@ impl AsyncConnectome {
                 let id = AsyncId(id_to_source.len() as u32);
                 id_to_source.push(*source);
                 source_to_id.insert(*source, id);
+
+                if let AsyncSource::FunctionLocal(func_id) = source {
+                    func_to_id.insert(*func_id, id);
+                }
                 id
             }
         };
@@ -387,6 +406,8 @@ impl AsyncConnectome {
                 data: ref_ids,
             }),
             id_to_source,
+            func_to_id,
+            track_function_state,
         }
     }
 
@@ -446,6 +467,11 @@ pub struct AsyncConnContext<'reg, B: Backend> {
     source_counter: usize,
     source_references: IndexMap<AsyncData>,
     source_reverse: IndexMap<MirValue>,
+
+    /// Tracks the modification state of functions.
+    /// If this is not enabled, non-comptime functions will be rejected from returning data
+    /// referencing the async state of internal variables.
+    pub(crate) track_functions: bool,
 }
 
 impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
@@ -466,6 +492,8 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
             source_counter: 0,
             source_references: IndexMap::default(),
             source_reverse: IndexMap::default(),
+
+            track_functions: false,
         };
 
         if let Some(func_id) = func_id {
@@ -540,7 +568,23 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        let mut out = AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)));
+        let is_async = match &self.elements {
+            MirArrayInitVariant::List(els) => {
+                els.iter().all(|el| input.element_value(el).fully_async())
+            }
+            MirArrayInitVariant::Copy { val, len: _ } => {
+                input.element_value(val).fully_async()
+            }
+        };
+
+        let data = ctx.get_async_data(target);
+        let local = if is_async {
+            AsyncSource::AsyncLocal(data)
+        } else {
+            AsyncSource::SyncLocal(data)
+        };
+        let mut out = AsyncConnState::new(local);
+
         match &self.elements {
             MirArrayInitVariant::List(els) => {
                 els.iter().for_each(|element| {
@@ -563,7 +607,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))))
+        Ok(input.replace(target, AsyncConnState::new(AsyncSource::SyncLocal(ctx.get_async_data(target)))))
     }
 }
 
@@ -580,7 +624,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         let rhs_state = input.element_value(&self.rhs);
         let mut changed = input.element_value_mut(&self.lhs)
             .extend(&rhs_state);
-        changed |= input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target))));
+        changed |= input.replace(target, AsyncConnState::new(AsyncSource::SyncLocal(ctx.get_async_data(target))));
         Ok(changed)
     }
 }
@@ -599,10 +643,13 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
             .unwrap();
 
         if !sig.async_return {
-            return Ok(input.replace(
-                target,
-                AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))
-            ));
+            let mut state = AsyncConnState::new(
+                AsyncSource::SyncLocal(ctx.get_async_data(target)));
+            if ctx.track_functions {
+                state.add_source(AsyncSource::FunctionLocal(self.func));
+            }
+
+            return Ok(input.replace(target, state));
         }
         let mut state = input.element_value(target);
         let mut param_idx: usize = 0;
@@ -640,7 +687,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))))
+        Ok(input.replace(target, AsyncConnState::new(AsyncSource::SyncLocal(ctx.get_async_data(target)))))
     }
 }
 
@@ -652,7 +699,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))))
+        Ok(input.replace(target, AsyncConnState::new(AsyncSource::SyncLocal(ctx.get_async_data(target)))))
     }
 }
 
@@ -664,7 +711,7 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        Ok(input.replace(target, AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)))))
+        Ok(input.replace(target, AsyncConnState::new(AsyncSource::SyncLocal(ctx.get_async_data(target)))))
     }
 }
 
@@ -674,11 +721,14 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, AsyncConnState>,
-        _ctx: &mut AsyncConnContext<'reg, B>,
+        ctx: &mut AsyncConnContext<'reg, B>,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        let value_state = input.element_value(&self.value);
+        let mut value_state = input.element_value(&self.value);
+        if !matches!(&self.offset, RefOffset::Entire) && !self.async_field {
+            value_state.add_source(AsyncSource::SyncLocal(ctx.get_async_data(target)));
+        }
         Ok(input.replace(target, value_state))
     }
 }
@@ -717,7 +767,10 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        let mut state = AsyncConnState::new(AsyncSource::Local(ctx.get_async_data(target)));
+        let mut state = AsyncConnState::new(
+            AsyncSource::SyncLocal(ctx.get_async_data(target))
+        );
+
         for init in &self.inits {
             if init.async_ {
                 state.extend(&input.element_value(&init.val));
@@ -1473,7 +1526,10 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     /// this method will always return true, no matter how the parameter is declared.
     fn sync_src_on_exit(&self, id: &AsyncId) -> bool {
         !self.is_function_async
-            || !matches!(self.conn.id_to_source[id.0 as usize], AsyncSource::AsyncParam(_))
+            || !matches!(
+                self.conn.id_to_source[id.0 as usize],
+                AsyncSource::AsyncParam(_) | AsyncSource::AsyncLocal(_),
+            )
     }
 
     pub fn async_enabled(mir_types: &MirTypeRegistry) -> bool {
@@ -1811,6 +1867,30 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         event_state[event] = EventState::Synchronized;
     }
 
+    fn sync_id(
+        &self,
+        id: &AsyncId,
+        event_state: &mut AsyncEventState,
+        state: &mut AsyncSourceState<FlowState>,
+        sync_positions: &mut SyncPositions,
+        loc: &MirLoc,
+    ) {
+        self.event_sync
+            .find_data_indices(id)
+            .for_each(|event_id_raw| {
+                let event_id = EventId(event_id_raw);
+                if event_state[event_id] == EventState::Recorded {
+                    self.sync_event(
+                        event_id,
+                        event_state,
+                        state,
+                        sync_positions,
+                        loc,
+                    );
+                }
+            })
+    }
+
     /// Synchronizes all **events** that are actively synchronizing `value` and that are currently
     /// in a recording state.
     /// If the event is _not_ in a recorded state, the event has either not been reached yet, or it
@@ -1827,22 +1907,20 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         self.conn.dependencies[*value]
             .iter()
             .chain(self.conn.references[*value].iter())
-            .for_each(|val| {
-                self.event_sync
-                    .find_data_indices(val)
-                    .for_each(|event_id_raw| {
-                        let event_id = EventId(event_id_raw);
-                        if event_state[event_id] == EventState::Recorded {
-                            self.sync_event(
-                                event_id,
-                                event_state,
-                                state,
-                                sync_positions,
-                                loc,
-                            );
-                        }
-                    })
-            });
+            .for_each(|val| self.sync_id(val, event_state, state, sync_positions, loc));
+    }
+
+    fn sync_function(
+        &self,
+        value: &MirFuncId,
+        event_state: &mut AsyncEventState,
+        state: &mut AsyncSourceState<FlowState>,
+        sync_positions: &mut SyncPositions,
+        loc: &MirLoc,
+    ) {
+        if let Some(id) = self.conn.func_to_id.get(value) {
+            self.sync_id(id, event_state, state, sync_positions, loc);
+        }
     }
 }
 
@@ -1929,6 +2007,16 @@ impl TransferAsyncState for MirCall {
         //     };
         //     Self::transfer_param(&val, exit_state, flow_analysis, loc, param.async_)?;
         // }
+
+        if flow_analysis.conn.track_function_state {
+            flow_analysis.sync_function(
+                &self.func,
+                &mut exit_state.event_states,
+                &mut exit_state.source_states,
+                &mut exit_state.sync_positions,
+                loc,
+            );
+        }
 
         for param in self.args.iter()
             .chain(self.comptime_args.iter().map(|arg| &arg.value_expr)) {
