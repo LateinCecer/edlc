@@ -36,7 +36,7 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, SealEval, TransferCopy, Transfer
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{BlockLocalStatementUid, Context, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
+use crate::mir::mir_expr::{BlockLocalStatementUid, Context, DebugSymbols, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirGraphState, MirLoc, MirRef, MirValue, Seal, Statement};
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::mir_type::MirTypeRegistry;
 use crate::prelude::mir_funcs::MirFuncId;
@@ -47,7 +47,7 @@ use std::ops::{Index, IndexMut};
 use crate::core::edl_fn::AsyncState;
 use crate::mir::mir_expr::mir_ref::RefOffset;
 
-pub use crate::mir::mir_expr::mir_graph::async_analysis::verify::{AsyncVerify};
+pub use crate::mir::mir_expr::mir_graph::async_analysis::verify::{AsyncVerify, AsyncVerifyError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AsyncData(usize);
@@ -63,6 +63,7 @@ pub enum AsyncSource {
     Global(EdlVarId),
     SyncParam(AsyncData),
     AsyncParam(AsyncData),
+    SharedParam(AsyncData),
 }
 
 impl Display for AsyncSource {
@@ -72,6 +73,7 @@ impl Display for AsyncSource {
             Self::AsyncLocal(data) => write!(f, "async local #{:x}", data.0),
             Self::SyncParam(data) => write!(f, "param #{:x}", data.0),
             Self::AsyncParam(data) => write!(f, "async #{:x}", data.0),
+            Self::SharedParam(data) => write!(f, "shared #{:x}", data.0),
             Self::Global(id) => write!(f, "global {}", id.0),
             Self::FunctionLocal(id) => write!(f, "fn {}", id),
         }
@@ -493,7 +495,7 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
             source_references: IndexMap::default(),
             source_reverse: IndexMap::default(),
 
-            track_functions: false,
+            track_functions: true,
         };
 
         if let Some(func_id) = func_id {
@@ -506,10 +508,10 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
                 .chain(sig.params.iter().filter(|param| param.comptime))
                 .zip(cfg.get_root_parameters().iter()) {
                 let data = ctx.get_async_data(value);
-                ctx.parameters.push(if matches!(param.async_, AsyncState::Async) {
-                    AsyncSource::AsyncParam(data)
-                } else {
-                    AsyncSource::SyncParam(data)
+                ctx.parameters.push(match param.async_ {
+                    AsyncState::Async => AsyncSource::AsyncParam(data),
+                    AsyncState::Shared => AsyncSource::SharedParam(data),
+                    AsyncState::None => AsyncSource::SyncParam(data),
                 });
             }
         }
@@ -535,6 +537,36 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
         self.source_references.view_mut(target.0).set(id);
         self.source_reverse.view_mut(id.0).set(*target);
         id
+    }
+
+    pub fn get_pool(self) -> AsyncDataPool {
+        AsyncDataPool {
+            source_reverse: self.source_reverse,
+            source_references: self.source_references,
+            parameters: self.parameters,
+        }
+    }
+}
+
+pub struct AsyncDataPool {
+    parameters: Vec<AsyncSource>,
+    source_references: IndexMap<AsyncData>,
+    source_reverse: IndexMap<MirValue>,
+}
+
+impl AsyncDataPool {
+    pub fn get_data_source(&self, id: AsyncData) -> Option<&MirValue> {
+        self.source_reverse.get(id.0)
+    }
+
+    pub fn get_data_position<'cfg>(
+        &self,
+        id: AsyncData,
+        cfg: &'cfg MirFlowGraph,
+    ) -> Option<(&'cfg DebugSymbols, &'cfg ModuleSrc)> {
+        self.get_data_source(id)
+            .and_then(|value| cfg.find_definition(value))
+            .and_then(|def_point| cfg.find_def_debug_info(&def_point))
     }
 }
 
@@ -645,12 +677,12 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         if !sig.async_return {
             let mut state = AsyncConnState::new(
                 AsyncSource::SyncLocal(ctx.get_async_data(target)));
-            if ctx.track_functions {
+            if ctx.track_functions && !sig.async_ {
                 state.add_source(AsyncSource::FunctionLocal(self.func));
             }
-
             return Ok(input.replace(target, state));
         }
+
         let mut state = input.element_value(target);
         let mut param_idx: usize = 0;
         let mut comp_idx: usize = 0;

@@ -47,6 +47,7 @@ use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
 use log::error;
+use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncVerify, AsyncVerifyError};
 
 /// Lattice:
 ///
@@ -1790,6 +1791,7 @@ pub enum OptimizationError {
     ContextChecking(Report<ContextError, ()>),
     ConstCapture(Report<ConstError, ()>),
     AutoImpl(HirTranslationError),
+    AsyncError(Report<AsyncVerifyError, ()>),
 }
 
 impl From<DropError> for OptimizationError {
@@ -1846,6 +1848,12 @@ impl From<Report<ConstError, ()>> for OptimizationError {
     }
 }
 
+impl From<Report<AsyncVerifyError, ()>> for OptimizationError {
+    fn from(value: Report<AsyncVerifyError, ()>) -> Self {
+        Self::AsyncError(value)
+    }
+}
+
 impl Display for OptimizationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1870,6 +1878,10 @@ impl Display for OptimizationError {
             }
             Self::AutoImpl(err) => {
                 write!(f, "automatic impl error: {}", err)
+            }
+            OptimizationError::AsyncError(err) => {
+                write!(f, "async verification report with {} errors and {} warnings",
+                    err.num_errors(), err.num_warnings())
             }
         }
     }
@@ -1914,8 +1926,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
     body.body.replace_empty_root_param(&compiler.mir_phase.types);
 
-    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types)
-        && body.body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
         let connectome = body.body.async_connectome(
             &compiler.mir_phase.types,
@@ -1923,25 +1934,34 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
             &backend.func_reg(),
             None,
         ).unwrap();
-        let mut async_analysis = AsyncFlowAnalysis::new(&connectome, body.signature.async_);
-        async_analysis.create_records(
-            &mut body.body,
-            &backend.func_reg(),
-            &compiler.mir_phase.types,
-            &compiler.phase.types,
-        );
-        #[cfg(feature="debug_printouts")]
-        async_analysis.debug_print(&body.body);
 
-        async_analysis.update(&body.body).unwrap();
-        async_analysis.insert_merge_syncs(&body.body);
-        #[cfg(feature="debug_printouts")]
-        async_analysis.debug_print(&body.body);
-        async_analysis.canonize(&mut body.body);
+        if body.body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
+            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, body.signature.async_);
+            async_analysis.create_records(
+                &mut body.body,
+                &backend.func_reg(),
+                &compiler.mir_phase.types,
+                &compiler.phase.types,
+            );
+            #[cfg(feature = "debug_printouts")]
+            async_analysis.debug_print(&body.body);
 
-        if body.signature.async_ {
-
+            async_analysis.update(&body.body).unwrap();
+            async_analysis.insert_merge_syncs(&body.body);
+            #[cfg(feature = "debug_printouts")]
+            async_analysis.debug_print(&body.body);
+            async_analysis.canonize(&mut body.body);
         }
+
+        let verify = AsyncVerify::new(&connectome);
+        let report = if body.signature.async_ {
+            verify.verify_async(&body.body, &backend.func_reg())
+        } else if body.signature.async_return {
+            verify.verify_async_return(&body.body, &mut compiler.phase, &backend.func_reg())
+        } else {
+            verify.verify_sync(&body.body, &backend.func_reg())
+        };
+        report.ok::<OptimizationError>()?;
         // -- async analysis end here
     }
 
@@ -2216,8 +2236,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     body.insert_drops_with_dependencies(&borrow_graph)?;
     body.replace_empty_root_param(&compiler.mir_phase.types);
 
-    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types)
-        && body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
+    if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
         let connectome = body.async_connectome(
             &compiler.mir_phase.types,
@@ -2225,21 +2244,27 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
             &backend.func_reg(),
             None,
         ).unwrap();
-        let mut async_analysis = AsyncFlowAnalysis::new(&connectome, options.is_async);
-        async_analysis.create_records(
-            body,
-            &backend.func_reg(),
-            &compiler.mir_phase.types,
-            &compiler.phase.types,
-        );
-        #[cfg(feature="debug_printouts")]
-        async_analysis.debug_print(&body);
 
-        async_analysis.update(&body).unwrap();
-        async_analysis.insert_merge_syncs(&body);
-        #[cfg(feature="debug_printouts")]
-        async_analysis.debug_print(&body);
-        async_analysis.canonize(body);
+        if body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
+            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, options.is_async);
+            async_analysis.create_records(
+                body,
+                &backend.func_reg(),
+                &compiler.mir_phase.types,
+                &compiler.phase.types,
+            );
+            #[cfg(feature = "debug_printouts")]
+            async_analysis.debug_print(&body);
+
+            async_analysis.update(&body).unwrap();
+            async_analysis.insert_merge_syncs(&body);
+            #[cfg(feature = "debug_printouts")]
+            async_analysis.debug_print(&body);
+            async_analysis.canonize(body);
+        }
+
+        let verify = AsyncVerify::new(&connectome);
+        verify.verify_sync(body, &backend.func_reg()).ok::<OptimizationError>()?;
         // -- async analysis end here
     }
 

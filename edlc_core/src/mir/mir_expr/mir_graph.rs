@@ -2774,6 +2774,11 @@ impl MirFlowGraph {
             })
     }
 
+    pub fn find_definition(&self, value: &MirValue) -> Option<DefPoint> {
+        self.find_block(value)
+            .and_then(|block| self.blocks[block.0].find_var_definition(&block, value))
+    }
+
     pub fn find_def_debug_info(
         &self,
         def_point: &DefPoint,
