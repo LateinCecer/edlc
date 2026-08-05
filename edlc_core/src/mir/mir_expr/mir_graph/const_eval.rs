@@ -2153,9 +2153,9 @@ pub fn process_function_mir_pass<B: Backend>(
     backend: &mut B,
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
-    loop {
-        pre_process_function_mir_pass(compiler, backend)?;
+    pre_process_function_mir_pass(compiler, backend)?;
 
+    loop {
         let mut funcs = {
             let binding = backend.func_reg();
             binding.collect_mir_pass()
