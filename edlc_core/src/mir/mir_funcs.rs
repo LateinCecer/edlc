@@ -80,9 +80,16 @@ impl MirFuncId {
 
 enum CodeGenState<B: Backend> {
     Waiting,
+    MirPrePass { body: Box<MirFn> },
     MirPass { body: Box<MirFn> },
     Ready { body: Box<MirFn>, call_gen: Box<dyn CodeGen<B>> },
     Internal { call_gen: Box<dyn CodeGen<B>> },
+}
+
+impl<B: Backend> CodeGenState<B> {
+    fn initial(body: Box<MirFn>) -> Self {
+        CodeGenState::MirPrePass { body }
+    }
 }
 
 pub struct MirFuncInfo<B: Backend> {
@@ -576,7 +583,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         // now that the code-gen is ready, place it into the function registry
         // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
         let func = self.generators.get_mut(id.0).unwrap();
-        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
+        func.code_gen = CodeGenState::initial(Box::new(mir_instance));
         Ok(self.conversion_map.get(tmir).copied().unwrap())
     }
 
@@ -615,7 +622,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         // let loc = mir_instance.reserve_loc(mir_phase, self, id)?;
 
         let func = self.generators.get_mut(id.0).unwrap();
-        func.code_gen = CodeGenState::MirPass { body: Box::new(mir_instance) };
+        func.code_gen = CodeGenState::initial(Box::new(mir_instance));
         Ok(self.conversion_map.get(tmir).copied().unwrap())
     }
 
@@ -635,6 +642,45 @@ impl<B: Backend> MirFuncRegistry<B> {
                 None
             })
             .collect()
+    }
+
+    pub fn collect_pre_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPrePass { body } = &f.code_gen {
+                // note that for the pre-passing hybrid functions we don't need to know the
+                // exact values of the comptime parameters yet
+                Some(body.as_ref().clone())
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    pub fn collect_pre_comptime_pass(&self) -> Vec<MirFn> {
+        self.generators
+            .iter()
+            .filter_map(|(_, f)| if let CodeGenState::MirPrePass { body } = &f.code_gen {
+                if body.signature.comptime || body.signature.comptime_only {
+                    Some(body.as_ref().clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            })
+            .collect()
+    }
+
+    pub fn finish_pre_pass(&mut self, pass: Vec<MirFn>)
+    where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+        for func in pass.into_iter() {
+            let id = func.mir_id.unwrap();
+            self.generators
+                .get_mut(id.0)
+                .unwrap()
+                .code_gen = CodeGenState::MirPass { body: Box::new(func) };
+        }
     }
 
     /// Collects all functions in the function registry that must be transformed during a MIR pass.
@@ -858,6 +904,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         match code_gen {
             CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
+            CodeGenState::MirPrePass { .. } => panic!("Function has not passed MIR pre-pass level code transformations yet"),
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
                 | CodeGenState::Internal { call_gen } => call_gen
@@ -890,6 +937,7 @@ impl<B: Backend> MirFuncRegistry<B> {
 
         match code_gen {
             CodeGenState::Waiting => panic!("Tried to generate code on waiting code-gen unit"),
+            CodeGenState::MirPrePass { .. } => panic!("Function has not passed MIR pre-pass level code transformations yet"),
             CodeGenState::MirPass { .. } => panic!("Function has not passed MIR level code transformations yet"),
             CodeGenState::Ready{ call_gen, .. }
             | CodeGenState::Internal { call_gen } => call_gen

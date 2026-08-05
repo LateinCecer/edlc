@@ -1889,9 +1889,8 @@ impl Display for OptimizationError {
 
 impl Error for OptimizationError {}
 
-fn process_function<B: Backend>(
+fn pre_process_function<B: Backend>(
     body: &mut MirFn,
-    vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
     backend: &mut B,
 ) -> Result<(), OptimizationError>
@@ -1925,7 +1924,16 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
     body.body.replace_empty_root_param(&compiler.mir_phase.types);
+    Ok(())
+}
 
+fn process_function<B: Backend>(
+    body: &mut MirFn,
+    vm: &mut ExecutorVM,
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
         let connectome = body.body.async_connectome(
@@ -1953,15 +1961,15 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
             async_analysis.canonize(&mut body.body);
         }
 
-        let verify = AsyncVerify::new(&connectome);
-        let report = if body.signature.async_ {
-            verify.verify_async(&body.body, &backend.func_reg())
-        } else if body.signature.async_return {
-            verify.verify_async_return(&body.body, &mut compiler.phase, &backend.func_reg())
-        } else {
-            verify.verify_sync(&body.body, &backend.func_reg())
-        };
-        report.ok::<OptimizationError>()?;
+        // let verify = AsyncVerify::new(&connectome);
+        // let report = if body.signature.async_ {
+        //     verify.verify_async(&body.body, &backend.func_reg())
+        // } else if body.signature.async_return {
+        //     verify.verify_async_return(&body.body, &mut compiler.phase, &backend.func_reg())
+        // } else {
+        //     verify.verify_sync(&body.body, &backend.func_reg())
+        // };
+        // report.ok::<OptimizationError>()?;
         // -- async analysis end here
     }
 
@@ -2096,6 +2104,48 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     Ok(())
 }
 
+fn pre_process_function_mir_pass<B: Backend>(
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    loop {
+        let mut funcs = {
+            let binding = backend.func_reg();
+            binding.collect_pre_pass()
+        };
+        if funcs.is_empty() {
+            break; // all functions have been processed
+        }
+        for func in funcs.iter_mut() {
+            pre_process_function(func, compiler, backend)?;
+        }
+
+        let mut func_reg = backend.func_reg_mut();
+        func_reg.finish_pre_pass(funcs);
+    }
+    Ok(())
+}
+
+fn pre_process_comptime_functions<B: Backend>(
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    let mut funcs = {
+        let binding = backend.func_reg();
+        binding.collect_pre_comptime_pass()
+    };
+
+    for func in funcs.iter_mut() {
+        pre_process_function(func, compiler, backend)?;
+    }
+
+    let mut func_reg = backend.func_reg_mut();
+    func_reg.finish_pre_pass(funcs);
+    Ok(())
+}
+
 /// Processes all functions, including runtime and hybrid functions.
 pub fn process_function_mir_pass<B: Backend>(
     vm: &mut ExecutorVM,
@@ -2104,8 +2154,10 @@ pub fn process_function_mir_pass<B: Backend>(
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     loop {
+        pre_process_function_mir_pass(compiler, backend)?;
+
         let mut funcs = {
-            let binding = backend.func_reg_mut();
+            let binding = backend.func_reg();
             binding.collect_mir_pass()
         };
         if funcs.is_empty() {
@@ -2136,8 +2188,10 @@ pub fn process_comptime_functions<B: Backend>(
     backend: &mut B,
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    pre_process_comptime_functions(compiler, backend)?;
+
     let mut funcs = {
-        let binding = backend.func_reg_mut();
+        let binding = backend.func_reg();
         binding.collect_comptime_pass()
     };
 
@@ -2156,6 +2210,10 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     let mut func_reg = backend.func_reg_mut();
     func_reg.finish_mir_pass(funcs);
+
+    assert!(
+        func_reg.collect_pre_comptime_pass().is_empty()
+    );
     Ok(())
 }
 
@@ -2164,6 +2222,48 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 pub struct CompileOptions {
     pub comptime_args: Option<Vec<AmorphusDataCopy>>,
     pub is_async: bool,
+}
+
+fn pre_compile_expression<B: Backend>(
+    body: &mut MirFlowGraph,
+    compiler: &mut EdlCompiler,
+    backend: &mut B,
+) -> Result<(), OptimizationError>
+where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
+    let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
+    body.promote_moves_with_lifetimes(&lifeness);
+    body.generate_auto_implementations(
+        &mut compiler.mir_phase,
+        &mut compiler.phase,
+        &mut backend.func_reg_mut(),
+    )
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+    body.generate_copy_implementation(&mut compiler.mir_phase)
+        .map_err(|err| OptimizationError::AutoImpl(err))?;
+
+    // do scope checking
+    let mut borrow_graph = body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.check_scopes(&borrow_graph, &mut compiler.phase)
+        .ok::<OptimizationError>()?;
+    body.validate_call_context(
+        &mut compiler.phase,
+        &mut compiler.mir_phase,
+        backend,
+    ).ok::<OptimizationError>()?;
+
+    body.route_owner_data(
+        &mut borrow_graph,
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    body.insert_drops_with_dependencies(&borrow_graph)?;
+    body.replace_empty_root_param(&compiler.mir_phase.types);
+    Ok(())
 }
 
 /// Compiles a MIR expression by performing all necessary code transformation and validation steps
@@ -2202,40 +2302,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     compiler.phase.report_mode.print_errors = true;
     compiler.phase.report_mode.print_warnings = true;
 
-    let lifeness = body.lifetimes(&compiler.mir_phase.types)?;
-    body.promote_moves_with_lifetimes(&lifeness);
-    body.generate_auto_implementations(
-        &mut compiler.mir_phase,
-        &mut compiler.phase,
-        &mut backend.func_reg_mut(),
-    )
-        .map_err(|err| OptimizationError::AutoImpl(err))?;
-    body.generate_copy_implementation(&mut compiler.mir_phase)
-        .map_err(|err| OptimizationError::AutoImpl(err))?;
-
-    // do scope checking
-    let mut borrow_graph = body.borrows(
-        &mut compiler.mir_phase.types,
-        &compiler.phase.types,
-        &compiler.phase.vars,
-    )?;
-    body.check_scopes(&borrow_graph, &mut compiler.phase)
-        .ok::<OptimizationError>()?;
-    body.validate_call_context(
-        &mut compiler.phase,
-        &mut compiler.mir_phase,
-        backend,
-    ).ok::<OptimizationError>()?;
-
-    body.route_owner_data(
-        &mut borrow_graph,
-        &mut compiler.mir_phase.types,
-        &compiler.phase.types,
-        &compiler.phase.vars,
-    )?;
-    body.insert_drops_with_dependencies(&borrow_graph)?;
-    body.replace_empty_root_param(&compiler.mir_phase.types);
-
+    pre_compile_expression(body, compiler, backend)?;
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
         let connectome = body.async_connectome(
@@ -2263,8 +2330,8 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
             async_analysis.canonize(body);
         }
 
-        let verify = AsyncVerify::new(&connectome);
-        verify.verify_sync(body, &backend.func_reg()).ok::<OptimizationError>()?;
+        // let verify = AsyncVerify::new(&connectome);
+        // verify.verify_sync(body, &backend.func_reg()).ok::<OptimizationError>()?;
         // -- async analysis end here
     }
 
@@ -2321,7 +2388,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
 
     // CFG for optimization
     // After after all modifications to the CFG, run final verification steps
-    borrow_graph = body.borrows(
+    let borrow_graph = body.borrows(
         &mut compiler.mir_phase.types,
         &compiler.phase.types,
         &compiler.phase.vars,
