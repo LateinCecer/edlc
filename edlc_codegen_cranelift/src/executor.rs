@@ -42,7 +42,7 @@ use edlc_core::prelude::edl_impl::AssociatedType;
 use edlc_core::prelude::edl_param_env::{EdlParamStack, EdlParameterDef};
 use edlc_core::prelude::hir_expr::hir_type::{HirTypeNameSegment, SegmentType};
 use edlc_core::prelude::mir_backend::Backend;
-use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, CompileOptions, Context, DebugSymbols, MirFlowGraph};
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, Async, CompileOptions, Context, DebugSymbols, MirFlowGraph};
 use edlc_core::prelude::mir_funcs::ComptimeParams;
 use edlc_core::prelude::mir_type::abi::ByteLayout;
 use edlc_core::prelude::mir_vars::VariableMapper;
@@ -406,6 +406,7 @@ pub struct CraneliftJIT<Runtime: 'static> {
     pub backend: JIT<Runtime>,
 
     intrinsic_names: HashSet<String>,
+    async_data: Async,
 }
 
 impl<Runtime: 'static> Default for CraneliftJIT<Runtime> {
@@ -414,6 +415,7 @@ impl<Runtime: 'static> Default for CraneliftJIT<Runtime> {
             compiler: EdlCompiler::new(),
             backend: JIT::default(),
             intrinsic_names: HashSet::default(),
+            async_data: Async::empty(),
         }
     }
 }
@@ -673,7 +675,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
                     let options = CompileOptions::default();
                     let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
                     match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
@@ -688,7 +690,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
                     let options = CompileOptions::default();
                     let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
                     match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
@@ -809,8 +811,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
 
         // make sure function is compiled
         let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
-        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
+        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend, &self.async_data)?;
+        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend, &self.async_data)?;
         self.backend
             .compile_associated_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
 
@@ -1208,7 +1210,12 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         let mut vm = ExecutorVM::new(24 * 1024 * 1024);
         let options = CompileOptions::default();
         let stack_frame = compile_expression(
-            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options
+            &mut body,
+            &mut vm,
+            &mut self.compiler,
+            &mut self.backend,
+            &options,
+            &self.async_data,
         )?;
         self.backend.compile_associated_functions(
             &mut self.compiler.mir_phase,

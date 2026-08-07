@@ -47,7 +47,7 @@ use std::io::{BufWriter, Write};
 use std::mem;
 use std::ops::{BitOr, Range};
 use log::error;
-use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncVerify, AsyncVerifyError};
+use crate::mir::mir_expr::mir_graph::async_analysis::{Async, AsyncVerify, AsyncVerifyError};
 
 /// Lattice:
 ///
@@ -1932,19 +1932,27 @@ fn process_function<B: Backend>(
     vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
     backend: &mut B,
+    async_data: &Async,
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
-        let connectome = body.body.async_connectome(
+        let borrow_graph = body.body.borrows(
+            &mut compiler.mir_phase.types,
+            &compiler.phase.types,
+            &compiler.phase.vars,
+        )?;
+        let (connectome, _pool) = body.body.async_connectome(
             &compiler.mir_phase.types,
             &compiler.phase.types,
             &backend.func_reg(),
             None,
+            &borrow_graph,
+            async_data,
         ).unwrap();
 
         if body.body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
-            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, body.signature.async_);
+            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, async_data, body.signature.async_);
             async_analysis.create_records(
                 &mut body.body,
                 &backend.func_reg(),
@@ -2151,6 +2159,7 @@ pub fn process_function_mir_pass<B: Backend>(
     vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
     backend: &mut B,
+    async_data: &Async,
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     pre_process_function_mir_pass(compiler, backend)?;
@@ -2164,7 +2173,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
             break; // all functions have been processed
         }
         for func in funcs.iter_mut() {
-            process_function(func, vm, compiler, backend)?;
+            process_function(func, vm, compiler, backend, async_data)?;
 
             #[cfg(feature = "debug_printouts")] {
                 let mut std_out = std::io::stdout();
@@ -2186,6 +2195,7 @@ pub fn process_comptime_functions<B: Backend>(
     vm: &mut ExecutorVM,
     compiler: &mut EdlCompiler,
     backend: &mut B,
+    async_data: &Async,
 ) -> Result<(), OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     pre_process_comptime_functions(compiler, backend)?;
@@ -2196,7 +2206,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     };
 
     for func in funcs.iter_mut() {
-        process_function(func, vm, compiler, backend)?;
+        process_function(func, vm, compiler, backend, async_data)?;
 
         #[cfg(feature = "debug_printouts")] {
             let mut std_out = std::io::stdout();
@@ -2297,6 +2307,7 @@ pub fn compile_expression<B: Backend>(
     compiler: &mut EdlCompiler,
     backend: &mut B,
     options: &CompileOptions,
+    async_data: &Async,
 ) -> Result<StackFrameLayout, OptimizationError>
 where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     compiler.phase.report_mode.print_errors = true;
@@ -2305,15 +2316,22 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     pre_compile_expression(body, compiler, backend)?;
     if AsyncFlowAnalysis::async_enabled(&compiler.mir_phase.types) {
         // create connectome
-        let connectome = body.async_connectome(
+        let borrow_graph = body.borrows(
+            &mut compiler.mir_phase.types,
+            &compiler.phase.types,
+            &compiler.phase.vars,
+        )?;
+        let (connectome, _) = body.async_connectome(
             &compiler.mir_phase.types,
             &compiler.phase.types,
             &backend.func_reg(),
             None,
+            &borrow_graph,
+            async_data,
         ).unwrap();
 
         if body.get_root_ctx().cloned().unwrap_or(Context::Comptime) == Context::Runtime {
-            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, options.is_async);
+            let mut async_analysis = AsyncFlowAnalysis::new(&connectome, async_data, options.is_async);
             async_analysis.create_records(
                 body,
                 &backend.func_reg(),
@@ -2341,7 +2359,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
         &mut backend.func_reg_mut(),
     )
         .map_err(|err| OptimizationError::AutoImpl(err))?;
-    process_comptime_functions(vm, compiler, backend)?;
+    process_comptime_functions(vm, compiler, backend, async_data)?;
 
     #[cfg(feature = "debug_printouts")] {
         let mut out = BufWriter::new(File::create("../test_mir/unoptimized.mir").unwrap());
@@ -2445,6 +2463,6 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     stack_frame = StackFrameLayout::new(
         &deconstruction, options, body, &compiler.mir_phase.types);
 
-    process_function_mir_pass(vm, compiler, backend)?;
+    process_function_mir_pass(vm, compiler, backend, async_data)?;
     Ok(stack_frame)
 }

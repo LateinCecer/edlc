@@ -16,7 +16,7 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::core::edl_error::EdlError;
-use crate::core::edl_fn::EdlCompilerState;
+use crate::core::edl_fn::{AsyncState, EdlCompilerState};
 use crate::core::edl_param_env::{Adaptable, AdaptableWithStack, EdlParamStack};
 use crate::core::edl_type;
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInstance, EdlTypeRegistry, EdlTypeState, FmtType};
@@ -47,7 +47,7 @@ struct CompilerInfo {
     /// A field inherits its mutability from the parent.
     mutable: ExtConstUid,
     finalized_mutable: InternalMutability,
-    field_is_async: bool,
+    field_is_async: AsyncState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -832,7 +832,7 @@ impl ResolveTypes for HirField {
                 base_stencil,
                 mutable,
                 finalized_mutable: InternalMutability::Undetermined,
-                field_is_async: false,
+                field_is_async: AsyncState::None,
             });
             own_uid
         }

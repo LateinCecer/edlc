@@ -27,6 +27,7 @@ use crate::hir::hir_expr::hir_type_init::{HirTypeInit, NamedParameter};
 use crate::hir::HirPhase;
 use crate::lexer::{KeyWord, LexError, Punct, SrcPos, Token};
 use crate::parser::{expect_token, local, Parsable, ParseError, Parser, WrapParserResult};
+use crate::prelude::edl_fn::AsyncState;
 use crate::resolver::ScopeId;
 
 
@@ -48,7 +49,7 @@ pub struct AstStructMemberInit {
     name: String,
     pub pos: SrcPos,
     value: AstExpr,
-    async_: bool,
+    async_: AsyncState,
 }
 
 
@@ -264,7 +265,7 @@ impl Parsable for InitVariant {
 }
 
 impl AstStructMemberInit {
-    pub fn from_name(name: String, pos: SrcPos, scope: ScopeId, src: ModuleSrc, async_: bool) -> Self {
+    pub fn from_name(name: String, pos: SrcPos, scope: ScopeId, src: ModuleSrc, async_: AsyncState) -> Self {
         let value: AstExpr = AstTypeName {
             path: vec![AstTypeNameEntry::new(
                 pos,
@@ -282,7 +283,7 @@ impl AstStructMemberInit {
         }
     }
 
-    pub fn from_value(name: String, pos: SrcPos, value: AstExpr, async_: bool) -> Self {
+    pub fn from_value(name: String, pos: SrcPos, value: AstExpr, async_: AsyncState) -> Self {
         AstStructMemberInit {
             name,
             pos,
@@ -294,11 +295,16 @@ impl AstStructMemberInit {
 
 impl Parsable for AstStructMemberInit {
     fn parse(parser: &mut Parser) -> Result<Self, ParseError> {
-        let async_ = if matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
-            parser.next_token()?;
-            true
-        } else {
-            false
+        let async_ = match parser.peak() {
+            Ok(local!(Token::Key(KeyWord::Async))) => {
+                parser.next_token()?;
+                AsyncState::Async
+            }
+            Ok(local!(Token::Key(KeyWord::Shared))) => {
+                parser.next_token()?;
+                AsyncState::Shared
+            }
+            _ => AsyncState::None,
         };
 
         let (name, pos) = expect_token!(parser; (Token::Ident(name)), pos => (name, pos)

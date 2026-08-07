@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use crate::ast::ast_type::AstType;
 use crate::ast::{AstElement, IntoHir, ItemDoc};
 use crate::ast::ast_error::{AstTranslationError, WrapTranslationError};
+use crate::core::edl_fn::AsyncState;
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, Member};
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_type::HirDictMember;
@@ -35,7 +36,7 @@ pub struct AstStructMember {
     pub name: String,
     pub ty: AstType,
     pub doc: Option<ItemDoc>,
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,12 +53,17 @@ pub struct StructDef {
     pub init_ty: StructType,
 }
 
-fn parse_async(parser: &mut Parser) -> Result<bool, ParseError> {
-    if matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
-        parser.next_token()?;
-        Ok(true)
-    } else {
-        Ok(false)
+fn parse_async(parser: &mut Parser) -> Result<AsyncState, ParseError> {
+    match parser.peak() {
+        Ok(local!(Token::Key(KeyWord::Async))) => {
+            parser.next_token()?;
+            Ok(AsyncState::Async)
+        },
+        Ok(local!(Token::Key(KeyWord::Shared))) => {
+            parser.next_token()?;
+            Ok(AsyncState::Shared)
+        },
+        _ => Ok(AsyncState::None),
     }
 }
 

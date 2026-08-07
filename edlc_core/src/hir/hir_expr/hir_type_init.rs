@@ -15,7 +15,7 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use crate::core::edl_fn::{EdlCompilerState, EdlFnArgument};
+use crate::core::edl_fn::{AsyncState, EdlCompilerState, EdlFnArgument};
 use crate::core::edl_type::{EdlMaybeType, EdlStructVariant, EdlType, EdlTypeInitError, EdlTypeInstance, EdlTypeState};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
@@ -61,7 +61,7 @@ pub struct NamedParameter {
     pub name: String,
     pub pos: SrcPos,
     pub value: HirExpression,
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -745,7 +745,7 @@ impl HirTypeInit {
         infer_state: &mut InferState,
         ty: &EdlTypeInstance,
         params: &mut [HirExpression],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         // resolve parameters first to check for references
         let types = Self::pre_resolve_list_parameters(phase, infer_state, params)?;
         // insert constraints
@@ -769,7 +769,7 @@ impl HirTypeInit {
         infer_state: &mut InferState,
         ty: &EdlTypeInstance,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         // resolve parameters first to check for references
         let types = Self::pre_resolved_named_parameters(phase, infer_state, params)?;
         // insert constraints
@@ -794,7 +794,7 @@ impl HirTypeInit {
         ty: &EdlTypeInstance,
         variant: &str,
         params: &mut [HirExpression],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         let types = Self::pre_resolve_list_parameters(phase, infer_state, params)?;
         // insert constraints
         let mut infer = phase.infer_from(infer_state);
@@ -821,7 +821,7 @@ impl HirTypeInit {
         ty: &EdlTypeInstance,
         variant: &str,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         let types = Self::pre_resolved_named_parameters(phase, infer, params)?;
         // insert constraints
         let mut infer = phase.infer_from(infer);
@@ -846,7 +846,7 @@ impl HirTypeInit {
         phase: &mut HirPhase,
         infer: &mut InferState,
         params: &mut [HirExpression],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         let ty = phase.types.tuple((0..params.len())
             .map(|_| EdlMaybeType::Unknown))
             .map_err(|err| HirError::new_edl(pos, err))?;
@@ -860,7 +860,7 @@ impl HirTypeInit {
         phase: &mut HirPhase,
         infer: &mut InferState,
         params: &mut [NamedParameter],
-    ) -> Result<Vec<(bool, bool)>, HirError> {
+    ) -> Result<Vec<(bool, AsyncState)>, HirError> {
         let ty = phase.types.dict(params.iter()
             .map(|p| (p.name.clone(), EdlMaybeType::Unknown, p.async_)))
             .map_err(|err| HirError::new_edl(pos, err))?;

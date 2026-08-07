@@ -38,7 +38,7 @@ use anyhow::anyhow;
 use edlc_core::inline_code;
 use edlc_core::parser::Parsable;
 use edlc_core::prelude::mir_backend::{Backend, CodeGen, IntrinsicExecutionError, StaticData};
-use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, AsyncFlowAnalysis, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
+use edlc_core::prelude::mir_expr::{compile_expression, process_comptime_functions, process_function_mir_pass, AsciPrinter, Async, AsyncFlowAnalysis, CompileOptions, Context, DebugSymbols, MirExprId, MirFlowGraph, MirLoc, MirPrinter, MirValue, StackFrameLayout, StackFrameOptions};
 use edlc_core::prelude::mir_funcs::{CallSrc, FnCodeGen, MirFn, MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, DebugInformation, EdlCompiler, EdlVarId, ErrorFormatter, ExecType, ExecutorVM, FromFunction, FunctionBinding, HirContext, HirItem, HirModule, HirPhase, InFile, IntoHir, MirError, MirLayout, MirPhase, ModuleSrc, ParserSupplier, ResolveFn, ResolveNames, ResolveTypes, SrcPos, TypeError};
 use edlc_core::prelude::ast_expression::AstExpr;
@@ -55,6 +55,7 @@ use edlc_core::prelude::type_analysis::{InferProvider, InferState};
 use edlc_core::resolver::QualifierName;
 
 struct TestCompiler {
+    async_data: Async,
     compiler: EdlCompiler,
     backend: TestBackend,
 }
@@ -105,6 +106,7 @@ struct TestBackend {
 impl TestCompiler {
     fn new() -> Self {
         TestCompiler {
+            async_data: Async::empty(),
             compiler: EdlCompiler::new(),
             backend: TestBackend::new(),
         }
@@ -212,7 +214,7 @@ impl TestCompiler {
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
                     let options = CompileOptions::default();
                     let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
                     match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
@@ -227,7 +229,7 @@ impl TestCompiler {
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
                     let options = CompileOptions::default();
                     let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
                     match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
@@ -304,7 +306,7 @@ impl TestCompiler {
         let mut vm = ExecutorVM::new(1024 * 1024);
         let options = CompileOptions::default();
         let stack_frame = compile_expression(
-            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options)?;
+            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
 
         // print result
         // write MIR code to file for debugging

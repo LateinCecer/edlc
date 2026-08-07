@@ -18,6 +18,7 @@
 
 //! this module implements referencing and dereferencing logic for MirValues
 
+use crate::core::edl_fn::AsyncState;
 use crate::mir::debug::{DebugInformation, TrapInfo};
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{ExecutionError, MirFlowGraph, MirGraphElement, MirLoc, MirValue, StackFrameLayout, VmStackTrace};
@@ -46,7 +47,7 @@ pub struct MirRef {
     pub offset: RefOffset,
     pub ty: MirTypeId,
     src_ty: MirTypeId,
-    pub async_field: bool,
+    pub async_field: AsyncState,
 }
 
 impl MirGraphElement for MirRef {
@@ -154,7 +155,7 @@ impl MirRef {
             offset: RefOffset::Entire,
             src_ty,
             mutable: false,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
@@ -175,14 +176,14 @@ impl MirRef {
             offset: RefOffset::Entire,
             src_ty,
             mutable: true,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
     pub fn shared_field(
         value: MirValue,
         field: &str,
-        async_: bool,
+        async_: AsyncState,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -209,7 +210,7 @@ impl MirRef {
         value: MirValue,
         variant: &str,
         field: &str,
-        async_: bool,
+        async_: AsyncState,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -247,7 +248,7 @@ impl MirRef {
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
@@ -271,7 +272,7 @@ impl MirRef {
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
@@ -295,14 +296,14 @@ impl MirRef {
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
     pub fn mut_field(
         value: MirValue,
         field: &str,
-        async_: bool,
+        async_: AsyncState,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -327,7 +328,7 @@ impl MirRef {
         value: MirValue,
         variant: &str,
         field: &str,
-        async_: bool,
+        async_: AsyncState,
         ty: MirTypeId,
         graph: &MirFlowGraph,
         reg: &MirTypeRegistry,
@@ -368,7 +369,7 @@ impl MirRef {
             offset: RefOffset::ArrayIndex { index, array_size, element_ty },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
@@ -393,7 +394,7 @@ impl MirRef {
             offset: RefOffset::SliceIndex { index, slice_size: slice_length, element_ty },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 
@@ -419,7 +420,7 @@ impl MirRef {
             offset: RefOffset::ArrayRange { start, end, array_size, element_ty: array_element },
             ty,
             src_ty,
-            async_field: false,
+            async_field: AsyncState::None,
         }
     }
 

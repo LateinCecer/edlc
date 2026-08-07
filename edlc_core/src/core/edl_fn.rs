@@ -25,7 +25,7 @@ use crate::core::edl_var::EdlVarRegistry;
 use crate::core::type_analysis::TypeUid;
 use crate::resolver::ScopeId;
 use std::error::Error;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EdlFnSignature {
@@ -212,11 +212,22 @@ impl FmtType for EdlFnParam {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AsyncState {
     Async,
     Shared,
+    #[default]
     None,
+}
+
+impl Display for AsyncState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AsyncState::Async => f.write_str("async"),
+            AsyncState::Shared => f.write_str("shared"),
+            AsyncState::None => f.write_str("none"),
+        }
+    }
 }
 
 impl AsyncState {

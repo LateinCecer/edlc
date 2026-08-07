@@ -73,6 +73,10 @@ impl MirFuncId {
         self.0
     }
 
+    pub fn from_ordinal(ordinal: usize) -> Self {
+        MirFuncId(ordinal)
+    }
+
     pub fn clean_print(&self) -> String {
         format!("{:x}", self.0)
     }
@@ -952,6 +956,7 @@ impl<B: Backend> MirFuncRegistry<B> {
         id: MirFuncId,
     ) -> Result<Option<&MirFn>, MirError<B>> {
         if let CodeGenState::MirPass { body }
+            | CodeGenState::MirPrePass { body }
             | CodeGenState::Ready { body, .. } = &self.generators.get(id.0)
             .expect("Invalid MIR function id").code_gen {
             /*

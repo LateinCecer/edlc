@@ -29,6 +29,8 @@ mod sync;
 mod validate;
 mod async_analysis;
 mod router;
+mod whole_program;
+mod data;
 
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
@@ -70,11 +72,13 @@ pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unk
 pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
-pub use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncFlowAnalysis};
+pub use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncFlowAnalysis, Async};
+pub use crate::mir::mir_expr::mir_graph::data::{PooledData, PooledDataBuilder, FindDataIndicesIter};
+
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
 use crate::mir::mir_funcs::MirFuncRegistry;
 use crate::mir::TrapInfo;
-use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncConnContext, AsyncConnState, AsyncConnectome};
+use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncConnContext, AsyncConnState, AsyncConnectome, AsyncData, AsyncDataPool, CaptureSources};
 use crate::prelude::mir_funcs::MirFuncId;
 use crate::resolver::ScopeId;
 
@@ -284,6 +288,12 @@ pub struct MirFlowGraph {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct BlockParameterIndex(pub(crate) usize);
+
+impl Display for BlockParameterIndex {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockCall {
@@ -2922,11 +2932,13 @@ impl MirFlowGraph {
         edl_types: &EdlTypeRegistry,
         mir_func_reg: &MirFuncRegistry<B>,
         func_id: Option<MirFuncId>,
-    ) -> Result<AsyncConnectome, <AsyncConnState as LatticeElement>::Conflict> {
-        let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types, func_id);
+        borrow_graph: &BorrowGraph,
+        async_data: &Async,
+    ) -> Result<(AsyncConnectome, AsyncDataPool), <AsyncConnState as LatticeElement>::Conflict> {
+        let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types, func_id, borrow_graph, async_data);
         let mut state = context.create_state();
         WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
-        Ok(AsyncConnectome::new(&state.0.map, state.1.track_functions))
+        Ok((AsyncConnectome::new(&state.0.map, state.1.track_functions), state.1.get_pool()))
     }
 
     /// Find SESE regions in the call graph.

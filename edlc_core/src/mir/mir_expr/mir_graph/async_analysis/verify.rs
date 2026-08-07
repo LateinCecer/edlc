@@ -255,7 +255,7 @@ impl<'a> AsyncVerify<'a> {
                     };
                     report.insert_err(err, debug.pos, src.clone());
                 },
-                Some(AsyncSource::SyncParam(data)) if !allow_local => {
+                Some(AsyncSource::SyncParam(data, index)) if !allow_local => {
                     let (pos_debug, src) = self.pool
                         .get_data_position(*data, cfg).unwrap();
                     let err = AsyncVerifyError::SyncParamDependency {
@@ -453,14 +453,14 @@ impl<'a> AsyncVerify<'a> {
             AsyncState::Async => {
                 for dep in self.conn.dependencies[*value].iter() {
                     match self.conn.get_source(*dep) {
-                        Some(AsyncSource::AsyncParam(_) | AsyncSource::AsyncLocal(_)) => (),
-                        Some(AsyncSource::SharedParam(data)) => {
+                        Some(AsyncSource::AsyncParam(_, _) | AsyncSource::AsyncLocal(_)) => (),
+                        Some(AsyncSource::SharedParam(data, index)) => {
                             todo!()
                         }
                         Some(AsyncSource::Global(var)) => {
                             todo!()
                         }
-                        Some(AsyncSource::SyncParam(data)) => {
+                        Some(AsyncSource::SyncParam(data, index)) => {
                             todo!()
                         },
                         Some(AsyncSource::SyncLocal(data)) => {
@@ -469,16 +469,19 @@ impl<'a> AsyncVerify<'a> {
                         Some(AsyncSource::FunctionLocal(func_id)) => {
                             todo!()
                         },
+                        Some(AsyncSource::SharedField(data)) => {
+                            todo!()
+                        },
                         None => unreachable!(),
                     }
                 }
                 for dep in self.conn.references[*value].iter() {
                     match self.conn.get_source(*dep) {
-                        Some(AsyncSource::AsyncParam(_) | AsyncSource::AsyncLocal(_) | AsyncSource::SharedParam(_)) => (),
+                        Some(AsyncSource::AsyncParam(_, _) | AsyncSource::AsyncLocal(_) | AsyncSource::SharedParam(_, _) | AsyncSource::SharedField(_)) => (),
                         Some(AsyncSource::Global(var)) => {
                             todo!()
                         }
-                        Some(AsyncSource::SyncParam(data)) => {
+                        Some(AsyncSource::SyncParam(data, index)) => {
                             todo!()
                         },
                         Some(AsyncSource::SyncLocal(data)) => {
@@ -496,11 +499,11 @@ impl<'a> AsyncVerify<'a> {
                 for dep in self.conn.dependencies[*value].iter()
                     .chain(self.conn.references[*value].iter()) {
                     match self.conn.get_source(*dep) {
-                        Some(AsyncSource::AsyncParam(_) | AsyncSource::AsyncLocal(_) | AsyncSource::SharedParam(_)) => (),
+                        Some(AsyncSource::AsyncParam(_, _) | AsyncSource::AsyncLocal(_) | AsyncSource::SharedParam(_, _) | AsyncSource::SharedField(_)) => (),
                         Some(AsyncSource::Global(var)) => {
                             todo!()
                         }
-                        Some(AsyncSource::SyncParam(data)) => {
+                        Some(AsyncSource::SyncParam(data, index)) => {
                             todo!()
                         },
                         Some(AsyncSource::SyncLocal(data)) => {
@@ -568,12 +571,7 @@ impl VerifyAsyncReturn for MirTypeInit {
         _mir_funcs: &MirFuncRegistry<B>,
     ) -> Result<(), AsyncVerifyError> {
         for init in self.inits.iter() {
-            let state = if init.async_ {
-                AsyncState::Async
-            } else {
-                AsyncState::Shared
-            };
-            verify.verify_state(&init.val, cfg, phase, state)?;
+            verify.verify_state(&init.val, cfg, phase, init.async_)?;
         }
         Ok(())
     }

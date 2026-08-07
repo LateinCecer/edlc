@@ -21,6 +21,7 @@ use crate::prelude::edl_type::EdlTypeId;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use crate::core::edl_error::EdlError;
+use crate::core::edl_fn::AsyncState;
 use crate::core::edl_type::{EdlEnvId, EdlRepresentation, EdlStructVariant, EdlTypeRegistry, EdlTypeState, Member};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +34,7 @@ struct EdlTuple {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct DictMember {
     name: String,
-    async_: bool,
+    async_: AsyncState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,7 +62,7 @@ impl Display for EdlDictNameSet {
 impl EdlDictNameSet {
     pub fn new<I, S>(content: I) -> Self
     where
-        I: IntoIterator<Item=(S, bool)>,
+        I: IntoIterator<Item=(S, AsyncState)>,
         S: AsRef<str>,
     {
         let mut content = content.into_iter()
@@ -105,7 +106,7 @@ pub fn create_tuple_state(
         let ty = reg.find_generic_type(env_id, i)?;
         members.push(Member {
             ty: reg.new_type_instance(ty).unwrap(),
-            async_: false,
+            async_: AsyncState::None,
         });
     }
     Ok(EdlTypeState::Struct {

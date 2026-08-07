@@ -19,6 +19,7 @@ use std::fmt::{Display, Formatter};
 use crate::ast::ast_param_env::AstPreParams;
 use crate::ast::ItemDoc;
 use crate::core::edl_error::EdlError;
+use crate::core::edl_fn::AsyncState;
 use crate::core::edl_param_env::EdlParamStack;
 use crate::core::edl_trait::EdlTraitId;
 use crate::core::edl_type::{EdlAliasId, EdlEnumVariant, EdlExtendedType, EdlFnInstance, EdlMaybeType, EdlTraitInstance, EdlType, EdlTypeInstance, EdlTypeState};
@@ -535,7 +536,7 @@ pub struct HirDictMember {
     pub name: String,
     pub ty: HirType,
     pub doc: Option<ItemDoc>,
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 

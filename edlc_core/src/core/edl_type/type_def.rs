@@ -20,6 +20,7 @@ use crate::core::type_analysis::*;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::Range;
+use crate::core::edl_fn::AsyncState;
 
 #[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 /// The inner memory representation of types in EDL.
@@ -98,7 +99,7 @@ pub enum EdlTypeState {
 #[derive(Clone, Debug)]
 pub struct Member {
     pub ty: EdlTypeInstance,
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +171,7 @@ impl EdlStructVariant {
         &self,
         values: I,
         infer_at: &mut InferAt<'_, '_, '_>,
-    ) -> Result<Vec<(bool, bool)>, EdlTypeInitError> {
+    ) -> Result<Vec<(bool, AsyncState)>, EdlTypeInitError> {
         match self {
             EdlStructVariant::List(list) => {
                 let mut deref = Vec::new();
@@ -202,7 +203,7 @@ impl EdlStructVariant {
         &self,
         values: I,
         infer_at: &mut InferAt<'_, '_, '_>,
-    ) -> Result<Vec<(bool, bool)>, EdlTypeInitError> {
+    ) -> Result<Vec<(bool, AsyncState)>, EdlTypeInitError> {
         match self {
             EdlStructVariant::List(_) => Err(EdlTypeInitError::ExpectedNamed),
             EdlStructVariant::Named(map) => {

@@ -21,6 +21,7 @@ use crate::ast::{AstElement, IntoHir};
 use crate::ast::ast_error::AstTranslationError;
 use crate::ast::ast_expression::type_init_expr::AstStructMemberInit;
 use crate::ast::ast_type::AstTypeNameEntry;
+use crate::core::edl_fn::AsyncState;
 use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::hir_expr::HirExpression;
@@ -207,13 +208,18 @@ impl AstBlockOrInit {
                 }
             }
 
-            let async_ = if content.is_empty()
-                && allow_init
-                && matches!(parser.peak(), Ok(local!(Token::Key(KeyWord::Async)))) {
-
-                Some(parser.next_token()?)
+            let (async_, async_token) = if content.is_empty() && allow_init {
+                match parser.peak() {
+                    Ok(local!(Token::Key(KeyWord::Async))) => {
+                        (AsyncState::Async, Some(parser.next_token()?))
+                    }
+                    Ok(local!(Token::Key(KeyWord::Shared))) => {
+                        (AsyncState::Shared, Some(parser.next_token()?))
+                    }
+                    _ => (AsyncState::None, None)
+                }
             } else {
-                None
+                (AsyncState::None, None)
             };
 
             // parse expression
@@ -232,7 +238,7 @@ impl AstBlockOrInit {
                         } = name.path.pop().unwrap();
 
                         let value = AstExpr::parse(parser)?;
-                        let m = AstStructMemberInit::from_value(name.clone(), pos, value, async_.is_some());
+                        let m = AstStructMemberInit::from_value(name.clone(), pos, value, async_);
                         // continue with block init
                         return Self::continue_parse_block_init(vec![m], InitReason::NamedParameter(reason_pos, name), parser);
                     }
@@ -248,13 +254,13 @@ impl AstBlockOrInit {
                             ..
                         } = name.path.pop().unwrap();
 
-                        let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src, async_.is_some());
+                        let m = AstStructMemberInit::from_name(name.clone(), pos, scope, src, async_);
                         // continue with block init
                         return Self::continue_parse_block_init(vec![m], InitReason::Comma(reason_pos, name), parser);
                     }
                 }
 
-                if let Some(async_) = async_ {
+                if let Some(async_) = async_token {
                     // we're not entering init mode, but there was an `async`
                     return Err(ParseError::UnexpectedToken(
                         Box::new(async_),

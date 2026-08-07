@@ -15,6 +15,7 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+use crate::core::edl_fn::AsyncState;
 use crate::mir::mir_expr::mir_graph::{BorrowGraph, ConstFrame};
 use crate::mir::mir_expr::{ExecutionError, MirGraphElement, MirValue, StackFrameLayout};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
@@ -27,7 +28,7 @@ pub struct MirInitAssign {
     pub off: usize,
     pub val: MirValue,
     /// For aggregate types: is the parameter defined as `async` in the type definition?
-    pub async_: bool,
+    pub async_: AsyncState,
 }
 
 #[derive(Clone, Debug, PartialEq)]

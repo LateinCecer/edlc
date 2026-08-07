@@ -21,7 +21,7 @@ mod type_def;
 
 use crate::core::edl_alias::EdlAlias;
 use crate::core::edl_error::EdlError;
-use crate::core::edl_fn::{EdlFnSignature, EdlFunctionBody};
+use crate::core::edl_fn::{AsyncState, EdlFnSignature, EdlFunctionBody};
 use crate::core::edl_param_env::{AdaptOther, AdaptOtherWithStack, Adaptable, AdaptableWithStack, EdlGenericParam, EdlGenericParamValue, EdlGenericParamVariant, EdlParamStack, EdlParameterDef, EdlParameterEnv};
 use crate::core::edl_trait::{EdlTrait, EdlTraitId};
 use crate::core::edl_type::anon::AnonymousTypes;
@@ -700,6 +700,19 @@ impl EdlTypeInstance {
             self.param.get_const_mut(1)
         }
     }
+
+    pub fn is_ref(&self) -> bool {
+        self.ty == EDL_REF
+    }
+
+    pub fn is_mutable_ref(&self) -> Result<bool, EdlError> {
+        if self.is_ref() {
+            self.param.get_const(1)
+                .map(|c| c.clone().unwrap_literal().unwrap_bool())
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 impl Adaptable for EdlTypeInstance {
@@ -1282,7 +1295,7 @@ impl EdlTypeRegistry {
     }
 
     pub fn dict<I>(&mut self, members: I) -> Result<EdlTypeInstance, EdlError>
-    where I: IntoIterator<Item=(String, EdlMaybeType, bool)> {
+    where I: IntoIterator<Item=(String, EdlMaybeType, AsyncState)> {
         let mut names = Vec::new();
         let mut types = Vec::new();
         for (name, ty, async_) in members.into_iter() {
