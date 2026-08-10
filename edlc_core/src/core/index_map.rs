@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
-
+#[derive(PartialEq, Eq)]
 pub struct IndexMap<T> {
     data: Vec<Option<T>>,
 }

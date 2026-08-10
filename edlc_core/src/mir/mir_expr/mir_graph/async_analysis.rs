@@ -47,11 +47,12 @@ use edlc_analysis::graph::{CfgNodeState, CfgNodeStateMut, HashNodeState, IsDefau
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
+use log::warn;
 use crate::core::edl_fn::{AsyncState, EdlFnSignature};
 use crate::mir::mir_expr::mir_ref::RefOffset;
 
 pub use crate::mir::mir_expr::mir_graph::async_analysis::verify::{AsyncVerify, AsyncVerifyError};
-use crate::prelude::Item::GlobalVar;
+pub use crate::mir::mir_expr::mir_graph::async_analysis::connectome_analysis::{WpgAsyncState, WpgConnectomeAnalysis, WpgAsyncError};
 use crate::prelude::mir_expr::mir_graph::async_analysis::global_state::GlobalVarAsyncState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -364,6 +365,36 @@ impl Index<MirValue> for ConnectomeReferences {
     }
 }
 
+impl PooledData<AsyncId> {
+    /// Compares the sources referenced through the IDs in both pools.
+    fn compare_sources(
+        &self,
+        other: &Self,
+        source_lhs: &[AsyncSource],
+        source_rhs: &[AsyncSource],
+    ) -> bool {
+        if self.indices.len() != other.indices.len() || self.data.len() != other.data.len() {
+            return false;
+        }
+
+        for (lhs, rhs) in self.iter().zip(other.iter()) {
+            let mut rhs = rhs
+                .iter()
+                .map(|id| source_rhs[id.0 as usize])
+                .collect::<HashSet<_>>();
+            for item in lhs.iter().map(|id| &source_lhs[id.0 as usize]) {
+                if !rhs.remove(item) {
+                    return false;
+                }
+            }
+            if !rhs.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Contains the globals that need to be synchronized before entering a function.
 #[derive(Debug)]
 pub struct FuncSync {
@@ -393,6 +424,13 @@ pub struct AsyncConnectome {
     func_to_id: BTreeMap<MirFuncId, AsyncId>,
     global_to_id: BTreeMap<EdlVarId, AsyncId>,
     track_function_state: bool,
+}
+
+impl PartialEq for AsyncConnectome {
+    fn eq(&self, other: &Self) -> bool {
+        self.dependencies.0.compare_sources(&other.dependencies.0, &self.id_to_source, &other.id_to_source)
+            && self.references.0.compare_sources(&other.references.0, &self.id_to_source, &other.id_to_source)
+    }
 }
 
 impl Display for AsyncConnectome {
@@ -480,15 +518,18 @@ impl AsyncConnectome {
             }
         }
 
+        let dependencies = PooledData {
+            indices: value_index,
+            data: ids,
+        };
+        let references = PooledData {
+            indices: ref_value_index,
+            data: ref_ids,
+        };
+
         Self {
-            dependencies: ConnectomeDependencies(PooledData {
-                indices: value_index,
-                data: ids,
-            }),
-            references: ConnectomeReferences(PooledData {
-                indices: ref_value_index,
-                data: ref_ids,
-            }),
+            dependencies: ConnectomeDependencies(dependencies),
+            references: ConnectomeReferences(references),
             id_to_source,
             func_to_id,
             global_to_id,
@@ -517,7 +558,7 @@ impl AsyncConnectome {
     /// Returns the connection state for the specified SSA variable.
     /// All sources that are only accessible from within this function are converted to the
     /// [AsyncSource::FunctionLocal] source variant with `this_id` as the referred function id.
-    fn get_global_state<F>(&self, value: &MirValue, this_id: MirFuncId, filter: F) -> AsyncConnState
+    pub fn get_global_state<F>(&self, value: &MirValue, this_id: MirFuncId, filter: F) -> AsyncConnState
     where F: Fn(&AsyncSource) -> bool {
         let map = |id: &AsyncId| -> Option<AsyncSource> {
             let src = self.get_source(*id)?;
@@ -547,7 +588,39 @@ impl AsyncConnectome {
     }
 
     /// Returns the connection state for the specified SSA variable.
-    fn get_conn_state<F>(&self, value: &MirValue, filter: F) -> AsyncConnState
+    /// All sources that are only accessible from within this function are converted to the
+    /// [AsyncSource::FunctionLocal] source variant with `this_id` as the referred function id.
+    pub fn get_global_var_state<F>(&self, value: &MirValue, this_id: EdlVarId, filter: F) -> AsyncConnState
+    where F: Fn(&AsyncSource) -> bool {
+        let map = |id: &AsyncId| -> Option<AsyncSource> {
+            let src = self.get_source(*id)?;
+            if filter(src) {
+                match src {
+                    AsyncSource::Global(_)
+                    | AsyncSource::FunctionLocal(_)
+                    | AsyncSource::SharedParam(_, _)
+                    | AsyncSource::AsyncParam(_, _) => Some(*src),
+                    _ => Some(AsyncSource::Global(this_id)),
+                }
+            } else {
+                None
+            }
+        };
+
+        AsyncConnState {
+            dependencies: self.dependencies[*value]
+                .iter()
+                .filter_map(map)
+                .collect(),
+            references: self.references[*value]
+                .iter()
+                .filter_map(map)
+                .collect(),
+        }
+    }
+
+    /// Returns the connection state for the specified SSA variable.
+    pub fn get_conn_state<F>(&self, value: &MirValue, filter: F) -> AsyncConnState
     where F: Fn(&AsyncSource) -> bool {
         let filter = |id: &AsyncId| -> Option<AsyncSource> {
             let src = self.get_source(*id).unwrap();
@@ -621,6 +694,24 @@ impl Async {
             sync: SyncSources::new(),
         }
     }
+
+    /// Updates the async information for a single function.
+    pub fn update_function(
+        &mut self,
+        func: MirFuncId,
+        connectome: &AsyncConnectome,
+        pool: &AsyncDataPool,
+        cfg: &MirFlowGraph,
+        sig: &EdlFnSignature,
+    ) {
+        let function_capture = FunctionCaptureSource::new(connectome, cfg, sig, func, pool);
+        self.functions.insert(func, function_capture);
+        self.sync.tree.insert(func, pool.get_sync());
+    }
+
+    pub fn update_global(&mut self, global_var: &EdlVarId, state: AsyncConnState) {
+        self.globals.insert(global_var, state);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -636,6 +727,12 @@ struct FunctionCaptureSource {
 
 pub struct CaptureSources {
     sources: BTreeMap<MirFuncId, FunctionCaptureSource>
+}
+
+impl CaptureSources {
+    fn insert(&mut self, func: MirFuncId, source: FunctionCaptureSource) {
+        self.sources.insert(func, source);
+    }
 }
 
 impl Default for CaptureSources {
@@ -907,6 +1004,32 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
         ctx
     }
 
+    pub fn with_pool(
+        reg: &'reg MirTypeRegistry,
+        cfg: &'reg MirFlowGraph,
+        func: &'reg MirFuncRegistry<B>,
+        edl_types: &'reg EdlTypeRegistry,
+        borrow_graph: &'reg BorrowGraph,
+        async_data: &'reg Async,
+        pool: AsyncDataPool,
+    ) -> Self {
+        AsyncConnContext {
+            reg,
+            cfg,
+            func,
+            edl_types,
+            borrow_graph,
+            async_data,
+            parameters: pool.parameters,
+            source_counter: pool.source_counter,
+            source_references: pool.source_references,
+            source_reverse: pool.source_reverse,
+            track_functions: true,
+            global_captures: pool.captures_globals,
+            function_captures: pool.captures_functions,
+        }
+    }
+
     pub fn create_state(self) -> MirGraphState<AsyncConnState, Self> {
         let mut state = MirGraphState::new(self);
         for (param, value) in state.1.parameters
@@ -930,6 +1053,7 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
 
     pub fn get_pool(self) -> AsyncDataPool {
         AsyncDataPool {
+            source_counter: self.source_counter,
             source_reverse: self.source_reverse,
             source_references: self.source_references,
             parameters: self.parameters,
@@ -939,8 +1063,10 @@ impl<'reg, B: Backend> AsyncConnContext<'reg, B> {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub struct AsyncDataPool {
     parameters: Vec<AsyncSource>,
+    source_counter: usize,
     source_references: IndexMap<AsyncData>,
     source_reverse: IndexMap<MirValue>,
     captures_globals: HashSet<EdlVarId>,
@@ -960,6 +1086,13 @@ impl AsyncDataPool {
         self.get_data_source(id)
             .and_then(|value| cfg.find_definition(value))
             .and_then(|def_point| cfg.find_def_debug_info(&def_point))
+    }
+
+    pub fn get_sync(&self) -> FuncSync {
+        FuncSync {
+            global_states: self.captures_globals.iter().cloned().collect(),
+            function_states: self.captures_functions.iter().cloned().collect(),
+        }
     }
 }
 
@@ -1080,17 +1213,14 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
         let sig = ctx.edl_types.get_fn_signature(func_edl)
             .unwrap();
 
-        if !sig.async_return {
-            let mut state = AsyncConnState::new(
-                AsyncSource::SyncLocal(ctx.get_async_data(target)));
-            if ctx.track_functions && !sig.async_ {
-                state.add_source(AsyncSource::FunctionLocal(self.func));
-            }
+        if let Some(source) = ctx.async_data.functions.get_source(&self.func) {
+            ctx.global_captures.extend(source.input_globals.iter().cloned());
+            ctx.function_captures.extend(source.input_functions.iter().cloned());
+        }
 
-            if let Some(source) = ctx.async_data.functions.get_source(&self.func) {
-                ctx.global_captures.extend(source.input_globals.iter().cloned());
-                ctx.function_captures.extend(source.input_functions.iter().cloned());
-            }
+        if !sig.async_return {
+            let state = AsyncConnState::new(
+                AsyncSource::SyncLocal(ctx.get_async_data(target)));
             return Ok(input.replace(target, state));
         }
 
@@ -1117,6 +1247,10 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
                 },
                 AsyncState::None => (),
             }
+        }
+
+        if let Some(output_state) = ctx.async_data.functions.get_source(&self.func) {
+            state.extend(&output_state.output);
         }
         Ok(input.replace(target, state))
     }
@@ -1248,11 +1382,17 @@ impl<'reg, B: Backend> ExprEval<AsyncConnState, AsyncConnContext<'reg, B>> for M
     fn eval(
         &self,
         input: &mut HashNodeState<MirValue, AsyncConnState>,
-        _ctx: &mut AsyncConnContext<'reg, B>,
+        ctx: &mut AsyncConnContext<'reg, B>,
         _loc: &MirGraphLoc,
         target: &MirValue,
     ) -> Result<bool, AsyncConnConflict> {
-        Ok(input.replace(target, AsyncConnState::new(AsyncSource::Global(self.var))))
+        ctx.global_captures.insert(self.var);
+        if let Some(state) = ctx.async_data.globals.find(&self.var) {
+            Ok(input.replace(target, state.clone()))
+        } else {
+            warn!("[async] Async-state for global is missing. Inferring minimal dependencies");
+            Ok(input.replace(target, AsyncConnState::new(AsyncSource::Global(self.var))))
+        }
     }
 }
 

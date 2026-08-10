@@ -406,7 +406,6 @@ pub struct CraneliftJIT<Runtime: 'static> {
     pub backend: JIT<Runtime>,
 
     intrinsic_names: HashSet<String>,
-    async_data: Async,
 }
 
 impl<Runtime: 'static> Default for CraneliftJIT<Runtime> {
@@ -415,7 +414,6 @@ impl<Runtime: 'static> Default for CraneliftJIT<Runtime> {
             compiler: EdlCompiler::new(),
             backend: JIT::default(),
             intrinsic_names: HashSet::default(),
-            async_data: Async::empty(),
         }
     }
 }
@@ -673,10 +671,14 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 HirItem::Let(val) => {
                     let mut code = val.value
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
-                    let options = CompileOptions::default();
-                    let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
-                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                    let options = CompileOptions {
+                        comptime_only: true,
+                        .. Default::default()
+                    };
+                    let compile_result = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    compile_result.register_global(val.id().unwrap(), &mut self.compiler.async_state);
+                    match code.execute(vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
                         },
@@ -688,10 +690,13 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
                 HirItem::Const(val) => {
                     let mut code = val.value
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
-                    let options = CompileOptions::default();
-                    let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
-                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                    let options = CompileOptions {
+                        comptime_only: true,
+                        .. Default::default()
+                    };
+                    let compile_result = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
                         },
@@ -811,8 +816,8 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
 
         // make sure function is compiled
         let mut vm = ExecutorVM::new(24 * 1024 * 1024); // 24 MiB stack
-        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend, &self.async_data)?;
-        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend, &self.async_data)?;
+        process_comptime_functions(&mut vm, &mut self.compiler, &mut self.backend)?;
+        process_function_mir_pass(&mut vm, &mut self.compiler, &mut self.backend)?;
         self.backend
             .compile_associated_functions(&mut self.compiler.mir_phase, &mut self.compiler.phase)?;
 
@@ -1156,6 +1161,15 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
     }
 
     /// Evaluates an expression inside the compiler internal VM.
+    ///
+    /// # Regarding the 'Quick'
+    ///
+    /// Quick in this case refers to the code generation overhead.
+    /// Since this function evaluates the expression on the VM by executing the MIR representation
+    /// directly, there is no code-gen overhead at all, leading to a quicker start of the
+    /// evaluation sequence.
+    /// However, since the VM is _much_ slower than JIT-generated machine code, the runtime of the
+    /// code itself will be much slower than through a normal eval.
     pub fn quick_eval<T: 'static>(
         &mut self,
         module: &QualifierName,
@@ -1209,20 +1223,19 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
 
         let mut vm = ExecutorVM::new(24 * 1024 * 1024);
         let options = CompileOptions::default();
-        let stack_frame = compile_expression(
+        let compile_result = compile_expression(
             &mut body,
             &mut vm,
             &mut self.compiler,
             &mut self.backend,
             &options,
-            &self.async_data,
         )?;
         self.backend.compile_associated_functions(
             &mut self.compiler.mir_phase,
             &mut self.compiler.phase,
         )?;
-        vm.alloc_stack_frame(&stack_frame);
-        match body.execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+        vm.alloc_stack_frame(&compile_result.stack);
+        match body.execute(&mut vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend) {
             Err(_err) => {
                 Err(anyhow!("failed to execute expression"))
             },

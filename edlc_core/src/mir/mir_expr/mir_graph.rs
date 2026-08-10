@@ -72,7 +72,13 @@ pub(super) use crate::mir::mir_expr::mir_graph::const_eval::{report_comptime_unk
 pub use crate::mir::mir_expr::mir_graph::borrow::{BorrowGraph, BorrowState};
 pub use crate::mir::mir_expr::mir_graph::const_eval::{process_comptime_functions, process_function_mir_pass, compile_expression, OptimizationError, CompileOptions};
 pub use crate::mir::mir_expr::mir_graph::deconstruction::{StackFrameLayout, StackFrameOptions};
-pub use crate::mir::mir_expr::mir_graph::async_analysis::{AsyncFlowAnalysis, Async};
+pub use crate::mir::mir_expr::mir_graph::async_analysis::{
+    AsyncFlowAnalysis,
+    Async,
+    WpgConnectomeAnalysis,
+    WpgAsyncState,
+    WpgAsyncError,
+};
 pub use crate::mir::mir_expr::mir_graph::data::{PooledData, PooledDataBuilder, FindDataIndicesIter};
 
 use crate::mir::mir_expr::mir_graph::sync::SyncEvent;
@@ -2936,6 +2942,21 @@ impl MirFlowGraph {
         async_data: &Async,
     ) -> Result<(AsyncConnectome, AsyncDataPool), <AsyncConnState as LatticeElement>::Conflict> {
         let context = AsyncConnContext::new(mir_types, self, mir_func_reg, edl_types, func_id, borrow_graph, async_data);
+        let mut state = context.create_state();
+        WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
+        Ok((AsyncConnectome::new(&state.0.map, state.1.track_functions), state.1.get_pool()))
+    }
+
+    pub fn async_connectome_with_pool<B: Backend>(
+        &self,
+        mir_types: &MirTypeRegistry,
+        edl_types: &EdlTypeRegistry,
+        mir_func_reg: &MirFuncRegistry<B>,
+        borrow_graph: &BorrowGraph,
+        async_data: &Async,
+        pool: AsyncDataPool,
+    ) -> Result<(AsyncConnectome, AsyncDataPool), <AsyncConnState as LatticeElement>::Conflict> {
+        let context = AsyncConnContext::with_pool(mir_types, self, mir_func_reg, edl_types, borrow_graph, async_data, pool);
         let mut state = context.create_state();
         WorkListFixpointForward.solve(self, &mut state, AsyncConnState::upper)?;
         Ok((AsyncConnectome::new(&state.0.map, state.1.track_functions), state.1.get_pool()))

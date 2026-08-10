@@ -212,10 +212,14 @@ impl TestCompiler {
                 HirItem::Let(val) => {
                     let mut code = val.value
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
-                    let options = CompileOptions::default();
-                    let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
-                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                    let options = CompileOptions {
+                        comptime_only: true,
+                        .. Default::default()
+                    };
+                    let compile_result = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    compile_result.register_global(val.id().unwrap(), &mut self.compiler.async_state);
+                    match code.execute(vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
                         },
@@ -227,10 +231,13 @@ impl TestCompiler {
                 HirItem::Const(val) => {
                     let mut code = val.value
                         .prepare_mir_eval(&mut self.compiler, &mut self.backend, Context::Comptime)?;
-                    let options = CompileOptions::default();
-                    let stack_frame = compile_expression(
-                        &mut code, vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
-                    match code.execute(vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend) {
+                    let options = CompileOptions {
+                        comptime_only: true,
+                        .. Default::default()
+                    };
+                    let compile_result = compile_expression(
+                        &mut code, vm, &mut self.compiler, &mut self.backend, &options)?;
+                    match code.execute(vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend) {
                         Err(_err) => {
                             return Err(anyhow!("panic in execution of global variable"));
                         },
@@ -305,8 +312,8 @@ impl TestCompiler {
 
         let mut vm = ExecutorVM::new(1024 * 1024);
         let options = CompileOptions::default();
-        let stack_frame = compile_expression(
-            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options, &self.async_data)?;
+        let compile_result = compile_expression(
+            &mut body, &mut vm, &mut self.compiler, &mut self.backend, &options)?;
 
         // print result
         // write MIR code to file for debugging
@@ -317,9 +324,9 @@ impl TestCompiler {
             out.flush()?;
         }
 
-        vm.alloc_stack_frame(&stack_frame);
+        vm.alloc_stack_frame(&compile_result.stack);
         let res = body
-            .execute(&mut vm, &stack_frame, &self.compiler.mir_phase.types, &self.backend);
+            .execute(&mut vm, &compile_result.stack, &self.compiler.mir_phase.types, &self.backend);
         match res {
             Ok(val) => {
                 println!("success!");

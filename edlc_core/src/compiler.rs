@@ -47,6 +47,7 @@ use crate::documentation::{DocCompilerState, DocElement, DocGenerator};
 use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
 use crate::lexer::SrcPos;
 use crate::mir::mir_backend::Backend;
+use crate::mir::mir_expr::Async;
 use crate::mir::mir_type::layout::MirLayout;
 use crate::mir::MirPhase;
 use crate::parser::{InFile, LocatedParseError, Parsable, Parser, ReportError};
@@ -97,6 +98,7 @@ pub struct EdlCompiler {
     pub phase: HirPhase,
     core_lib_scope: ScopeId,
     pub mir_phase: MirPhase,
+    pub async_state: Async,
 }
 
 impl EdlCompiler {
@@ -113,6 +115,7 @@ impl EdlCompiler {
             phase,
             core_lib_scope,
             mir_phase: MirPhase::default(),
+            async_state: Async::empty(),
         }
     }
 }

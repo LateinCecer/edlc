@@ -15,8 +15,8 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::collections::HashSet;
-use std::ops::{Index, IndexMut};
+use std::collections::{btree_map, BTreeMap, HashSet};
+use std::ops::Index;
 use crate::core::index_map::IndexMap;
 use crate::mir::mir_backend::Backend;
 use crate::mir::mir_expr::{PooledData, PooledDataBuilder};
@@ -32,17 +32,42 @@ impl Edge {
 }
 
 pub struct WpgState<T> {
-    data: Vec<T>,
+    data: BTreeMap<MirFuncId, T>,
 }
 
 impl<T> WpgState<T> {
-    pub fn new<F: FnMut(MirFuncId) -> Result<T, E>, E>(wpg: &Wpg, init: F) -> Result<Self, E> {
+    pub fn new<F: FnMut(MirFuncId) -> Result<T, E>, E>(wpg: &Wpg, mut init: F) -> Result<Self, E> {
+        let data = wpg.rev_nodes
+            .iter()
+            .map(|f| init(*f).map(|res| (*f, res)))
+            .collect::<Result<BTreeMap<MirFuncId, T>, E>>()?;
+
         Ok(Self {
-            data: (0..wpg.len())
-                .map(|i| MirFuncId::from_ordinal(i))
-                .map(init)
-                .collect::<Result<Vec<T>, E>>()?,
+            data,
         })
+    }
+
+    pub fn based_on_state<F: FnMut(MirFuncId) -> Result<T, E>, E>(
+        wpg: &Wpg,
+        mut init: F,
+        mut state: WpgState<T>,
+    ) -> Result<Self, E> {
+        for func_id in wpg.rev_nodes.iter() {
+            state.data.insert(*func_id, init(*func_id)?);
+        }
+        Ok(state)
+    }
+
+    pub fn get_mut(&mut self, f: &MirFuncId) -> Option<&mut T> {
+        self.data.get_mut(f)
+    }
+
+    pub fn iter(&self) -> btree_map::Iter<MirFuncId, T> {
+        self.data.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> btree_map::IterMut<MirFuncId, T> {
+        self.data.iter_mut()
     }
 }
 
@@ -50,18 +75,18 @@ impl<T> Index<MirFuncId> for WpgState<T> {
     type Output = T;
 
     fn index(&self, index: MirFuncId) -> &Self::Output {
-        &self.data[index.ordinal()]
+        &self.data[&index]
     }
 }
 
-impl<T> IndexMut<MirFuncId> for WpgState<T> {
-    fn index_mut(&mut self, index: MirFuncId) -> &mut Self::Output {
-        &mut self.data[index.ordinal()]
-    }
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd, Hash)]
+struct NodeId(usize);
 
 /// Whole Program Graph
 pub struct Wpg {
+    nodes: BTreeMap<MirFuncId, NodeId>,
+    rev_nodes: Vec<MirFuncId>,
     edges: PooledData<MirFuncId>,
     reverse_edges: PooledData<MirFuncId>,
     comptime: bool,
@@ -69,18 +94,6 @@ pub struct Wpg {
 
 impl Wpg {
     pub fn new<B: Backend>(functions: &MirFuncRegistry<B>, comptime: bool) -> Self {
-        let (edges, reverse_edges) = Self::build_edges(functions, comptime);
-        Self {
-            edges,
-            reverse_edges,
-            comptime,
-        }
-    }
-
-    fn build_edges<B: Backend>(
-        functions: &MirFuncRegistry<B>,
-        comptime: bool,
-    ) -> (PooledData<MirFuncId>, PooledData<MirFuncId>) {
         let mut pool = PooledDataBuilder::new();
         let mut funcs = if comptime {
             functions.collect_comptime_pass()
@@ -89,15 +102,30 @@ impl Wpg {
         };
         funcs.sort_by_key(|f| f.mir_id.unwrap());
 
+        let rev_nodes = funcs.iter().map(|f| f.mir_id.unwrap()).collect::<Vec<_>>();
+        let mut nodes = BTreeMap::<MirFuncId, NodeId>::new();
+        rev_nodes.iter().enumerate().for_each(|(node_id_raw, value)| {
+            nodes.insert(*value, NodeId(node_id_raw));
+        });
+
         let mut backlink_counter = IndexMap::<HashSet<MirFuncId>>::default();
         for func in funcs.iter() {
             let id = func.mir_id.unwrap();
-            pool.push_index_until(id.ordinal());
+            pool.push_index();
+
             for call in func.body.expressions.call.iter() {
                 pool.push_data(call.func);
-                backlink_counter
-                    .view_mut(call.func.ordinal())
-                    .update(|set| { set.insert(id); }, HashSet::new);
+                if let Some(callee_node) = nodes.get(&call.func) {
+                    // the callee might not be in the active batch, in which case it is not listed
+                    // in the 'nodes' data.
+                    // this can only occur if the callee is already fully compiled.
+                    // in that case, we don't need to establish a backlink at all.
+                    backlink_counter
+                        .view_mut(callee_node.0)
+                        .update(|set| {
+                            set.insert(id);
+                        }, HashSet::new);
+                }
             }
         }
 
@@ -108,18 +136,24 @@ impl Wpg {
             backlinks.push_index_until(i);
             num_links.iter().for_each(|item| backlinks.push_data(*item));
         }
-        (pool, backlinks.build())
+        Self {
+            edges: pool,
+            reverse_edges: backlinks.build(),
+            comptime,
+            nodes,
+            rev_nodes,
+        }
     }
 
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.edges.len()
     }
 
-    fn edges(&self, parent: MirFuncId) -> std::slice::Iter<'_, MirFuncId> {
-        self.edges[parent.ordinal()].iter()
+    pub fn edges(&self, parent: &MirFuncId) -> std::slice::Iter<'_, MirFuncId> {
+        self.edges[self.nodes[parent].0].iter()
     }
 
-    fn reverse_edges(&self, child: MirFuncId) -> std::slice::Iter<'_, MirFuncId> {
-        self.reverse_edges[child.ordinal()].iter()
+    pub fn reverse_edges(&self, child: &MirFuncId) -> std::slice::Iter<'_, MirFuncId> {
+        self.reverse_edges[self.nodes[child].0].iter()
     }
 }

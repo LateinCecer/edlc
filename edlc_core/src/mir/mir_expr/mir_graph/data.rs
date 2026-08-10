@@ -157,6 +157,13 @@ impl<V> PooledData<V> {
         self.indices.binary_search(data_index).unwrap_or_else(|idx| idx - 1)
     }
 
+    pub fn iter(&self) -> IterPoolSlices<'_, V> {
+        IterPoolSlices {
+            pool: self,
+            index: 0,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.indices.len()
     }
@@ -194,6 +201,25 @@ impl<V> IndexMut<usize> for PooledData<V> {
             &mut self.data[self.indices[index]..end]
         } else {
             &mut self.data[0..0]
+        }
+    }
+}
+
+pub struct IterPoolSlices<'a, V> {
+    pool: &'a PooledData<V>,
+    index: usize,
+}
+
+impl<'a, V> Iterator for IterPoolSlices<'a, V> {
+    type Item = &'a [V];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.pool.len() {
+            let index = self.index;
+            self.index += 1;
+            Some(self.pool.index(index))
+        } else {
+            None
         }
     }
 }
