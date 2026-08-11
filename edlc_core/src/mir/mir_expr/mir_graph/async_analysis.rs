@@ -19,6 +19,7 @@ mod verify;
 mod connectome_analysis;
 mod shared_verify;
 mod global_state;
+mod dependency_checker;
 
 use crate::core::edl_type::EdlTypeRegistry;
 use crate::core::index_map::IndexMap;
@@ -53,6 +54,8 @@ use crate::mir::mir_expr::mir_ref::RefOffset;
 
 pub use crate::mir::mir_expr::mir_graph::async_analysis::verify::{AsyncVerify, AsyncVerifyError};
 pub use crate::mir::mir_expr::mir_graph::async_analysis::connectome_analysis::{WpgAsyncState, WpgConnectomeAnalysis, WpgAsyncError};
+pub use crate::mir::mir_expr::mir_graph::async_analysis::shared_verify::{SharedVerify, SharedVerifyError};
+
 use crate::prelude::mir_expr::mir_graph::async_analysis::global_state::GlobalVarAsyncState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,7 +293,7 @@ impl Display for AsyncConnState {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AsyncId(u32);
 
 impl Display for AsyncId {
@@ -518,14 +521,17 @@ impl AsyncConnectome {
             }
         }
 
-        let dependencies = PooledData {
+        let mut dependencies = PooledData {
             indices: value_index,
             data: ids,
         };
-        let references = PooledData {
+        dependencies.sort_sub_slices();
+
+        let mut references = PooledData {
             indices: ref_value_index,
             data: ref_ids,
         };
+        references.sort_sub_slices();
 
         Self {
             dependencies: ConnectomeDependencies(dependencies),
@@ -794,9 +800,9 @@ impl FunctionCaptureSource {
             output_state.extend_as_reference(&tmp);
         }
 
-        if !sig.async_return && output_state.contains_params() {
-            panic!("output state references function parameters in non-async return function");
-        }
+        // if !sig.async_return && output_state.contains_params() {
+        //     panic!("output state references function parameters in non-async return function");
+        // }
 
         // some parameters may be mutable references.
         // in that case, changing the parameter value inadvertently changes the referenced value in

@@ -2342,12 +2342,33 @@ fn test() {
     grad_p.log();
     print("logging dispatched\n");
 }
+
+fn log_velocity_laplace() {
+    comptime {
+        LaplaceAction {
+            field: u.as_device_ptr(),
+            dst: scalar_field.as_device_ptr(),
+        }
+    }.dispatch();
+}
+
+fn test_capture() {
+    print("init capture test\n");
+    init_field(comptime { u.field_as_ptr() });
+    log_velocity_laplace();
+    print("capture test exit\n");
+}
         "#))?;
 
         let proto_func = compiler.get_named_proto_function(inline_code!("test"))?;
         let prog: extern "C" fn() = proto_func.invoke(true)?;
         // let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
         assert!(compiler.catch_unwind(prog, ()).is_ok());
+
+        println!("\n\n ---------------------------- \n\n");
+
+        let capture_test: extern "C" fn() = compiler.get_named_function(inline_code!("test_capture"))?;
+        assert!(compiler.catch_unwind(capture_test, ()).is_ok());
         Ok(())
     }
 }

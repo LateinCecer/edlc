@@ -15,6 +15,7 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
 
@@ -45,6 +46,11 @@ impl<V> PooledDataBuilder<V> {
         if !self.data[*current..].contains(&data) {
             self.data.push(data);
         }
+    }
+
+    pub fn push_all<I: IntoIterator<Item=V>>(&mut self, data: I)
+    where V: PartialEq + Eq {
+        data.into_iter().for_each(|data| self.push_data(data));
     }
 
     pub fn push_index(&mut self) -> usize {
@@ -124,6 +130,60 @@ impl<'a, V, F: Fn(&V) -> bool> Iterator for FindDataIndicesIter<'a, V, F> {
 }
 
 impl<V> PooledData<V> {
+    /// Sorts the subslices in the data pool without compromising the integrity of the slice
+    /// boundaries.
+    pub fn sort_sub_slices(&mut self)
+    where V: Ord {
+        for i in 0..self.len() {
+            self[i].sort();
+        }
+    }
+
+    /// Checks of two sub-slices from two different pooled data sources overlap.
+    /// If the subsets are not fully disjoint, this returns the sub-slice indices that match.
+    /// For this method to produce valid results, the subslices in _both_ pools *must be sorted*.
+    /// This can be achieved with a call to [Self::sort_sub_slices].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edlc_core::prelude::mir_expr::PooledDataBuilder;
+    /// let mut builder = PooledDataBuilder::new();
+    /// builder.push_index();
+    /// builder.push_all([1, 2, 3]);
+    /// builder.push_index();
+    /// builder.push_all([4, 5]);
+    /// let mut a = builder.build();
+    /// a.sort_sub_slices();
+    ///
+    /// builder = PooledDataBuilder::new();
+    /// builder.push_index();
+    /// builder.push_all([1, 2]);
+    /// builder.push_index();
+    /// builder.push_all([3, 4, 5]);
+    /// let mut b = builder.build();
+    /// b.sort_sub_slices();
+    ///
+    /// assert_eq!(a.overlaps(0, &b, 0), Some((0, 0)));
+    /// assert_eq!(a.overlaps(0, &b, 1), Some((2, 0)));
+    /// assert_eq!(a.overlaps(1, &b, 0), None);
+    /// assert_eq!(a.overlaps(1, &b, 1), Some((0, 1)));
+    /// ```
+    pub fn overlaps(&self, index: usize, other: &Self, other_index: usize) -> Option<(usize, usize)>
+    where V: Ord {
+        let (mut i, mut j) = (0, 0);
+        let lhs = &self[index];
+        let rhs = &other[other_index];
+        while i < lhs.len() && j < rhs.len() {
+            match lhs[i].cmp(&rhs[j]) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => return Some((i, j)),
+            }
+        }
+        None
+    }
+
     /// Searches for all occurrences of `data` within the internal collection and returns
     /// their corresponding mapped indices.
     ///

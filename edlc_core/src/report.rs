@@ -161,6 +161,15 @@ impl<E, W> Report<E, W> {
             Err(Err::from(self))
         }
     }
+
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    #[inline(always)]
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
 }
 
 pub trait ReportableError {

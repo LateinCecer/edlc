@@ -48,8 +48,9 @@ use std::mem;
 use std::ops::{BitOr, Range};
 use log::error;
 use crate::core::EdlVarId;
-use crate::mir::mir_expr::mir_graph::async_analysis::{Async, AsyncConnState, AsyncConnectome, AsyncData, AsyncDataPool, AsyncVerify, AsyncVerifyError};
+use crate::mir::mir_expr::mir_graph::async_analysis::{Async, AsyncConnState, AsyncConnectome, AsyncData, AsyncDataPool, AsyncVerify, AsyncVerifyError, SharedVerify};
 use crate::mir::mir_expr::mir_graph::whole_program::Wpg;
+use crate::prelude::mir_expr::mir_graph::async_analysis::SharedVerifyError;
 
 /// Lattice:
 ///
@@ -1795,6 +1796,7 @@ pub enum OptimizationError {
     AutoImpl(HirTranslationError),
     AsyncError(Report<AsyncVerifyError, ()>),
     WpgAsyncError(WpgAsyncError),
+    SharedVerifyError(Report<SharedVerifyError, ()>),
 }
 
 impl From<WpgAsyncError> for OptimizationError {
@@ -1863,6 +1865,12 @@ impl From<Report<AsyncVerifyError, ()>> for OptimizationError {
     }
 }
 
+impl From<Report<SharedVerifyError, ()>> for OptimizationError {
+    fn from(value: Report<SharedVerifyError, ()>) -> Self {
+        Self::SharedVerifyError(value)
+    }
+}
+
 impl Display for OptimizationError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1894,6 +1902,10 @@ impl Display for OptimizationError {
             }
             OptimizationError::WpgAsyncError(err) => {
                 write!(f, "whole-program async analysis error: {err}")
+            }
+            OptimizationError::SharedVerifyError(report) => {
+                write!(f, "shared verify report with {} errors and {} warnings",
+                    report.num_errors(), report.num_warnings())
             }
         }
     }
@@ -1936,6 +1948,25 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     )?;
     body.body.insert_drops_with_dependencies(&borrow_graph)?;
     body.body.replace_empty_root_param(&compiler.mir_phase.types);
+
+    // perform analysis for async state
+    let borrow_graph = body.body.borrows(
+        &mut compiler.mir_phase.types,
+        &compiler.phase.types,
+        &compiler.phase.vars,
+    )?;
+    let report = SharedVerify::run(
+        body.mir_id.unwrap(),
+        &body.body,
+        &backend.func_reg(),
+        &compiler.mir_phase.types,
+        &compiler.phase.types,
+        &borrow_graph,
+    );
+    if report.is_err() {
+        report.print_errors(&mut compiler.phase);
+        return Err(report.into());
+    }
     Ok(())
 }
 
