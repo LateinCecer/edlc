@@ -177,7 +177,7 @@ impl<'a, B: Backend> SharedVerify<'a, B> {
         if got.is_upper_bound(&exp) {
             Ok(())
         } else {
-            Err(SharedVerifyError::new(value, &self.cfg, variant, got, exp))
+            Err(SharedVerifyError::new(value, self.cfg, variant, got, exp))
         }
     }
 }

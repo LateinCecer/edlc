@@ -796,7 +796,14 @@ impl FunctionCaptureSource {
                 }
                 _ => None,
             }) {
-            let tmp = conn.get_global_state(&val, this_id, |_| true);
+            let tmp = conn.get_global_state(
+                &val,
+                this_id,
+                |s| !matches!(
+                    s,
+                    AsyncSource::SyncLocal(_) | AsyncSource::SyncParam(..),
+                ),
+            );
             output_state.extend_as_reference(&tmp);
         }
 
@@ -1582,9 +1589,42 @@ impl SyncPositions {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AsyncFlowState {
+    Fixed,
+    /// Value is being actively read by at least one concurrent process.
+    Reading,
+    /// Value is being written to by exactly one concurrent process.
+    Floating,
+}
+
+impl AsyncFlowState {
+    pub fn upper(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Fixed, Self::Fixed) => Self::Fixed,
+            (Self::Fixed, Self::Reading) => Self::Reading,
+            (Self::Reading, Self::Fixed) => Self::Reading,
+            (Self::Reading, Self::Reading) => Self::Reading,
+            (Self::Floating, _) => Self::Floating,
+            (_, Self::Floating) => Self::Floating,
+        }
+    }
+
+    pub fn lower(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Floating, Self::Floating) => Self::Floating,
+            (Self::Floating, Self::Reading) => Self::Reading,
+            (Self::Reading, Self::Floating) => Self::Reading,
+            (Self::Reading, Self::Reading) => Self::Reading,
+            (Self::Fixed, _) => Self::Fixed,
+            (_, Self::Fixed) => Self::Fixed,
+        }
+    }
+}
+
 struct BlockExitState {
     event_states: AsyncEventState,
-    source_states: AsyncSourceState<FlowState>,
+    source_states: AsyncSourceState<AsyncFlowState>,
     sync_positions: SyncPositions,
 }
 
@@ -1613,7 +1653,10 @@ pub struct AsyncFlowAnalysis<'cfg> {
     async_data: &'cfg Async,
     block_exit_states: Vec<BlockExitState>,
     events: Vec<AsyncEvent>,
-    event_sync: PooledData<AsyncId>,
+    /// Async data sources synched by that event
+    event_async: PooledData<AsyncId>,
+    /// Async data sources synched by that event
+    event_shared: PooledData<AsyncId>,
     event_values: PooledData<MirValue>,
     is_function_async: bool,
 }
@@ -1625,7 +1668,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             async_data,
             block_exit_states: vec![],
             events: vec![],
-            event_sync: PooledData::default(),
+            event_async: PooledData::default(),
+            event_shared: PooledData::default(),
             event_values: PooledData::default(),
             is_function_async,
         }
@@ -1633,7 +1677,12 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
 
     /// Executes a forward-fixed-point algorithm to determine what the floating state of each MIR
     /// value / synchronization source is at any given point in the CFG.
-    pub fn update(&mut self, cfg: &MirFlowGraph) -> Result<(), AsyncConnConflict> {
+    pub fn update<B: Backend>(
+        &mut self,
+        cfg: &MirFlowGraph,
+        edl_types: &EdlTypeRegistry,
+        mir_funcs: &MirFuncRegistry<B>,
+    ) -> Result<(), AsyncConnConflict> {
         self.update_state_length();
         let mut worklist = cfg
             .iter_blocks()
@@ -1644,7 +1693,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             cfg: &MirFlowGraph,
             block: &MirBlockRef,
         ) {
-            let block = cfg.get_block(&block).unwrap();
+            let block = cfg.get_block(block).unwrap();
             for child in block.seal.links().map(|call| call.target) {
                 if !worklist.contains(&child) {
                     worklist.push_back(child);
@@ -1652,10 +1701,14 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             }
         }
 
+        let transfer_ctx = TransferCtx {
+            types: edl_types,
+            funcs: mir_funcs,
+        };
         while let Some(next) = worklist.pop_front() {
             assert!(!cfg.is_block_unreachable(&next));
 
-            match self.update_block(cfg, &next, None)? {
+            match self.update_block(cfg, &next, None, &transfer_ctx)? {
                 BlockUpdateResult::ParentUpdated(updated_parents) => {
                     // this blocks parents changed.
                     // resubmit this block and all siblings as any number of them might have changed.
@@ -1680,23 +1733,22 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
     }
 
-    fn update_block(
+    fn update_block<B: Backend>(
         &mut self,
         cfg: &MirFlowGraph,
         block_ref: &MirBlockRef,
         until: Option<&BlockLocalStatementUid>,
-        // mir_funcs: &MirFuncRegistry<B>,
-        // edl_types: &EdlTypeRegistry,
+        transfer_ctx: &TransferCtx<B>,
     ) -> Result<BlockUpdateResult, AsyncConnConflict> {
         let block = cfg.get_block(block_ref).unwrap();
         // assemble entry state
-        let mut source_state: AsyncSourceState<FlowState> = AsyncSourceState::new(
+        let mut source_state: AsyncSourceState<AsyncFlowState> = AsyncSourceState::new(
             &self.conn,
-            || FlowState::Fixed,
+            || AsyncFlowState::Fixed,
         );
         for parent in cfg.backlinks[block_ref.0].iter() {
             let exit_state = &self.block_exit_states[parent.0];
-            source_state.merge(&exit_state.source_states, FlowState::upper);
+            source_state.merge(&exit_state.source_states, AsyncFlowState::upper);
         }
 
         let EventStateMerge {
@@ -1722,7 +1774,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 changed_parents.push(MirBlockRef(parent_idx));
                 for event_id in events {
                     Self::sync_event__(
-                        &self.event_sync,
+                        &self.event_async,
+                        &self.event_shared,
                         event_id,
                         &mut parent_state.event_states,
                         &mut parent_state.source_states,
@@ -1764,6 +1817,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                 &mut exit_state,
                                 self,
                                 &MirLoc::GraphLoc(loc),
+                                transfer_ctx,
                             )?;
                             self.record_event(&loc, &mut exit_state);
                         }
@@ -1813,7 +1867,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
 
     /// When the output states for blocks are merged to form the input state for another block,
     /// synchronizations may have to be inserted on the sealing statements of the parent blocks.
-    /// This method effective does that.
+    /// This method effectively does that.
     /// This method should only be called once, after the main analysis is already done.
     pub fn insert_merge_syncs(&mut self, cfg: &MirFlowGraph) {
         self.update_state_length();
@@ -1846,7 +1900,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     .into_iter()
                     .for_each(|event_id| {
                         Self::sync_event__(
-                            &self.event_sync,
+                            &self.event_async,
+                            &self.event_shared,
                             event_id,
                             &mut state.event_states,
                             &mut state.source_states,
@@ -1872,7 +1927,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                             continue;
                         }
                         Self::sync_event__(
-                            &self.event_sync,
+                            &self.event_async,
+                            &self.event_shared,
                             event_id,
                             &mut state.event_states,
                             &mut state.source_states,
@@ -1937,7 +1993,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                     if state.event_states[event_id] == EventState::Recorded {
                         let loc = MirLoc::Seal(*block_ref);
                         Self::sync_event__(
-                            &self.event_sync,
+                            &self.event_async,
+                            &self.event_shared,
                             event_id,
                             &mut state.event_states,
                             &mut state.source_states,
@@ -1950,7 +2007,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
     }
 
     fn sync_event_on_exit(&self, ev: EventId) -> bool {
-        !self.is_function_async || self.event_sync[ev.0]
+        !self.is_function_async || self.event_async[ev.0]
             .iter()
             .any(|id| self.sync_src_on_exit(id))
     }
@@ -1986,7 +2043,8 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             .event_type()
             .expect("event type not registered");
 
-        let mut event_pool_builder = PooledDataBuilder::<AsyncId>::new();
+        let mut event_async_builder = PooledDataBuilder::<AsyncId>::new();
+        let mut event_shared_builder = PooledDataBuilder::<AsyncId>::new();
         let mut event_values_builder = PooledDataBuilder::<MirValue>::new();
 
         for block_ref in cfg.iter_blocks() {
@@ -2024,19 +2082,25 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                 target_var,
                                 sync_event,
                             );
-                            let pool_id = event_pool_builder.push_index();
+                            let async_pool_id = event_async_builder.push_index();
+                            let shared_pool_id = event_shared_builder.push_index();
                             let value_id = event_values_builder.push_index();
-                            assert_eq!(pool_id, event.0);
+                            assert_eq!(async_pool_id, event.0);
+                            assert_eq!(shared_pool_id, event.0);
                             assert_eq!(value_id, event.0);
 
                             // register event for all values that it syncs
                             if sig.async_return {
                                 // register for target_var
                                 self.conn.dependencies[target_var].iter().for_each(|id| {
-                                    event_pool_builder.push_data(*id);
+                                    event_async_builder.push_data(*id);
+                                });
+                                self.conn.references[target_var].iter().for_each(|id| {
+                                    event_shared_builder.push_data(*id);
                                 });
                                 event_values_builder.push_data(target_var);
                             }
+
                             let call = cfg.expressions.get_call(expr_id);
                             let mut param_idx: usize = 0;
                             let mut comp_idx: usize = 0;
@@ -2050,12 +2114,30 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                                     param_idx += 1;
                                     value
                                 };
-                                if matches!(param.async_, AsyncState::Async) {
-                                    // register for this parameter
-                                    self.conn.dependencies[value].iter().for_each(|id| {
-                                        event_pool_builder.push_data(*id);
-                                    });
-                                    event_values_builder.push_data(value);
+
+                                match param.async_ {
+                                    AsyncState::Async => {
+                                        // register parameter and all dependencies as floating
+                                        self.conn.dependencies[value].iter().for_each(|id| {
+                                            event_async_builder.push_data(*id);
+                                        });
+                                        // register shared references as being read
+                                        self.conn.references[value].iter().for_each(|id| {
+                                            event_shared_builder.push_data(*id);
+                                        });
+                                        event_values_builder.push_data(value);
+                                    }
+                                    AsyncState::Shared => {
+                                        // register parameter and all dependencies & references as
+                                        // being read from
+                                        self.conn.dependencies[value]
+                                            .iter()
+                                            .chain(self.conn.references[value].iter())
+                                            .for_each(|id| {
+                                                event_shared_builder.push_data(*id);
+                                            });
+                                    }
+                                    AsyncState::None => (),
                                 }
                             }
                         }
@@ -2064,11 +2146,12 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 }
             }
         }
-        self.event_sync = event_pool_builder.build();
+        self.event_async = event_async_builder.build();
+        self.event_shared = event_shared_builder.build();
         self.event_values = event_values_builder.build();
         // if an event does not sync anything, we can kill it right away
         for (event_id, event) in self.events.iter_mut().enumerate() {
-            if self.event_sync[event_id].is_empty() {
+            if self.event_async[event_id].is_empty() && self.event_shared[event_id].is_empty() {
                 event.alive = false;
             }
         }
@@ -2080,7 +2163,7 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         for _ in cfg.iter_blocks() {
             let exit_state: BlockExitState = BlockExitState {
                 event_states: AsyncEventState::new(self.events.len(), EventState::Invalid),
-                source_states: AsyncSourceState::new(self.conn, || FlowState::Fixed),
+                source_states: AsyncSourceState::new(self.conn, || AsyncFlowState::Fixed),
                 sync_positions: SyncPositions::new(),
             };
             self.block_exit_states.push(exit_state);
@@ -2196,7 +2279,9 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         }
         println!();
         println!(" event sources:");
-        println!("{}", &self.event_sync);
+        println!("{}", &self.event_async);
+        println!(" shared event sources:");
+        println!("{}", &self.event_shared);
         println!(" event values:");
         println!("{}", &self.event_values);
 
@@ -2242,8 +2327,11 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
                 exit_state.event_states[event_id],
                 EventState::Invalid | EventState::Synchronized,
             ));
-            for source_id in self.event_sync[event_id.0].iter() {
-                exit_state.source_states[*source_id] = FlowState::Floating;
+            for source_id in self.event_shared[event_id.0].iter() {
+                exit_state.source_states[*source_id] = AsyncFlowState::Reading;
+            }
+            for source_id in self.event_async[event_id.0].iter() {
+                exit_state.source_states[*source_id] = AsyncFlowState::Floating;
             }
             exit_state.event_states[event_id] = EventState::Recorded;
         }
@@ -2275,19 +2363,20 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         &self,
         event: EventId,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
-        Self::sync_event__(&self.event_sync, event, event_state, state, sync_positions, loc);
+        Self::sync_event__(&self.event_async, &self.event_shared, event, event_state, state, sync_positions, loc);
     }
 
     #[inline(always)]
     fn sync_event__(
-        event_sync: &PooledData<AsyncId>,
+        event_async: &PooledData<AsyncId>,
+        event_shared: &PooledData<AsyncId>,
         event: EventId,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
     ) {
@@ -2296,9 +2385,12 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
             EventState::Recorded,
             "tried to synchronize an event that is not yet recorded",
         );
-        event_sync[event.0].iter().for_each(|source| {
-            state[*source] = FlowState::Fixed;
-        });
+        event_async[event.0]
+            .iter()
+            .chain(event_shared[event.0].iter())
+            .for_each(|source| {
+                state[*source] = AsyncFlowState::Fixed;
+            });
         sync_positions.insert(loc, event);
         event_state[event] = EventState::Synchronized;
     }
@@ -2307,12 +2399,21 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         &self,
         id: &AsyncId,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
+        purpose: AccessPurpose,
     ) {
-        self.event_sync
+        if state[*id] == AsyncFlowState::Fixed
+            || (purpose == AccessPurpose::Read && state[*id] == AsyncFlowState::Reading) {
+            // if the access purpose is read-only, we don't need to sync if the flow state is
+            // in read mode.
+            return;
+        }
+
+        self.event_async
             .find_data_indices(|item| item == id)
+            .chain(self.event_shared.find_data_indices(|item| item == id))
             .for_each(|event_id_raw| {
                 let event_id = EventId(event_id_raw);
                 if event_state[event_id] == EventState::Recorded {
@@ -2336,26 +2437,28 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         &self,
         value: &MirValue,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
+        purpose: AccessPurpose,
     ) {
         self.conn.dependencies[*value]
             .iter()
             .chain(self.conn.references[*value].iter())
-            .for_each(|val| self.sync_id(val, event_state, state, sync_positions, loc));
+            .for_each(|val| self.sync_id(val, event_state, state, sync_positions, loc, purpose));
     }
 
     fn sync_function(
         &self,
         value: &MirFuncId,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
+        purpose: AccessPurpose,
     ) {
         if let Some(id) = self.conn.func_to_id.get(value) {
-            self.sync_id(id, event_state, state, sync_positions, loc);
+            self.sync_id(id, event_state, state, sync_positions, loc, purpose);
         }
     }
 
@@ -2363,14 +2466,21 @@ impl<'cfg> AsyncFlowAnalysis<'cfg> {
         &self,
         value: &EdlVarId,
         event_state: &mut AsyncEventState,
-        state: &mut AsyncSourceState<FlowState>,
+        state: &mut AsyncSourceState<AsyncFlowState>,
         sync_positions: &mut SyncPositions,
         loc: &MirLoc,
+        purpose: AccessPurpose,
     ) {
         if let Some(id) = self.conn.global_to_id.get(value) {
-            self.sync_id(id, event_state, state, sync_positions, loc);
+            self.sync_id(id, event_state, state, sync_positions, loc, purpose);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum AccessPurpose {
+    Read,
+    Write,
 }
 
 impl<'cfg> Index<EventId> for AsyncFlowAnalysis<'cfg> {
@@ -2393,11 +2503,12 @@ struct TransferCtx<'a, B: Backend> {
 }
 
 trait TransferAsyncState {
-    fn transfer(
+    fn transfer<B: Backend>(
         &self,
         state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
+        ctx: &TransferCtx<'_, B>,
     ) -> Result<(), AsyncConnConflict>;
 }
 
@@ -2407,55 +2518,76 @@ impl MirCall {
         exit_state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
+        purpose: AccessPurpose,
     ) -> Result<(), AsyncConnConflict> {
         let state = flow_analysis
             .conn
-            .get_state(param, FlowState::upper, &exit_state.source_states);
-        if matches!(state, Some(FlowState::Floating)) {
-            flow_analysis.sync_value(
-                param,
-                &mut exit_state.event_states,
-                &mut exit_state.source_states,
-                &mut exit_state.sync_positions,
-                loc,
-            );
-            let state = flow_analysis
-                .conn
-                .get_state(param, FlowState::upper, &exit_state.source_states);
-            assert!(
-                matches!(state, Some(FlowState::Fixed)),
-                "MIR value async flow-state did not change after synchronizing",
-            );
+            .get_state(param, AsyncFlowState::upper, &exit_state.source_states);
+        if state.is_none() {
+            return Ok(());
+        }
+
+        flow_analysis.sync_value(
+            param,
+            &mut exit_state.event_states,
+            &mut exit_state.source_states,
+            &mut exit_state.sync_positions,
+            loc,
+            purpose,
+        );
+
+        let state = flow_analysis
+            .conn
+            .get_state(param, AsyncFlowState::upper, &exit_state.source_states);
+        match purpose {
+            AccessPurpose::Read => {
+                assert!(
+                    matches!(state, Some(AsyncFlowState::Fixed | AsyncFlowState::Reading)),
+                    "MIR value async flow-state did not change after synchronizing: {:?}",
+                    state
+                );
+            }
+            AccessPurpose::Write => {
+                assert!(
+                    matches!(state, Some(AsyncFlowState::Fixed)),
+                    "MIR value async flow-state did not change after synchronizing, {:?}",
+                    state
+                );
+            }
         }
         Ok(())
     }
 }
 
 impl TransferAsyncState for MirCall {
-    fn transfer(
+    fn transfer<B: Backend>(
         &self,
         exit_state: &mut BlockExitState,
         flow_analysis: &mut AsyncFlowAnalysis,
         loc: &MirLoc,
-        // ctx: &TransferCtx<'_, B>,
+        ctx: &TransferCtx<'_, B>,
     ) -> Result<(), AsyncConnConflict> {
-        // let func_id = ctx.funcs.get_edl_id(self.func).unwrap();
-        // let sig = ctx.types.get_fn_signature(func_id).unwrap();
+        let func_id = ctx.funcs.get_edl_id(self.func).unwrap();
+        let sig = ctx.types.get_fn_signature(func_id).unwrap();
 
-        // let mut runtime_idx = 0usize;
-        // let mut comptime_idx = 0usize;
-        // for param in sig.params.iter() {
-        //     let val = if param.comptime {
-        //         let val = self.comptime_args[comptime_idx].value_expr;
-        //         comptime_idx += 1;
-        //         val
-        //     } else {
-        //         let val = self.args[runtime_idx];
-        //         runtime_idx += 1;
-        //         val
-        //     };
-        //     Self::transfer_param(&val, exit_state, flow_analysis, loc, param.async_)?;
-        // }
+        let mut runtime_idx = 0usize;
+        let mut comptime_idx = 0usize;
+        for param in sig.params.iter() {
+            let val = if param.comptime {
+                let val = self.comptime_args[comptime_idx].value_expr;
+                comptime_idx += 1;
+                val
+            } else {
+                let val = self.args[runtime_idx];
+                runtime_idx += 1;
+                val
+            };
+            let access_purpose = match param.async_ {
+                AsyncState::Async => AccessPurpose::Write,
+                _ => AccessPurpose::Read,
+            };
+            Self::transfer_param(&val, exit_state, flow_analysis, loc, access_purpose)?;
+        }
 
         if let Some(source) = flow_analysis.async_data.sync.tree.get(&self.func) {
             for func_id in source.function_states.iter() {
@@ -2465,6 +2597,7 @@ impl TransferAsyncState for MirCall {
                     &mut exit_state.source_states,
                     &mut exit_state.sync_positions,
                     loc,
+                    AccessPurpose::Write,
                 );
             }
             for global in source.global_states.iter() {
@@ -2474,6 +2607,7 @@ impl TransferAsyncState for MirCall {
                     &mut exit_state.source_states,
                     &mut exit_state.sync_positions,
                     loc,
+                    AccessPurpose::Write,
                 );
             }
         }
@@ -2485,13 +2619,14 @@ impl TransferAsyncState for MirCall {
                 &mut exit_state.source_states,
                 &mut exit_state.sync_positions,
                 loc,
+                AccessPurpose::Write,
             );
         }
 
-        for param in self.args.iter()
-            .chain(self.comptime_args.iter().map(|arg| &arg.value_expr)) {
-            Self::transfer_param(param, exit_state, flow_analysis, loc)?;
-        }
+        // for param in self.args.iter()
+        //     .chain(self.comptime_args.iter().map(|arg| &arg.value_expr)) {
+        //     Self::transfer_param(param, exit_state, flow_analysis, loc)?;
+        // }
         Ok(())
     }
 }

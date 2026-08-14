@@ -279,7 +279,7 @@ impl EdlCompiler {
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-        let mut parser = self.parser(&src, module_src.clone());
+        let mut parser = self.parser(src, module_src.clone());
         let ast_env = AstParamEnv::parse(&mut parser)
             .in_file(module_src)
             .map_err(|err| self.report_ast_err(err))?;
@@ -301,7 +301,7 @@ impl EdlCompiler {
 
         let src = module_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-        let mut parser = self.parser(&src, module_src.clone());
+        let mut parser = self.parser(src, module_src.clone());
         let docs = report_ast!(
             ItemDoc::try_parse(&mut parser).in_file(module_src.clone()), self);
         let modifiers = report_ast!(

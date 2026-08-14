@@ -2270,10 +2270,10 @@ impl BoundaryField {
 }
 
 // -- mock device stubs; these would be implemented as callbacks usually
-async fn gradient(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
+async fn gradient(shared field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
     print("  >> doing some gradient calculations! <<\n");
 }
-async fn laplace(field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
+async fn laplace(shared field: DevicePointer<BoundaryField>, async dst: DevicePointer<Field>) {
     print("  >> doing some laplace calculations! <<\n");
 }
 async fn init_field(async field: DevicePointer<Field>) {
@@ -2281,7 +2281,7 @@ async fn init_field(async field: DevicePointer<Field>) {
 }
 
 type LaplaceAction = struct {
-    field: DevicePointer<BoundaryField>,
+    shared field: DevicePointer<BoundaryField>,
     async dst: DevicePointer<Field>,
 };
 
@@ -2308,7 +2308,7 @@ impl BoundaryField {
         laplace(comptime { self.as_device_ptr() }, comptime { dst.as_device_ptr() });
     }
 
-    async fn log(self) {
+    async fn log(shared self) {
         print(" >> logging boundary field <<\n");
     }
 }
@@ -2358,6 +2358,14 @@ fn test_capture() {
     log_velocity_laplace();
     print("capture test exit\n");
 }
+
+fn test_readlock() {
+    comptime {
+        LaplaceAction::new(u.as_device_ptr(), scalar_field.as_device_ptr())
+    }.dispatch();
+    u.log();
+    init_field(comptime { u.field_as_ptr() });
+}
         "#))?;
 
         let proto_func = compiler.get_named_proto_function(inline_code!("test"))?;
@@ -2369,6 +2377,11 @@ fn test_capture() {
 
         let capture_test: extern "C" fn() = compiler.get_named_function(inline_code!("test_capture"))?;
         assert!(compiler.catch_unwind(capture_test, ()).is_ok());
+
+        println!("\n\n ---------------------------- \n\n");
+
+        let readlock_test: extern "C" fn() = compiler.get_named_function(inline_code!("test_readlock"))?;
+        assert!(compiler.catch_unwind(readlock_test, ()).is_ok());
         Ok(())
     }
 }
