@@ -476,7 +476,7 @@ impl<'a, B: Backend> SharedVerifyContext<'a, B> {
                 value
             };
 
-            state.replace(&value, if sig.async_return {
+            state.replace(&value, if sig.async_return || sig.async_ {
                 param.async_
             } else {
                 // in functions not marked as async return we can synchronize on all parameters
