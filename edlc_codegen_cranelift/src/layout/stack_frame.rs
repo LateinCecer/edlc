@@ -23,7 +23,7 @@ use crate::error::{JITError, JITErrorType};
 use crate::layout::SSARepr;
 use cranelift::frontend::FunctionBuilder;
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::{InstBuilder, MemFlags, StackSlotData, StackSlotKey, StackSlotKind};
+use cranelift_codegen::ir::{InstBuilder, MemFlagsData, StackSlotData, StackSlotKey, StackSlotKind};
 use cranelift_module::Module;
 use edlc_core::prelude::index_map::IndexMap;
 use edlc_core::prelude::mir_backend::Backend;
@@ -31,7 +31,7 @@ use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{BorrowGraph, HeadlessId, MirExprId, MirExprVariant, MirFlowGraph, MirValue, StackFrameLayout, Statement};
 use edlc_core::prelude::mir_type::abi::{AbiConfig, AbiLayout, ByteLayout};
 use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
-use edlc_core::prelude::{AmorphusData, MirError, MirLayout, MirPhase};
+use edlc_core::prelude::{AmorphusData, MirError, MirPhase};
 use std::ops::Range;
 use std::sync::Arc;
 use cranelift_jit::JITModule;
@@ -107,7 +107,7 @@ impl StackFrameMapping {
                         .view_mut(details.headless_id.ordinal())
                         .set((call_layout, call));
                 }
-                Statement::Record { event, uid, implementation: Some(details), .. } => {
+                Statement::Record { event, uid: _, implementation: Some(details), .. } => {
                     let event_ty = cfg.get_var_type(&event.internal_value);
                     let call = MirCall::record_impl(details.func_id, details.ctx, *event_ty);
                     let call_layout = make_layout(&call, Some(event.internal_value))?;
@@ -115,7 +115,7 @@ impl StackFrameMapping {
                         .view_mut(details.headless_id.ordinal())
                         .set((call_layout, call));
                 }
-                Statement::Drop { value, uid, implementation: Some(details), .. } => {
+                Statement::Drop { value, uid: _, implementation: Some(details), .. } => {
                     let call = MirCall::drop_impl(details.func_id, *value, details.ctx, reg);
                     let call_layout = make_layout(&call, None)?;
                     headless_call_layouts
@@ -233,10 +233,11 @@ impl StackFrameMapping {
                 ir_values.reg(value)
             },
             Mapping::Stack => {
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 assert!(reg.is_plain_old_data(*ty));
                 Some(builder
                     .ins()
-                    .stack_load(SSARepr::pod(ty, reg)?, ir_values.stack_slot, offset.start as i32))
+                    .stack_load(ptr_type, SSARepr::pod(ty, reg)?, ir_values.stack_slot, offset.start as i32))
             },
         }
     }
@@ -259,10 +260,11 @@ impl StackFrameMapping {
                 ir_values.set_value(*target, value);
             }
             Mapping::Stack => {
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 assert!(reg.is_plain_old_data(*ty));
                 builder
                     .ins()
-                    .stack_store(value, ir_values.stack_slot, offset.start as i32);
+                    .stack_store(ptr_type, value, ir_values.stack_slot, offset.start as i32);
             }
         }
     }
@@ -295,7 +297,7 @@ impl StackFrameMapping {
                         .ireduce(first, value);
                     let temp = builder
                         .ins()
-                        .ushr_imm(value, 64);
+                        .ushr_imm_u(value, 64);
                     let second = builder
                         .ins()
                         .ireduce(second, temp);
@@ -307,10 +309,11 @@ impl StackFrameMapping {
             },
             Mapping::Stack => {
                 let mut start = offset.start as i32;
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 for ty in SSARepr::iter_eightbytes(&reg.abi_layout(abi.clone(), *ty).unwrap()) {
                     let value = builder
                         .ins()
-                        .stack_load(ty, ir_values.stack_slot, start);
+                        .stack_load(ptr_type, ty, ir_values.stack_slot, start);
                     output.push(value);
                     start += ty.bytes() as i32;
                 }
@@ -352,13 +355,14 @@ impl StackFrameMapping {
                 }
             }
             Mapping::Stack => {
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 let mut start = offset.start as i32;
                 for (ty, value) in SSARepr::iter_eightbytes(&reg.abi_layout(abi.clone(), *ty).unwrap())
                     .zip(value.iter()) {
 
                     builder
                         .ins()
-                        .stack_store(*value, ir_values.stack_slot, start);
+                        .stack_store(ptr_type, *value, ir_values.stack_slot, start);
                     start += ty.bytes() as i32;
                 }
             }
@@ -377,6 +381,7 @@ impl StackFrameMapping {
         let call_layout = self.call_layout(call);
         if let Some(spill) = call_layout.stack_spill.as_ref() {
             let spill_offset = self.layout.size + self.stack_spill_offset;
+            let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
             for (m, dst_range) in spill.members.iter() {
                 let dst = dst_range.start + spill_offset;
                 match self.get_location(m).unwrap() {
@@ -385,14 +390,14 @@ impl StackFrameMapping {
                         let src = ir_values.reg(m).unwrap();
                         builder
                             .ins()
-                            .stack_store(src, ir_values.stack_slot, dst as i32);
+                            .stack_store(ptr_type, src, ir_values.stack_slot, dst as i32);
                     },
                     FrameLocation::Stack(src_range, ty) => {
                         // copy from stack slot
                         assert_eq!(dst_range.len(), src_range.len());
                         let layout = reg.abi_layout(abi.clone(), ty)
                             .expect("MIR type layout missing after monomorphization");
-                        ir_values.stack_cpy(src_range.start, dst, &layout, builder);
+                        ir_values.stack_cpy(src_range.start, dst, &layout, builder, ptr_type);
                     },
                 }
             }
@@ -416,6 +421,7 @@ impl StackFrameMapping {
             return;
         }
 
+        let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let src_ir = ir_values.reg(src).unwrap();
@@ -427,7 +433,7 @@ impl StackFrameMapping {
                         let (dst_range, _) = self.layout.local_offset(dst).unwrap();
                         builder
                             .ins()
-                            .stack_store(src_ir, ir_values.stack_slot, dst_range.start as i32);
+                            .stack_store(ptr_type, src_ir, ir_values.stack_slot, dst_range.start as i32);
                     },
                 }
             },
@@ -437,13 +443,13 @@ impl StackFrameMapping {
                         let ty_ir = SSARepr::pod(ty, reg).unwrap();
                         let src_ir = builder
                             .ins()
-                            .stack_load(ty_ir, ir_values.stack_slot, src_range.start as i32);
+                            .stack_load(ptr_type, ty_ir, ir_values.stack_slot, src_range.start as i32);
                         ir_values.set_value(*dst, src_ir);
                     },
                     Mapping::Stack => {
                         let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
                         let (dst_range, _) = self.layout.local_offset(dst).unwrap();
-                        ir_values.stack_cpy(src_range.start, dst_range.start, &layout, builder);
+                        ir_values.stack_cpy(src_range.start, dst_range.start, &layout, builder, ptr_type);
                     },
                 }
             },
@@ -465,6 +471,7 @@ impl StackFrameMapping {
             return;
         }
 
+        let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
         match self.mapping.get(src.0).unwrap() {
             Mapping::Reg => {
                 let src_ir = ir_values.reg(src).unwrap();
@@ -477,7 +484,7 @@ impl StackFrameMapping {
                         let (dst_range, _) = self.layout.local_offset(dst).unwrap();
                         builder
                             .ins()
-                            .stack_store(src_ir, ir_values.stack_slot, dst_range.start as i32 + offset);
+                            .stack_store(ptr_type, src_ir, ir_values.stack_slot, dst_range.start as i32 + offset);
                     },
                 }
             },
@@ -488,14 +495,14 @@ impl StackFrameMapping {
                         let ty_ir = SSARepr::pod(ty, reg).unwrap();
                         let src_ir = builder
                             .ins()
-                            .stack_load(ty_ir, ir_values.stack_slot, src_range.start as i32);
+                            .stack_load(ptr_type, ty_ir, ir_values.stack_slot, src_range.start as i32);
                         ir_values.set_value(*dst, src_ir);
 
                     },
                     Mapping::Stack => {
                         let layout = reg.abi_layout(abi.clone(), *ty).unwrap();
                         let (dst_range, _) = self.layout.local_offset(dst).unwrap();
-                        ir_values.stack_cpy(src_range.start, (dst_range.start as i32 + offset) as usize, &layout, builder);
+                        ir_values.stack_cpy(src_range.start, (dst_range.start as i32 + offset) as usize, &layout, builder, ptr_type);
                     },
                 }
             },
@@ -581,19 +588,20 @@ impl StackFrameMapping {
                 let ir_target_ty = SSARepr::pod(target_ty, reg).unwrap();
                 let data = builder
                     .ins()
-                    .load(ir_target_ty, MemFlags::trusted(), ptr, const_offset);
+                    .load(ir_target_ty, MemFlagsData::trusted(), ptr, const_offset);
                 ir_values.set_value(*target, data);
             },
             Mapping::Stack => {
                 let target_layout = reg.abi_layout(abi.clone(), *target_ty).unwrap();
                 let mut off = 0i32;
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 for eightbyte in SSARepr::iter_eightbytes(&target_layout) {
                     let value = builder
                         .ins()
-                        .load(eightbyte, MemFlags::trusted(), ptr, const_offset + off);
+                        .load(eightbyte, MemFlagsData::trusted(), ptr, const_offset + off);
                     builder
                         .ins()
-                        .stack_store(value, ir_values.stack_slot, target_offset.start as i32 + off);
+                        .stack_store(ptr_type, value, ir_values.stack_slot, target_offset.start as i32 + off);
                     off += eightbyte.bytes() as i32;
                 }
             },
@@ -649,18 +657,19 @@ impl StackFrameMapping {
                 let data = ir_values.reg(src).unwrap();
                 builder
                     .ins()
-                    .store(MemFlags::trusted(), data, ptr, const_offset);
+                    .store(MemFlagsData::trusted(), data, ptr, const_offset);
             },
             Mapping::Stack => {
                 let target_layout = reg.abi_layout(abi.clone(), *src_ty).unwrap();
                 let mut offset = 0i32;
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 for eightbyte in SSARepr::iter_eightbytes(&target_layout) {
                     let value = builder
                         .ins()
-                        .stack_load(eightbyte, ir_values.stack_slot, src_offset.start as i32 + offset);
+                        .stack_load(ptr_type, eightbyte, ir_values.stack_slot, src_offset.start as i32 + offset);
                     builder
                         .ins()
-                        .store(MemFlags::trusted(), value, ptr, const_offset + offset);
+                        .store(MemFlagsData::trusted(), value, ptr, const_offset + offset);
                     offset += eightbyte.bytes() as i32;
                 }
             },
@@ -701,10 +710,10 @@ impl StackFrameMapping {
         for eightbyte in SSARepr::iter_eightbytes(&layout) {
             let data = builder
                 .ins()
-                .load(eightbyte, MemFlags::trusted(), ir_src, src_offset);
+                .load(eightbyte, MemFlagsData::trusted(), ir_src, src_offset);
             builder
                 .ins()
-                .store(MemFlags::trusted(), data, ir_dst, dst_offset);
+                .store(MemFlagsData::trusted(), data, ir_dst, dst_offset);
             src_offset += eightbyte.bytes() as i32;
             dst_offset += eightbyte.bytes() as i32;
         }
@@ -740,12 +749,13 @@ impl StackFrameMapping {
                 let (target_offset, _) = self.layout.local_offset(target).unwrap();
                 let layout = reg.abi_layout(abi.clone(), *data.get_type()).unwrap();
                 let mut offset = 0usize;
+                let ptr_type = SSARepr::pod(&reg.usize(), reg).unwrap();
                 for eightbyte in SSARepr::iter_eightbytes(&layout) {
                     let value = const_from_raw(
                         data, offset, eightbyte.bytes() as usize, eightbyte, builder).unwrap();
                     builder
                         .ins()
-                        .stack_store(value, ir_values.stack_slot, target_offset.start as i32 + offset as i32);
+                        .stack_store(ptr_type, value, ir_values.stack_slot, target_offset.start as i32 + offset as i32);
                     offset += eightbyte.bytes() as usize;
                 }
             },
@@ -841,14 +851,17 @@ impl CraneliftValues {
         mut dst: usize,
         ty_layout: &AbiLayout,
         builder: &mut FunctionBuilder,
+        ptr_type: ir::Type,
     ) {
         if src == dst {
             return;
         }
         for eightbyte in SSARepr::iter_eightbytes(&ty_layout) {
-            let value = builder.ins().stack_load(eightbyte, self.stack_slot, src as i32);
+            let value = builder
+                .ins()
+                .stack_load(ptr_type, eightbyte, self.stack_slot, src as i32);
             src += eightbyte.bytes() as usize;
-            builder.ins().stack_store(value, self.stack_slot, dst as i32);
+            builder.ins().stack_store(ptr_type, value, self.stack_slot, dst as i32);
             dst += eightbyte.bytes() as usize;
         }
     }

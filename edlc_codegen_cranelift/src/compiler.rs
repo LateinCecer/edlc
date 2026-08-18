@@ -128,7 +128,7 @@ impl GlobalVar {
             let mut values = ShortVec::default();
             let mut off = offset as i32;
             for ty in offset_types.into_iter() {
-                values.push(builder.builder.ins().load(ty, MemFlags::new(), ptr, off));
+                values.push(builder.builder.ins().load(ty, MemFlagsData::new(), ptr, off));
                 off += ty.bytes() as i32;
             }
             return AggregateValue::from_comp_value::<Runtime>(

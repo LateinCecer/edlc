@@ -19,7 +19,7 @@
 use edlc_core::inline_code;
 use edlc_core::prelude::{CompilerError, EdlCompiler, FromFunction};
 use cranelift_codegen::ir::condcodes::FloatCC;
-use cranelift_codegen::ir::{InstBuilder, MemFlags, types};
+use cranelift_codegen::ir::{InstBuilder, MemFlags, types, MemFlagsData};
 use crate::compiler::integer_math::*;
 use crate::compiler::JIT;
 use crate::executor::CraneliftJIT;
@@ -103,7 +103,7 @@ impl<Runtime> JIT<Runtime> {
             }
             impl f32 {
                 fn as_u32_bits(builder, val) -> u32 {
-                    { builder.bitcast(types::I32, MemFlags::new(), val) }
+                    { builder.bitcast(types::I32, MemFlagsData::new(), val) }
                 }; { (f32::to_bits(val)) }
             }
             impl f32 {
@@ -115,7 +115,7 @@ impl<Runtime> JIT<Runtime> {
         impl_binop!(self, compiler,
             impl f32 {
                 fn from_u32_bits(builder, val: u32) -> f32 {
-                    { builder.bitcast(types::F32, MemFlags::new(), val) }
+                    { builder.bitcast(types::F32, MemFlagsData::new(), val) }
                 }; { (f32::from_bits(val)) }
             }
         );
@@ -213,7 +213,7 @@ impl<Runtime> JIT<Runtime> {
             }
             impl f64 {
                 fn as_u64_bits(builder, val) -> u64 {
-                    { builder.bitcast(types::I64, MemFlags::new(), val) }
+                    { builder.bitcast(types::I64, MemFlagsData::new(), val) }
                 }; { (f64::to_bits(val)) }
             }
             impl f64 {
@@ -225,7 +225,7 @@ impl<Runtime> JIT<Runtime> {
         impl_binop!(self, compiler,
             impl f64 {
                 fn from_u64_bits(builder, val: u64) -> f64 {
-                    { builder.bitcast(types::F64, MemFlags::new(), val) }
+                    { builder.bitcast(types::F64, MemFlagsData::new(), val) }
                 }; { (f64::from_bits(val)) }
             }
         );

@@ -18,11 +18,11 @@ edlc_core = { workspace = true }
 edlc_layout = { workspace = true }
 
 log = "0.4.22"
-cranelift = { version="0.132.0", features=[] }
-cranelift-codegen = { version="0.132.0", features=["gimli", "unwind"] }
-cranelift-jit = { version= "0.132.0", features = [] }
-cranelift-module = { version="0.132.0", features=[] }
-cranelift-native = { version="0.132.0", features=[] }
+cranelift = { version = "0.134.3", features=[] }
+cranelift-codegen = { version = "0.134.3", features=["gimli", "unwind"] }
+cranelift-jit = { version = "0.134.3", features = [] }
+cranelift-module = { version = "0.134.3", features=[] }
+cranelift-native = { version = "0.134.3", features=[] }
 anyhow = "1.0.99"
 regex = "1.12.3"
 num = "0.4.3"

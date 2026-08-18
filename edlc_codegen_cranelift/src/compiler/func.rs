@@ -98,7 +98,7 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
 
         // insert parameters into variable register
         cfg_codegen(&self.body, &mut func_builder, phase)?;
-        func_builder.builder.finalize();
+        func_builder.builder.finalize(func_builder.module.target_config());
         // define function
         backend.module.define_function(id, &mut backend.ctx)
             .map_err(|err| MirError::<JIT<Runtime>>::BackendError(JITError {
