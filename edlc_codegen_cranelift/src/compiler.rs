@@ -29,7 +29,7 @@ mod unwind_info;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::{any, mem, ptr, slice};
+use std::{mem, ptr, slice};
 use std::any::TypeId;
 use std::fmt::{Debug, Formatter};
 use std::mem::MaybeUninit;
@@ -37,22 +37,16 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock};
 use edlc_core::prelude::mir_backend::{Backend, IntrinsicExecutionError, StaticData};
-use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase, TypeError};
+use edlc_core::prelude::{AmorphusData, AmorphusDataCopy, AmorphusDataMut, EdlVarId, FunctionBinding, HirPhase, MirError, MirPhase};
 use edlc_core::prelude::index_map::IndexMap;
-use edlc_core::prelude::mir_expr::mir_data::MirData;
 use edlc_core::prelude::mir_funcs::{MirFuncId, MirFuncRegistry};
-use edlc_core::prelude::mir_let::MirLet;
 use edlc_core::prelude::mir_type::{MirTypeId, MirTypeRegistry};
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use cranelift::prelude::*;
-use cranelift_codegen::ir::UserFuncName;
 use cranelift_jit::{ArenaMemoryProvider, JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
-use log::{debug, info};
-use edlc_core::inline_code;
-use crate::codegen::{code_ctx, Compilable, FunctionTranslator, IntoValue, ShortVec, CodeCtx, FunctionRetKind};
-use crate::layout::SSARepr;
-use crate::codegen::variable::{AggregateValue, PtrValue};
+use log::debug;
+use crate::codegen::{FunctionTranslator, CodeCtx};
 use crate::compiler::code::{JITCode};
 use crate::error::{JITError, JITErrorType};
 
@@ -60,7 +54,6 @@ pub use unwind_info::eh_frames;
 pub use unwind_info::host_eh_frames;
 pub use unwind_info::unwind_ctx;
 pub(crate) use crate::compiler::unwind_info::{UnwindInfo, HostUnwindInfo};
-use crate::unwind::{PanicData, PanicError, TrapHandler};
 
 #[derive(Default)]
 struct NativeFunctionLookup {
@@ -95,55 +88,6 @@ impl NativeFunctionLookup {
 pub struct GlobalVar {
     pub(crate) data_id: DataId,
     pub ty: MirTypeId,
-}
-
-impl GlobalVar {
-    pub fn get<Runtime: 'static>(
-        &self,
-        builder: &mut FunctionTranslator<'_, Runtime>,
-        phase: &MirPhase,
-        offset: usize,
-        ty_id: MirTypeId,
-    ) -> AggregateValue {
-        let ty = SSARepr::abi_repr::<Runtime>(ty_id, builder.abi.clone(), &phase.types).unwrap();
-        let size = ty.byte_size();
-        // get offset layout
-        let own_layout = SSARepr::abi_repr::<Runtime>(self.ty, builder.abi.clone(), &phase.types).unwrap();
-        let offset_layout = own_layout.sub_layout(offset, size, builder.abi.clone());
-        let offset_types = SSARepr::eightbyte_types(offset_layout);
-        assert_eq!(offset_types, ty.members);
-
-
-        let local_id = builder.module.declare_data_in_func(
-            self.data_id,
-            builder.builder.func,
-        );
-        let ptr = builder.builder.ins().symbol_value(
-            builder.module.target_config().pointer_type(),
-            local_id,
-        );
-
-        // check for small aggregate & plain types
-        if size <= builder.abi.large_aggregate_bytes {
-            let mut values = ShortVec::default();
-            let mut off = offset as i32;
-            for ty in offset_types.into_iter() {
-                values.push(builder.builder.ins().load(ty, MemFlagsData::new(), ptr, off));
-                off += ty.bytes() as i32;
-            }
-            return AggregateValue::from_comp_value::<Runtime>(
-                values.into_value(ty_id),
-                code_ctx!(builder, phase)
-            ).unwrap();
-        }
-
-        // data is a large aggregate type
-        AggregateValue::from_ptr::<Runtime>(
-            PtrValue(ptr, offset as i32),
-            ty_id,
-            code_ctx!(builder, phase)
-        ).unwrap()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq, Ord, Eq, Hash)]
@@ -662,6 +606,7 @@ impl<Runtime: 'static> JIT<Runtime> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_func_id(&self, mir_id: MirFuncId) -> Option<FuncId> {
         self.code.borrow().get_func_id(mir_id)
     }

@@ -24,11 +24,9 @@ use std::ops::DerefMut;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::codegen::variable::{AggregateValue, VarCache};
 use crate::compiler::{GlobalVar, JIT};
-use crate::prelude::SSARepr;
 use cranelift::prelude::*;
-use cranelift_codegen::ir::{SourceLoc, StackSlot};
+use cranelift_codegen::ir::SourceLoc;
 use cranelift_jit::JITModule;
 use cranelift_module::{DataDescription, DataId};
 use edlc_core::prelude::index_map::IndexMap;
@@ -36,11 +34,11 @@ use edlc_core::prelude::mir_expr::{HeadlessId, MirExprId, MirFlowGraph, MirLoc, 
 use edlc_core::prelude::mir_funcs::MirFuncRegistry;
 use edlc_core::prelude::mir_type::abi::AbiConfig;
 use edlc_core::prelude::mir_type::MirTypeId;
-use edlc_core::prelude::{DebugInformation, HirPhase, HirUid, MirError, MirPhase};
+use edlc_core::prelude::{DebugInformation, HirPhase, MirError, MirPhase};
 
 mod literal_codegen;
 mod call_codegen;
-pub mod variable;
+// pub mod variable;
 mod const_codegen;
 mod data_codegen;
 mod assign_codegen;
@@ -320,68 +318,6 @@ impl<const N: usize> IntoValue for [Value; N] {
     }
 }
 
-struct LoopInfo {
-    merge_block: Block,
-    body_block: Block,
-    #[allow(dead_code)]
-    id: HirUid,
-    ty: MirTypeId,
-    kind: LoopBreakKind,
-}
-
-
-/// Indicates how a loop breaks.
-/// If a loop breaks by value, the return value if the loop is passed to the loop's merge block
-/// via block parameters.
-/// If the loop breaks by reference, a stack slot is prepared in which the break value must be
-/// put manually by the `break` statements in the loop.
-/// In case the loop does not have a return value, i.e. is not expressive and returns `()`, we can
-/// assume an empty return type, which is a little less annoying to deal with, since none of the
-/// break statements do anything besides jumping to the merge block.
-pub enum LoopBreakKind {
-    ByValue,
-    ByRef(StackSlot),
-    Empty,
-}
-
-pub enum FunctionRetKind {
-    Value,
-    Reference,
-}
-
-impl FunctionRetKind {
-    pub fn build_return<Runtime>(
-        &self,
-        value: AggregateValue,
-        code_ctx: &mut CodeCtx,
-        entry_block: Block,
-    ) -> Result<(), MirError<JIT<Runtime>>> {
-        let ret_ssa = SSARepr::abi_repr(
-            value.ty(), code_ctx.abi.clone(), &code_ctx.phase.types)?;
-        match self {
-            Self::Value => {
-                // return via registers
-                assert!(!ret_ssa.is_large_aggregated_type(&code_ctx.abi));
-                let values = value.raw_values(code_ctx)?;
-                code_ctx.builder
-                    .ins()
-                    .return_(&values.into_vec());
-                Ok(())
-            },
-            Self::Reference => {
-                // return via reference
-                // -- assert!(ret_ssa.is_large_aggregated_type(&code_ctx.abi));
-                let ptr = code_ctx.builder.block_params(entry_block)[0];
-                value.store_to_ptr(ptr, 0, code_ctx)?;
-                code_ctx.builder
-                    .ins()
-                    .return_(&[]);
-                Ok(())
-            },
-        }
-    }
-}
-
 pub struct FunctionTranslator<'jit, Runtime: 'static> {
     pub builder: FunctionBuilder<'jit>,
     pub data_description: &'jit mut DataDescription,
@@ -448,9 +384,6 @@ impl<'jit, Runtime: 'static> FunctionTranslator<'jit, Runtime> {
         function_layout: FunctionLayout,
         debug_info: Option<&'jit DebugInformation>,
     ) -> Self {
-        let mut var_cache = VarCache::default();
-        var_cache.push();
-
         let mut builder = FunctionBuilder::new(&mut jit.ctx.func, &mut jit.builder_context);
         let ir_values = mapping.create_ir_values(&mut builder);
 
