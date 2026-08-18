@@ -26,14 +26,14 @@ use crate::unwind::signal_stack::sigalt_stack_init;
 
 #[macro_export]
 macro_rules! jit_panic(
-    ($pattern:literal $(,$arg:expr)*) => (
-        PanicMessage::set(PanicMessage {
+    ($pattern:literal $(,$arg:expr)*) => ({
+        $crate::unwind::PanicMessage::set($crate::unwind::PanicMessage {
             data: format!($pattern $(,$arg)*),
         });
         $crate::unwind::jit_sync_panic()
-    );
+    });
     ($msg:expr) => ({
-        PanicMessage::set(PanicMessage {
+        $crate::unwind::PanicMessage::set($crate::unwind::PanicMessage {
             data: $msg.to_string(),
         });
         $crate::unwind::jit_sync_panic()
