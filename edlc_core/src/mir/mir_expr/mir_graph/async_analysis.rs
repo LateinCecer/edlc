@@ -2582,9 +2582,16 @@ impl TransferAsyncState for MirCall {
                 runtime_idx += 1;
                 val
             };
-            let access_purpose = match param.async_ {
-                AsyncState::Async => AccessPurpose::Write,
-                _ => AccessPurpose::Read,
+
+            let access_purpose = if sig.async_ || sig.async_return {
+                match param.async_ {
+                    AsyncState::Async => AccessPurpose::Write,
+                    AsyncState::Shared => AccessPurpose::Read,
+                    AsyncState::None => continue, // do not synchronize at all on parameters not marked async or shared at all
+                }
+            } else {
+                // for calling normal functions, we synchronize aggressively
+                AccessPurpose::Write
             };
             Self::transfer_param(&val, exit_state, flow_analysis, loc, access_purpose)?;
         }
