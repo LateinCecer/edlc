@@ -27,6 +27,7 @@ use edlc_core::prelude::mir_funcs::CallSrc;
 use crate::codegen::FunctionTranslator;
 use crate::compiler::integer_math::*;
 use crate::compiler::JIT;
+use crate::jit_panic;
 
 impl<Runtime> JIT<Runtime> {
     pub fn load_bool_math(&mut self, compiler: &mut EdlCompiler) -> Result<(), CompilerError> {
@@ -129,7 +130,9 @@ impl<Runtime> JIT<Runtime> {
         )?;
 
         extern "C" fn assert(val: bool) {
-            assert!(val);
+            if !val {
+                jit_panic!("explicit assertion failed!")
+            }
         }
         let binding = FunctionBinding::from_function(assert as extern "C" fn(val: bool));
         self.insert_function(intr.to_string(), &func, binding);
