@@ -20,6 +20,14 @@ type Numeric = enum {
     Unit
 };
 
+/// A data buffer with an asynchronously-managed field.
+type DataBuffer = struct {
+    /// The raw data buffer.
+    data: [u8; 64],
+    /// An asynchronously-written handle to the buffer's sync state.
+    async sync_state: u32,
+};
+
 /// A generic fixed-size vector.
 type SVector<T, const N: usize>
 where T: f32 | f64 = struct {

@@ -145,6 +145,7 @@ impl StructDef {
                         pos: m.pos,
                         doc: m.doc.clone(),
                         ty: edl_ty,
+                        async_state: m.async_,
                     });
                 }
                 Ok(HirStructVariant::Named(members))

@@ -485,6 +485,9 @@ impl DocElement for HirFnSignature {
         if self.comptime_only {
             ms.push(Modifier::Comptime);
         }
+        if self.async_ {
+            ms.push(Modifier::Async);
+        }
         let env = state.types.get_env(self.env).unwrap().doc(state);
 
         FuncDoc {
@@ -495,6 +498,7 @@ impl DocElement for HirFnSignature {
             env,
             ms,
             ret,
+            async_return: self.async_return,
             params: params.into(),
             associated_type: None,
         }
@@ -511,6 +515,11 @@ impl DocElement for HirFnParam {
         }
         if self.comptime {
             ms.push(Modifier::Comptime);
+        }
+        match self.async_ {
+            AsyncState::Async => ms.push(Modifier::Async),
+            AsyncState::Shared => ms.push(Modifier::Shared),
+            _ => (),
         }
 
         let ty = self.ty.doc(state);

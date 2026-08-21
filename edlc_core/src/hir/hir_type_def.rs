@@ -16,11 +16,12 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 use crate::ast::ItemDoc;
+use crate::core::edl_fn::AsyncState;
 use crate::core::edl_type::{EdlEnvId, EdlTypeInstance};
 use crate::documentation::{DocCompilerState, DocElement, EnumVariantDoc, FuncParamsDoc, StructMemberDoc, TypeDefVariant};
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
-use crate::prelude::{StructTypeDoc, TypeDefDoc};
+use crate::prelude::{Modifier, Modifiers, StructTypeDoc, TypeDefDoc};
 use crate::resolver::ScopeId;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +29,7 @@ pub struct HirStructMember {
     pub name: String,
     pub pos: SrcPos,
     pub ty: EdlTypeInstance,
+    pub async_state: AsyncState,
     pub doc: Option<ItemDoc>,
 }
 
@@ -40,6 +42,11 @@ impl DocElement for HirStructMember {
             name: self.name.clone(),
             doc: self.doc.as_ref().map(|doc| doc.doc.clone()).unwrap_or_default(),
             ty: self.ty.doc(state),
+            modifiers: match self.async_state {
+                AsyncState::Async => Modifiers::new(vec![Modifier::Async]),
+                AsyncState::Shared => Modifiers::new(vec![Modifier::Shared]),
+                AsyncState::None => Modifiers::new(vec![]),
+            },
         }
     }
 }

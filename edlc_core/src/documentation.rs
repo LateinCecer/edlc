@@ -96,6 +96,7 @@ pub struct FuncDoc {
     pub params: FuncParamsDoc,
     pub ret: TypeDoc,
     pub ms: Modifiers,
+    pub async_return: bool,
     pub associated_type: Option<TypeDoc>,
 }
 
@@ -104,7 +105,11 @@ impl Display for FuncDoc {
         let name = *self.name.last().as_ref().unwrap();
         write!(f, "{}fn {name}{}({})", self.ms, self.env, self.params)?;
         if !matches!(self.ret, TypeDoc::Empty) {
-            write!(f, " -> {}", self.ret)?;
+            if self.async_return {
+                write!(f, " -> async {}", self.ret)?;
+            } else {
+                write!(f, " -> {}", self.ret)?;
+            }
         }
         Ok(())
     }
@@ -150,6 +155,10 @@ impl Display for FuncParamDoc {
 pub struct Modifiers(Vec<Modifier>);
 
 impl Modifiers {
+    pub fn new(v: Vec<Modifier>) -> Self {
+        Self(v)
+    }
+
     pub fn push(&mut self, m: Modifier) {
         self.0.push(m);
     }
@@ -171,6 +180,7 @@ pub enum Modifier {
     MaybeComptime,
     Mut,
     Async,
+    Shared,
 }
 
 impl Display for Modifier {
@@ -180,6 +190,7 @@ impl Display for Modifier {
             Modifier::MaybeComptime => write!(f, "?comptime"),
             Modifier::Mut => write!(f, "mut"),
             Modifier::Async => write!(f, "async"),
+            Modifier::Shared => write!(f, "shared"),
         }
     }
 }
@@ -294,11 +305,17 @@ pub struct StructMemberDoc {
     pub pos: SrcPos,
     pub doc: String,
     pub ty: TypeDoc,
+    /// Struct members can have either the async, or the shared modifier attached to them.
+    pub modifiers: Modifiers,
 }
 
 impl Display for StructMemberDoc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name, self.ty)
+        if !self.modifiers.0.is_empty() {
+            write!(f, "{} {}: {}", self.modifiers, self.name, self.ty)
+        } else {
+            write!(f, "{}: {}", self.name, self.ty)
+        }
     }
 }
 

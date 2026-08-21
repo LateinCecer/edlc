@@ -9,6 +9,7 @@ members = [
   "edlc_lsp",
   "edlc_analysis",
   "edlc_doc_db",
+  "edlc_doc_server",
   "examples/build_doc_db",
 ]
 
