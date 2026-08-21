@@ -1,0 +1,19 @@
+[package]
+name = "build_doc_db"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Example implementor: compiles a bundled EDL project and emits a docs.db"
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "build_doc_db"
+path = "src/main.rs"
+
+[dependencies]
+edlc_core = { workspace = true }
+edlc_doc_db = { workspace = true }
+edlc_codegen_cranelift = { workspace = true }

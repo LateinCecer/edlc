@@ -27,6 +27,7 @@ struct DocsInfo {
     fns: Vec<FuncDoc>,
     lets: Vec<LetDoc>,
     consts: Vec<ConstDoc>,
+    types: Vec<TypeDefDoc>,
 }
 
 pub struct HtmlGenerator<W> {
@@ -221,6 +222,7 @@ impl<W: Write> DocGenerator for HtmlGenerator<W> {
             Item::GlobalVar(val) => self.docs_info.lets.push(val.clone()),
             Item::GlobalConst(val) => self.docs_info.consts.push(val.clone()),
             Item::Func(val) =>  self.docs_info.fns.push(val.clone()),
+            Item::TypeDef(val) => self.docs_info.types.push(val.clone()),
             Item::Module(val) => self.docs_info.modules.push(val.clone()),
         }
         Ok(())

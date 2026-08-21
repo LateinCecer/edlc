@@ -17,7 +17,7 @@
  */
 use crate::ast::ItemDoc;
 use crate::core::edl_type::{EdlEnvId, EdlTypeInstance};
-use crate::documentation::{DocCompilerState, DocElement, EnumVariantDoc, StructMemberDoc, TypeDefVariant};
+use crate::documentation::{DocCompilerState, DocElement, EnumVariantDoc, FuncParamsDoc, StructMemberDoc, TypeDefVariant};
 use crate::file::ModuleSrc;
 use crate::lexer::SrcPos;
 use crate::prelude::{StructTypeDoc, TypeDefDoc};
@@ -143,6 +143,16 @@ impl DocElement for HirTypeDef {
     type Doc = TypeDefDoc;
 
     fn doc(&self, state: &DocCompilerState<'_>) -> Self::Doc {
-        todo!()
+        let env = state.types.get_env(self.env).unwrap().doc(state);
+        let variant = self.def.doc(state);
+        TypeDefDoc {
+            name: self.name.clone().into(),
+            src: self.src.clone().into(),
+            pos: self.pos,
+            doc: self.doc.as_ref().map(|doc| doc.doc.clone()).unwrap_or_default(),
+            env,
+            params: FuncParamsDoc::default(),
+            variant,
+        }
     }
 }

@@ -1164,7 +1164,13 @@ impl HirModule {
                     val.register_code(phase)?;
                 }
                 HirItem::Use(_) => (),
-                HirItem::Type(_) => (),
+                HirItem::Type(t) => {
+                    let doc = t.doc(&DocCompilerState {
+                        types: &phase.types,
+                        vars: &phase.vars,
+                    });
+                    phase.code.insert_doc(doc);
+                },
             }
         }
         Ok(())

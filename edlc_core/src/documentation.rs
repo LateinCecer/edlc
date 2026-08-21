@@ -110,8 +110,14 @@ impl Display for FuncDoc {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct FuncParamsDoc(Vec<FuncParamDoc>);
+
+impl FuncParamsDoc {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 impl From<Vec<FuncParamDoc>> for FuncParamsDoc {
     fn from(value: Vec<FuncParamDoc>) -> Self {
@@ -292,7 +298,7 @@ pub struct StructMemberDoc {
 
 impl Display for StructMemberDoc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "{}: {}", self.name, self.ty)
     }
 }
 
@@ -305,7 +311,19 @@ pub enum StructTypeDoc {
 
 impl Display for StructTypeDoc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            StructTypeDoc::Named(members) => {
+                write!(f, "{{ ")?;
+                fmt_list(members, f, "", "", ", ")?;
+                write!(f, " }}")
+            }
+            StructTypeDoc::Tuple(members) => {
+                write!(f, "(")?;
+                fmt_list(members, f, "", "", ", ")?;
+                write!(f, ")")
+            }
+            StructTypeDoc::ZeroSized => Ok(()),
+        }
     }
 }
 
@@ -317,7 +335,11 @@ pub struct EnumVariantDoc {
 
 impl Display for EnumVariantDoc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match &self.members {
+            StructTypeDoc::ZeroSized => write!(f, "{}", self.name),
+            StructTypeDoc::Named(_) => write!(f, "{} {}", self.name, self.members),
+            StructTypeDoc::Tuple(_) => write!(f, "{}{}", self.name, self.members),
+        }
     }
 }
 
@@ -331,7 +353,23 @@ pub enum TypeDefVariant {
 
 impl Display for TypeDefVariant {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        match self {
+            TypeDefVariant::Struct(d) => match d {
+                StructTypeDoc::ZeroSized => write!(f, "struct"),
+                _ => write!(f, "struct {d}"),
+            },
+            TypeDefVariant::Enum(variants) => {
+                write!(f, "enum {{ ")?;
+                fmt_list(variants, f, "", "", ", ")?;
+                write!(f, " }}")
+            }
+            TypeDefVariant::Union(members) => {
+                write!(f, "union {{ ")?;
+                fmt_list(members, f, "", "", ", ")?;
+                write!(f, " }}")
+            }
+            TypeDefVariant::Alias(ty) => write!(f, "{ty}"),
+        }
     }
 }
 
@@ -348,7 +386,15 @@ pub struct TypeDefDoc {
 
 impl Display for TypeDefDoc {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let name = *self.name.last().as_ref().unwrap();
+        write!(f, "type {name}")?;
+        if !self.env.is_empty() {
+            write!(f, "{}", self.env)?;
+        }
+        if !self.params.is_empty() {
+            write!(f, "{}", self.params)?;
+        }
+        write!(f, " = {}", self.variant)
     }
 }
 
@@ -517,6 +563,7 @@ pub enum Item {
     GlobalVar(LetDoc),
     GlobalConst(ConstDoc),
     Func(FuncDoc),
+    TypeDef(TypeDefDoc),
     Module(ModuleDoc),
 }
 
@@ -526,6 +573,7 @@ impl Display for Item {
             Item::GlobalVar(val) => write!(f, "{val}"),
             Item::GlobalConst(val) => write!(f, "{val}"),
             Item::Func(val) => write!(f, "{val}"),
+            Item::TypeDef(val) => write!(f, "{val}"),
             Item::Module(val) => write!(f, "{val}"),
         }
     }
@@ -552,6 +600,12 @@ impl From<ConstDoc> for Item {
 impl From<FuncDoc> for Item {
     fn from(value: FuncDoc) -> Self {
         Item::Func(value)
+    }
+}
+
+impl From<TypeDefDoc> for Item {
+    fn from(value: TypeDefDoc) -> Self {
+        Item::TypeDef(value)
     }
 }
 
