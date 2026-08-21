@@ -204,3 +204,9 @@ liking, but if you're reading this disclaimer, I do not think that moment has co
 This project is ultimately a passion project of mine and, as such, a labor of love.
 I intend to keep it that way.
 If I do decide to include AI written code in this project, the affected parts will be marked clearly.
+
+Exceptions to this are the parts of the compiler used for auto-generating documentation and then serving that 
+documentation via HTTP or MCP to the end-user or LLMs.
+The sub-crates involved with this mechanisms (edlc_doc/edlc_doc_db/edlc_doc_server) contain LLM generated parts.
+It should be noted that these parts of the code-base are not responsible for the stability of the compiler itself.
+Therefore, I believe that the use of LLMs in these parts is not detrimental to the quality of greater project.
