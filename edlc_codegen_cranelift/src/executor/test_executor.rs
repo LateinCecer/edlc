@@ -72,7 +72,7 @@ impl TestExec {
                 .get_fn_qualifier(*id)?
                 .as_ref()
                 .unwrap();
-            let n = bencher.start_bench(full_name);
+            let n = bencher.start_bench(full_name, compiler);
             let mut ok = true;
             'outer: for _ in 0..n {
                 for setup_fn in setup.iter() {
@@ -82,9 +82,9 @@ impl TestExec {
                         break 'outer;
                     }
                 }
-                bencher.start_round();
+                bencher.start_round(compiler);
                 let res = compiler.catch_unwind(*stub, ());
-                bencher.stop_round();
+                bencher.stop_round(compiler);
                 if let Err(err) = res {
                     report.insert(*id, FnReport::Err(err));
                     ok = false;
@@ -102,7 +102,7 @@ impl TestExec {
             if ok {
                 report.insert(*id, FnReport::Ok);
             }
-            bencher.end_bench();
+            bencher.end_bench(compiler);
         }
         Ok(report)
     }

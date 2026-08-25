@@ -379,17 +379,17 @@ pub trait JITBencher {
     /// Start a benchmark for a specific function.
     /// The return value of this method should be the number of rounds for which the function should
     /// be executed for.
-    fn start_bench(&mut self, name: &QualifierName) -> usize;
+    fn start_bench<R: 'static>(&mut self, name: &QualifierName, jit: &CraneliftJIT<R>) -> usize;
 
     /// Starts a single benchmarking round for the currently running benchmark.
-    fn start_round(&mut self);
+    fn start_round<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
 
     /// Ends a single benchmarking round for the currently running benchmark.
-    fn stop_round(&mut self);
+    fn stop_round<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
 
     /// Ends the benchmark for the current function.
     /// This should be called exactly once after [Self::start_bench].
-    fn end_bench(&mut self);
+    fn end_bench<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
 }
 
 impl_function_container!(fn() -> R);
@@ -1857,22 +1857,22 @@ fn test() -> i32 {
         }
 
         impl JITBencher for SimpleBencher {
-            fn start_bench(&mut self, name: &QualifierName) -> usize {
+            fn start_bench<R: 'static>(&mut self, name: &QualifierName, _jit: &CraneliftJIT<R>) -> usize {
                 self.current_fn = Some(name.to_string());
                 self.current_sum = 0;
                 20
             }
 
-            fn start_round(&mut self) {
+            fn start_round<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
                 self.start_time = SystemTime::now();
             }
 
-            fn stop_round(&mut self) {
+            fn stop_round<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
                 self.end_time = SystemTime::now();
                 self.current_sum += self.end_time.duration_since(self.start_time).unwrap().as_micros();
             }
 
-            fn end_bench(&mut self) {
+            fn end_bench<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
                 self.averages.insert(
                     self.current_fn.as_ref().unwrap().to_string(),
                     (self.current_sum / 20) as u64,
