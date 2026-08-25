@@ -31,7 +31,6 @@ pub struct ServerConfig {
     pub mcp: McpConfig,
 
     /// HTTP server configuration. When enabled, the server serves a web frontend.
-    /// (Phase 3 — not yet implemented.)
     #[serde(default)]
     pub http: HttpConfig,
 }
@@ -44,16 +43,25 @@ pub struct McpConfig {
     pub enabled: bool,
 }
 
-/// HTTP-specific configuration. (Phase 3 — not yet implemented.)
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// HTTP-specific configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpConfig {
-    /// Whether the HTTP server is enabled. Default: `false`.
-    #[serde(default)]
+    /// Whether the HTTP server is enabled. Default: `true`.
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// The port to listen on. Default: `8080`.
     #[serde(default = "default_http_port")]
     pub port: u16,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        HttpConfig {
+            enabled: true,
+            port: 8080,
+        }
+    }
 }
 
 fn default_true() -> bool {

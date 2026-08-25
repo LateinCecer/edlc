@@ -537,6 +537,9 @@ impl MakeGraph for HirBlock {
         let mut new_block = graph.graph
             .create_block()
             .with_parent(graph.current_block)
+            .with_source(self.src.clone(), DebugSymbols {
+                pos: self.pos,
+            }, self.scope)
             .create_scope();
         if self.comptime {
             new_block = new_block.with_context(Context::Comptime);

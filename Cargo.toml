@@ -28,3 +28,11 @@ edlc_lsp = { version = "0.2.13", path = "edlc_lsp" }
 edlc_docs = { version = "0.2.13", path = "edlc_docs" }
 edlc_doc_db = { version = "0.2.13", path = "edlc_doc_db" }
 
+# Profile for the Leptos WASM client bundle (used by cargo-leptos).
+[profile.wasm-release]
+inherits = "release"
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = "abort"
+

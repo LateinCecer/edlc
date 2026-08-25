@@ -869,7 +869,7 @@ impl ConstEval {
                             self.check_comptime_call(value, MirBlockRef(block_ref), debug, cfg, phase, &mut report);
                         }
                     }
-                    Statement::VarMove { var: _, value, uid: _, debug } => {
+                    Statement::VarMove { var: _, value: _, uid: _, debug: _ } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
@@ -877,7 +877,12 @@ impl ConstEval {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
-                        report.record_err(|| self.check_constant(value, block, debug, phase))
+                        // TODO: is this a valid way of dealing with moves??? moves should have
+                        //       no side effect what so ever so it should be fine. In that case,
+                        //       we can just delete this arm of the match -> as with seal statements
+                        //       we can assume that the value is just passing through as long as
+                        //       we don't use it somewhere where there are side effects
+                        // report.record_err(|| self.check_constant(value, block, debug, phase))
                     }
                     Statement::VarCopy { var: _, value, uid: _, debug, .. } => {
                         if !matches!(block.ctx, Context::Comptime) {
@@ -962,9 +967,19 @@ impl ConstEval {
         let block = &cfg.blocks[block.0];
         let call = &cfg.expressions.call[expr.id];
         for comptime_arg in call.comptime_args.iter() {
+            let debug = if let Some(def_point) = cfg.find_definition(&comptime_arg.value_expr) {
+                cfg.find_def_debug_info(&def_point).unwrap().0
+            } else {
+                debug
+            };
             report.record_err(|| self.check_constant(&comptime_arg.value_expr, block, debug, phase));
         }
         for arg in call.args.iter() {
+            let debug = if let Some(def_point) = cfg.find_definition(arg) {
+                cfg.find_def_debug_info(&def_point).unwrap().0
+            } else {
+                debug
+            };
             report.record_err(|| self.check_constant(arg, block, debug, phase));
         }
     }
