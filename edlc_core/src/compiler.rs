@@ -1452,7 +1452,6 @@ impl From<EdlError> for CompilerError {
     }
 }
 
-#[cfg(debug_assertions)]
 impl From<ResolveError> for CompilerError {
     fn from(value: ResolveError) -> Self {
         CompilerError::ResolveError(value)
