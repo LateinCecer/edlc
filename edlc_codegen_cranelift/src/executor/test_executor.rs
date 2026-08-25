@@ -63,7 +63,7 @@ impl TestExec {
 
     pub fn bench<R: 'static>(
         &self,
-        bencher: &mut impl JITBencher,
+        bencher: &mut impl JITBencher<R>,
         compiler: &CraneliftJIT<R>,
     ) -> Result<TestReport, anyhow::Error> {
         let mut report = TestReport::default();

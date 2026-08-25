@@ -375,21 +375,21 @@ impl<Runtime: 'static> FunctionContainerProto for CraneliftJIT<Runtime> {
     }
 }
 
-pub trait JITBencher {
+pub trait JITBencher<R: 'static> {
     /// Start a benchmark for a specific function.
     /// The return value of this method should be the number of rounds for which the function should
     /// be executed for.
-    fn start_bench<R: 'static>(&mut self, name: &QualifierName, jit: &CraneliftJIT<R>) -> usize;
+    fn start_bench(&mut self, name: &QualifierName, jit: &CraneliftJIT<R>) -> usize;
 
     /// Starts a single benchmarking round for the currently running benchmark.
-    fn start_round<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
+    fn start_round(&mut self, jit: &CraneliftJIT<R>);
 
     /// Ends a single benchmarking round for the currently running benchmark.
-    fn stop_round<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
+    fn stop_round(&mut self, jit: &CraneliftJIT<R>);
 
     /// Ends the benchmark for the current function.
     /// This should be called exactly once after [Self::start_bench].
-    fn end_bench<R: 'static>(&mut self, jit: &CraneliftJIT<R>);
+    fn end_bench(&mut self, jit: &CraneliftJIT<R>);
 }
 
 impl_function_container!(fn() -> R);
@@ -1002,7 +1002,7 @@ impl<Runtime: 'static> CraneliftJIT<Runtime> {
         is_lib: bool,
         test_name: &Regex,
         path: Option<&QualifierName>,
-        bencher: &mut impl JITBencher,
+        bencher: &mut impl JITBencher<Runtime>,
     ) -> Result<TestReport, anyhow::Error> {
         let module = if is_lib {
             self.load_lib(name, supplier)?
@@ -1856,23 +1856,23 @@ fn test() -> i32 {
             averages: HashMap<String, u64>,
         }
 
-        impl JITBencher for SimpleBencher {
-            fn start_bench<R: 'static>(&mut self, name: &QualifierName, _jit: &CraneliftJIT<R>) -> usize {
+        impl<R: 'static> JITBencher<R> for SimpleBencher {
+            fn start_bench(&mut self, name: &QualifierName, _jit: &CraneliftJIT<R>) -> usize {
                 self.current_fn = Some(name.to_string());
                 self.current_sum = 0;
                 20
             }
 
-            fn start_round<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
+            fn start_round(&mut self, _jit: &CraneliftJIT<R>) {
                 self.start_time = SystemTime::now();
             }
 
-            fn stop_round<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
+            fn stop_round(&mut self, _jit: &CraneliftJIT<R>) {
                 self.end_time = SystemTime::now();
                 self.current_sum += self.end_time.duration_since(self.start_time).unwrap().as_micros();
             }
 
-            fn end_bench<R: 'static>(&mut self, _jit: &CraneliftJIT<R>) {
+            fn end_bench(&mut self, _jit: &CraneliftJIT<R>) {
                 self.averages.insert(
                     self.current_fn.as_ref().unwrap().to_string(),
                     (self.current_sum / 20) as u64,
