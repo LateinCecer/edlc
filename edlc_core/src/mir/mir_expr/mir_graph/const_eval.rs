@@ -51,6 +51,11 @@ use crate::core::EdlVarId;
 use crate::mir::mir_expr::mir_graph::async_analysis::{Async, AsyncConnState, AsyncConnectome, AsyncData, AsyncDataPool, AsyncVerify, AsyncVerifyError, SharedVerify};
 use crate::mir::mir_expr::mir_graph::whole_program::Wpg;
 use crate::prelude::mir_expr::mir_graph::async_analysis::SharedVerifyError;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+/// TEMPORARY DEBUG: worklist block-processing counter for const-eval instrumentation.
+const CE_DEBUG: bool = true;
+static CE_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Lattice:
 ///
@@ -462,8 +467,14 @@ impl CallParameterCopy {
 
 impl ConstFrame {
     pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
-        self.avail.contains(value) && self.references.get_max_for_owners(value, graph, FlowState::cmp)
-            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
+        let in_avail = self.avail.contains(value);
+        let owner_fixed = self.references.get_max_for_owners(value, graph, FlowState::cmp)
+            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed;
+        if CE_DEBUG && (!in_avail || !owner_fixed) {
+            eprintln!("[ce] block#{:3} is_avail FALSE value=${:x} in_avail={} owner_fixed={}",
+                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0, in_avail, owner_fixed);
+        }
+        in_avail && owner_fixed
     }
 
     pub fn is_deref_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
@@ -477,6 +488,13 @@ impl ConstFrame {
     }
 
     pub fn set_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        if CE_DEBUG {
+            let srcs: Vec<String> = graph.get_paths(value)
+                .map(|s| s.iter().map(|p| format!("{:?}", p.source)).collect())
+                .unwrap_or_default();
+            eprintln!("[ce] block#{:3} set_unavail(OWNER->Floating) value=${:x} srcs={:?}",
+                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0, srcs);
+        }
         self.avail.remove(value);
         self.references.set_owner_value(*value, FlowState::Floating, graph, FlowState::cmp);
     }
@@ -486,6 +504,10 @@ impl ConstFrame {
     }
 
     pub fn set_deref_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
+        if CE_DEBUG {
+            eprintln!("[ce] block#{:3} set_deref_unavail(DEREF->Floating) value=${:x}",
+                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0);
+        }
         self.references.set_deref_value(*value, FlowState::Floating, graph, FlowState::cmp);
     }
 }
@@ -859,6 +881,11 @@ impl ConstEval {
         phase: &mut HirPhase,
     ) -> Report<ConstError, ()> {
         let mut report = Report::default();
+        if CE_DEBUG {
+            let n_comptime = cfg.blocks.iter().filter(|b| matches!(b.ctx, Context::Comptime)).count();
+            eprintln!("[ce] validate_comptime_context: total_blocks={} comptime_blocks={}",
+                cfg.blocks.len(), n_comptime);
+        }
         for (block_ref, block) in cfg.blocks.iter().enumerate() {
             for statement in block.statements.iter() {
                 match statement {
@@ -957,6 +984,10 @@ impl ConstEval {
         phase: &mut HirPhase,
         report: &mut Report<ConstError, ()>,
     ) {
+        if CE_DEBUG {
+            eprintln!("[ce] check_comptime_call? block=${:x} ty={:?} is_comptime_start={}",
+                block.0, expr.ty, cfg.find_begin_comptime_block(block).is_some());
+        }
         if !matches!(expr.ty, MirExprVariant::Call) {
             return;
         }
@@ -964,6 +995,11 @@ impl ConstEval {
             return; // don't report this for comptime functions; in those every parameter is
             // comptime, because the function itself can only be called during comptime ;)
         };
+        if CE_DEBUG {
+            let call = &cfg.expressions.call[expr.id];
+            eprintln!("[ce] check_comptime_call block=${:x} func_args={} comptime_args={}",
+                block.0, call.args.len(), call.comptime_args.len());
+        }
         let block = &cfg.blocks[block.0];
         let call = &cfg.expressions.call[expr.id];
         for comptime_arg in call.comptime_args.iter() {
@@ -991,6 +1027,10 @@ impl ConstEval {
         debug: &DebugSymbols,
         phase: &mut HirPhase,
     ) -> Result<(), ReportError<ConstError>> {
+        if CE_DEBUG {
+            eprintln!("[ce] check_constant value=${:x} known={}",
+                val.0, self.get_constant_value(val).is_some());
+        }
         if self.get_constant_value(val).is_some() {
             Ok(())
         } else {
@@ -1401,6 +1441,10 @@ impl MirFlowGraph {
         const_eval: &mut ConstEval,
     ) -> Result<(), ExecutionError> {
         let current_block = params.block;
+        if CE_DEBUG {
+            let n = CE_BLOCK_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            eprintln!("[ce] === process_block #{n} block=${:x} ===", current_block.0);
+        }
         let (max_compute_cache, first_run) = {
             let state = const_eval.state.map
                 .get_mut(current_block.0).unwrap();
