@@ -2385,119 +2385,93 @@ fn test_readlock() {
         Ok(())
     }
 
-    /// Minimal reproduction for the const-eval "non-constant captured in `comptime` block" bug.
+    /// Regression test for the const-eval "non-constant captured in `comptime` block" bug.
     ///
-    /// A `comptime` block that captures an immutable global through a chain of `comptime`
-    /// functions is re-executed on every back-edge pass of an enclosing loop. The global
-    /// flow-state forest in const-eval is shared across all worklist iterations and never reset,
-    /// so a `Floating` state accumulated from an earlier pass can poison the global's borrow tree
-    /// and make the comptime capture incorrectly report as non-constant.
+    /// A `comptime` block inside a loop calls a side-effecting `comptime` function — one that
+    /// returns a fresh value on every execution (like a resource allocation in AcoDyn). Because
+    /// the enclosing loop re-drives the const-eval worklist, the block is processed more than
+    /// once per worklist run. Before the fix, the side-effecting call was re-executed on every
+    /// pass, producing different bytes each time; the byte divergence latched the captured value
+    /// to `Runtime`, and the comptime-capture validation then (incorrectly) reported it as
+    /// non-constant.
+    ///
+    /// A `comptime` statement must execute at most once per worklist run: it may carry side
+    /// effects (memory allocation), and re-executing it would both change the captured value and
+    /// leak shadow resources that the runtime never deallocates. This test asserts that
+    /// compilation succeeds and that the side-effecting call ran exactly once.
     #[test]
     fn test_const_eval_loop_capture() -> Result<(), anyhow::Error> {
+        #[derive(Debug, Default)]
+        struct AllocRuntime {
+            allocations: usize,
+        }
+
         let _ = setup_logger();
-        let mut compiler = CraneliftJIT::<()>::default();
+        let mut compiler = CraneliftJIT::<AllocRuntime>::default();
         compiler.init()?;
+        compiler.backend.insert_runtime(0, "runtime", AllocRuntime::default())?;
         setup_print(&mut compiler)?;
         compiler.compiler.prepare_module(&vec!["std"].into())?;
 
+        compiler.compiler.parse_and_insert_type_def(inline_code!("Resource"), inline_code!("<>"))?;
+        compiler.compiler.insert_type_instance::<usize>(inline_code!("Resource"))?;
+        let [new, intern, field, consume] = compiler.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!("Resource"),
+            [
+                inline_code!("comptime fn new() -> Self"),
+                inline_code!("comptime fn intern(self) -> Self"),
+                inline_code!("comptime fn field(self) -> Self"),
+                inline_code!("fn consume(self, i: usize) -> usize"),
+            ],
+            None,
+        )?;
+
+        jit_func!(for ("Resource") impl &mut compiler, fn(new),
+            const fn new_resource<>() -> usize where; { 0 }
+        );
+        // side-effecting comptime call: returns a fresh id on every execution
+        jit_func!(for ("Resource") impl &mut compiler, fn(intern), 0,
+            const fn intern_resource<>(runtime: AllocRuntime, this: usize) -> usize where; {
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let mut runtime = runtime.write().unwrap();
+                let id = runtime.allocations;
+                runtime.allocations += 1;
+                id
+            }
+        );
+        jit_func!(for ("Resource") impl &mut compiler, fn(field),
+            const fn field_resource<>(this: usize) -> usize where; { this }
+        );
+        jit_func!(for ("Resource") impl &mut compiler, fn(consume),
+            fn consume_resource<>(this: usize, i: usize) -> usize where; { i + this }
+        );
+
         compiler.compile_module(vec!["test"].into(), inline_code!(r#"
 use std::io::print;
+use std::Resource;
 
-type BoundaryField = struct {};
-type BoundaryFieldIntern = struct {};
-type Field = struct {};
-type Domain = struct { cells: usize };
-type CellCount = struct { count: usize };
-
-impl BoundaryField {
-    comptime fn new() -> Self {
-        BoundaryField {}
-    }
-
-    comptime fn intern(async self) -> async BoundaryFieldIntern {
-        BoundaryFieldIntern {}
-    }
-
-    async fn set_bc(self, index: MtId, val: f32) {
-        print("set_bc\n");
-    }
-}
-
-impl BoundaryFieldIntern {
-    comptime fn field(async self) -> async Field {
-        Field {}
-    }
-}
-
-type MtId = struct { id: usize, ctx: usize };
-type SVector = struct { data: f32 };
-
-impl Field {
-    async fn set(async self, index: MtId, val: [SVector; 1]) {
-        print("set ");
-        print(index.id);
-        print("\n");
-    }
-
-    async fn fill(async self, val: f32) {
-        print("fill\n");
-    }
-}
-
-type CellCenter = struct { x: f32, y: f32 };
-
-impl Domain {
-    comptime fn new() -> Self {
-        Domain { cells: 8usize }
-    }
-
-    comptime fn num_cells(self) -> CellCount {
-        CellCount { count: self.cells }
-    }
-
-    fn get_cell_center(self, id: MtId) -> CellCenter {
-        CellCenter { x: 0.5f32, y: 0.5f32 }
-    }
-}
-
-impl CellCount {
-    fn get(self, ctx: usize) -> usize {
-        self.count
-    }
-}
-
-// runtime (non-comptime) helper, mimics `std::rand::random` in the production code
-fn rand_val(i: usize) -> f32 {
-    0.25f32
-}
-
-let phi = BoundaryField::new();
-let eta = BoundaryField::new();
-let domain = Domain::new();
+let phi = Resource::new();
 
 fn test() {
-    comptime { phi.intern().field() }.fill(0.0f32);
-
     let mut i = 0usize;
     loop {
-        if i >= comptime { domain.num_cells() }.get(0usize) { break; }
-        let id = MtId { id: i, ctx: 0usize };
-        let c = domain.get_cell_center(id);
-        let x = c.x * c.x + c.y * c.y;
-        let val = [SVector { data: rand_val(i) + x }];
-        comptime { phi.intern().field() }.set(id, val);
+        if i >= 4usize { break; }
+        let r = comptime { phi.intern().field() };
+        let _ = r.consume(i);
         i += 1;
     }
-
-    let bc = MtId { id: 0usize, ctx: 0usize };
-    phi.set_bc(bc, 0.0f32);
-    eta.set_bc(bc, 0.0f32);
     print("done\n");
 }
         "#))?;
 
         let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
         assert!(compiler.catch_unwind(prog, ()).is_ok());
+
+        // the side-effecting comptime call must have executed exactly once, not once per
+        // worklist pass of the enclosing loop
+        let rt = compiler.backend.get_runtime(0.into())?.read().unwrap();
+        assert_eq!(rt.allocations, 1);
         Ok(())
     }
 }

@@ -311,8 +311,11 @@ impl MirCall {
 
         for comp_param in self.comptime_args.iter() {
             if !frame.is_avail(&comp_param.value_expr, graph) {
+                // a comptime argument is not available at this point in the analysis: the call is
+                // simply not executable at compile time (it will be reported during the comptime
+                // context validation if the value must actually be known)
                 report_comptime_unknown(comp_param.value_expr);
-                panic!();
+                return false;
             }
         }
         self.args.iter().all(|param| frame.is_avail(param, graph))

@@ -199,6 +199,13 @@ struct ConstNodeState {
     output: Vec<CallParameterCopy>,
     /// Number of iterations this node has already been visited
     computation_counter: usize,
+    /// Statements (by block-local UID) that have already been executed on the executor VM during
+    /// this worklist run. A `comptime` statement may carry side effects (e.g. resource
+    /// allocation), so it must never be executed a second time: re-executing it would change its
+    /// result across worklist passes and leak resources the runtime never deallocates. Statements
+    /// in this set are re-validated (from their cached result) instead of re-executed when the
+    /// block is processed again.
+    executed_statements: HashSet<BlockLocalStatementUid>,
 }
 
 #[derive(Debug)]
@@ -216,6 +223,7 @@ impl ConstNodeState {
             block_parameters: CallParameterCopy::empty(block, cfg),
             output: vec![],
             computation_counter: 0,
+            executed_statements: HashSet::new(),
         }
     }
 
@@ -470,10 +478,6 @@ impl ConstFrame {
         let in_avail = self.avail.contains(value);
         let owner_fixed = self.references.get_max_for_owners(value, graph, FlowState::cmp)
             .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed;
-        if CE_DEBUG && (!in_avail || !owner_fixed) {
-            eprintln!("[ce] block#{:3} is_avail FALSE value=${:x} in_avail={} owner_fixed={}",
-                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0, in_avail, owner_fixed);
-        }
         in_avail && owner_fixed
     }
 
@@ -488,13 +492,6 @@ impl ConstFrame {
     }
 
     pub fn set_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
-        if CE_DEBUG {
-            let srcs: Vec<String> = graph.get_paths(value)
-                .map(|s| s.iter().map(|p| format!("{:?}", p.source)).collect())
-                .unwrap_or_default();
-            eprintln!("[ce] block#{:3} set_unavail(OWNER->Floating) value=${:x} srcs={:?}",
-                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0, srcs);
-        }
         self.avail.remove(value);
         self.references.set_owner_value(*value, FlowState::Floating, graph, FlowState::cmp);
     }
@@ -504,10 +501,6 @@ impl ConstFrame {
     }
 
     pub fn set_deref_unavail(&mut self, value: &MirValue, graph: &BorrowGraph) {
-        if CE_DEBUG {
-            eprintln!("[ce] block#{:3} set_deref_unavail(DEREF->Floating) value=${:x}",
-                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), value.0);
-        }
         self.references.set_deref_value(*value, FlowState::Floating, graph, FlowState::cmp);
     }
 }
@@ -866,6 +859,32 @@ impl ConstEval {
         changed
     }
 
+    /// Restores a previously-executed statement's cached constant result into the current block
+    /// frame without re-executing the statement on the VM.
+    ///
+    /// Used for statements that must only ever execute once per worklist run (side-effecting
+    /// `comptime` calls). On a later pass the statement is not re-executed; instead its cached
+    /// value is re-validated. Returns `true` if the value's constant state changed (it does not,
+    /// since the value was already recorded as a constant when it was first executed).
+    fn revalidate_cached_value(
+        &mut self,
+        value: &MirValue,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+    ) -> bool {
+        let Some(data) = self.get_constant_value(value).cloned() else {
+            // no cached known value (the value has been invalidated as runtime); keep it
+            // unavailable in the current frame
+            self.block_frame.avail.remove(value);
+            return false;
+        };
+        self.block_frame.set_avail(value, &self.borrow_graph);
+        let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
+        let [mut dst] = vm.get_data_mut([range], &[ty]);
+        dst.memcpy(&data.as_data());
+        false
+    }
+
     fn get_constant_value(&self, value: &MirValue) -> Option<&AmorphusDataCopy> {
         self.state.consts.get(value.0).and_then(|state| match state {
             ConstEvalState::Runtime | ConstEvalState::Unknown => None,
@@ -881,11 +900,6 @@ impl ConstEval {
         phase: &mut HirPhase,
     ) -> Report<ConstError, ()> {
         let mut report = Report::default();
-        if CE_DEBUG {
-            let n_comptime = cfg.blocks.iter().filter(|b| matches!(b.ctx, Context::Comptime)).count();
-            eprintln!("[ce] validate_comptime_context: total_blocks={} comptime_blocks={}",
-                cfg.blocks.len(), n_comptime);
-        }
         for (block_ref, block) in cfg.blocks.iter().enumerate() {
             for statement in block.statements.iter() {
                 match statement {
@@ -984,10 +998,6 @@ impl ConstEval {
         phase: &mut HirPhase,
         report: &mut Report<ConstError, ()>,
     ) {
-        if CE_DEBUG {
-            eprintln!("[ce] check_comptime_call? block=${:x} ty={:?} is_comptime_start={}",
-                block.0, expr.ty, cfg.find_begin_comptime_block(block).is_some());
-        }
         if !matches!(expr.ty, MirExprVariant::Call) {
             return;
         }
@@ -995,11 +1005,6 @@ impl ConstEval {
             return; // don't report this for comptime functions; in those every parameter is
             // comptime, because the function itself can only be called during comptime ;)
         };
-        if CE_DEBUG {
-            let call = &cfg.expressions.call[expr.id];
-            eprintln!("[ce] check_comptime_call block=${:x} func_args={} comptime_args={}",
-                block.0, call.args.len(), call.comptime_args.len());
-        }
         let block = &cfg.blocks[block.0];
         let call = &cfg.expressions.call[expr.id];
         for comptime_arg in call.comptime_args.iter() {
@@ -1712,7 +1717,42 @@ impl Statement {
             Self::VarDef { var, value, uid, debug: _ } => {
                 // check if the expression can be executed in comptime
                 let mut changed = false;
-                if cfg.expressions.is_avail(
+
+                // A statement that has already been executed on the VM during this worklist run
+                // is never executed again: a `comptime` call may carry side effects (e.g. resource
+                // allocation), and re-executing it would change its result across worklist passes
+                // and leak resources the runtime never deallocates. Instead, its cached result is
+                // re-validated: if all inputs are still available, the known value is restored to
+                // the current frame; if any input has since become runtime, the value is
+                // invalidated as runtime.
+                let already_executed = {
+                    let state = const_eval.state.map.get_mut(block_ref.0).unwrap();
+                    state.executed_statements.contains(uid)
+                };
+
+                if already_executed {
+                    if cfg.expressions.is_avail(
+                        *value,
+                        backend,
+                        &const_eval.block_frame,
+                        &const_eval.borrow_graph,
+                    ) {
+                        if CE_DEBUG {
+                            eprintln!("[ce] block#{:3} block=${:x} REVALIDATE uid={:?} var=${:x} ty={:?}",
+                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0, value.ty);
+                        }
+                        changed |= const_eval.revalidate_cached_value(var, vm, stack_frame);
+                    } else {
+                        if CE_DEBUG {
+                            eprintln!("[ce] block#{:3} block=${:x} MARK_RUNTIME(recorded) uid={:?} var=${:x} ty={:?}",
+                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0, value.ty);
+                        }
+                        // an input became runtime after the statement was executed: the cached
+                        // result can no longer be trusted, so the value is invalidated
+                        changed |= const_eval.mark_runtime(var);
+                    }
+                    Ok(changed)
+                } else if cfg.expressions.is_avail(
                     *value,
                     backend,
                     &const_eval.block_frame,
@@ -1728,6 +1768,19 @@ impl Statement {
                         &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
                     )?;
                     changed |= const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+
+                    // record the execution of the statement so that a later worklist pass of this
+                    // block does not re-execute it. Only calls are recorded: they are the only
+                    // statements that may carry side effects (pure data operations are safe to
+                    // re-execute, as they re-derive the same result from the same inputs).
+                    if value.ty == MirExprVariant::Call {
+                        if CE_DEBUG {
+                            eprintln!("[ce] block#{:3} block=${:x} EXECUTE call uid={:?} var=${:x}",
+                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0);
+                        }
+                        const_eval.state.map.get_mut(block_ref.0).unwrap()
+                            .executed_statements.insert(*uid);
+                    }
 
                     // assigns and calls have the power to change values behind references
                     match value.ty {
