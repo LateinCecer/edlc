@@ -51,11 +51,6 @@ use crate::core::EdlVarId;
 use crate::mir::mir_expr::mir_graph::async_analysis::{Async, AsyncConnState, AsyncConnectome, AsyncData, AsyncDataPool, AsyncVerify, AsyncVerifyError, SharedVerify};
 use crate::mir::mir_expr::mir_graph::whole_program::Wpg;
 use crate::prelude::mir_expr::mir_graph::async_analysis::SharedVerifyError;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
-/// TEMPORARY DEBUG: worklist block-processing counter for const-eval instrumentation.
-const CE_DEBUG: bool = true;
-static CE_BLOCK_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Lattice:
 ///
@@ -451,6 +446,13 @@ impl CallParameterCopy {
     ) -> bool {
         let mut changed = false;
         consts.block_frame.avail.clear();
+        // Scope the flow-state forest to this block pass, exactly like `avail`: reset it to
+        // `FlowState::Fixed` so that stale `Floating` state from a previous pass (the sticky-max
+        // `set_value` never undoes a poisoning) does not leak into this pass and spuriously make
+        // a constant capture report as `is_avail == false`.
+        consts.block_frame
+            .references
+            .reset(&consts.borrow_graph.forest, FlowState::Fixed);
         for (param, param_value) in cfg.blocks[self.block.0]
             .parameters
             .iter()
@@ -894,6 +896,14 @@ impl ConstEval {
 
     /// Validates that all values that are used in a comptime context are actually known at
     /// compile time.
+    ///
+    /// Only blocks that the constant-folding worklist actually reached are validated. A comptime
+    /// block behind a condition that folds to a known value (e.g. a `?comptime`
+    /// `std::env_default`) is never visited by the worklist: the const-eval follows the sealing
+    /// statement straight to the taken branch and the dead branch is never processed. Its
+    /// captured values are therefore legitimately absent from the constant table, so they must not
+    /// be reported as non-constant captures. `computation_counter > 0` is exactly the set of
+    /// blocks the worklist visited.
     pub fn validate_comptime_context(
         &self,
         cfg: &MirFlowGraph,
@@ -901,6 +911,9 @@ impl ConstEval {
     ) -> Report<ConstError, ()> {
         let mut report = Report::default();
         for (block_ref, block) in cfg.blocks.iter().enumerate() {
+            if self.state.map.get(block_ref).map_or(true, |s| s.computation_counter == 0) {
+                continue; // block was never reached by the const-eval worklist -> not validated
+            }
             for statement in block.statements.iter() {
                 match statement {
                     Statement::VarDef { var: _, value, uid: _, debug } => {
@@ -1032,10 +1045,6 @@ impl ConstEval {
         debug: &DebugSymbols,
         phase: &mut HirPhase,
     ) -> Result<(), ReportError<ConstError>> {
-        if CE_DEBUG {
-            eprintln!("[ce] check_constant value=${:x} known={}",
-                val.0, self.get_constant_value(val).is_some());
-        }
         if self.get_constant_value(val).is_some() {
             Ok(())
         } else {
@@ -1446,10 +1455,6 @@ impl MirFlowGraph {
         const_eval: &mut ConstEval,
     ) -> Result<(), ExecutionError> {
         let current_block = params.block;
-        if CE_DEBUG {
-            let n = CE_BLOCK_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-            eprintln!("[ce] === process_block #{n} block=${:x} ===", current_block.0);
-        }
         let (max_compute_cache, first_run) = {
             let state = const_eval.state.map
                 .get_mut(current_block.0).unwrap();
@@ -1737,16 +1742,8 @@ impl Statement {
                         &const_eval.block_frame,
                         &const_eval.borrow_graph,
                     ) {
-                        if CE_DEBUG {
-                            eprintln!("[ce] block#{:3} block=${:x} REVALIDATE uid={:?} var=${:x} ty={:?}",
-                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0, value.ty);
-                        }
                         changed |= const_eval.revalidate_cached_value(var, vm, stack_frame);
                     } else {
-                        if CE_DEBUG {
-                            eprintln!("[ce] block#{:3} block=${:x} MARK_RUNTIME(recorded) uid={:?} var=${:x} ty={:?}",
-                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0, value.ty);
-                        }
                         // an input became runtime after the statement was executed: the cached
                         // result can no longer be trusted, so the value is invalidated
                         changed |= const_eval.mark_runtime(var);
@@ -1774,10 +1771,6 @@ impl Statement {
                     // statements that may carry side effects (pure data operations are safe to
                     // re-execute, as they re-derive the same result from the same inputs).
                     if value.ty == MirExprVariant::Call {
-                        if CE_DEBUG {
-                            eprintln!("[ce] block#{:3} block=${:x} EXECUTE call uid={:?} var=${:x}",
-                                CE_BLOCK_COUNTER.load(AtomicOrdering::Relaxed), block_ref.0, uid, var.0);
-                        }
                         const_eval.state.map.get_mut(block_ref.0).unwrap()
                             .executed_statements.insert(*uid);
                     }

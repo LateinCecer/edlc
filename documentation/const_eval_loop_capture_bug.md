@@ -1,7 +1,48 @@
 # Const-eval: "non-constant captured in `comptime` block" — investigation
 
-Status: **mechanism confirmed; production trigger case identified; log capture in progress**
+Status: **const-eval "non-constant captured" bug FIXED (three fixes); a separate, deeper
+deconstruction panic (`DataOrigin::Unknown`) now surfaces further down the pipeline — tracked
+as a distinct follow-up**
 Last updated: 2026-09-14
+
+## 0. Progress this session (2026-09-14, continued)
+
+- **Fix A — once-only execution** (`const_eval.rs`): `ConstNodeState.executed_statements:
+  HashSet<BlockLocalStatementUid>` records each `Call` statement executed on the VM. On a
+  later worklist pass the statement is NOT re-executed (prevents the double-allocation /
+  shadow-resource leak the user flagged). If its inputs are still available the cached
+  result is re-validated (`revalidate_cached_value`); if an input has since become runtime
+  the value is invalidated (`mark_runtime`).
+- **Fix B — D1 scoped forest** (`borrow.rs` + `const_eval.rs`): added
+  `ReferenceStateForest::reset(forest, base_value)` and call it in
+  `CallParameterCopy::set_vm_values` right after `avail.clear()`, resetting the sticky-max
+  `FlowState` forest to all-`Fixed` per block pass. This eliminates cross-pass/cross-block
+  leakage of `Floating` state that spuriously made `is_avail` false for constant captures.
+- **Effect**: the `interpolate()`/func#136 **deconstruction panic** (`DataOrigin::Unknown`,
+  caused by an interim "keep result stable" refinement that was since reverted) is gone, and
+  the ch.eq `init()` re-execution error is gone.
+- **Fix C — validator reachability** (`const_eval.rs`, `validate_comptime_context`): the
+  `main.eq:330` `comptime { Res::new(0usize) }` in `simple_outer()` (func#149) sat in block
+  `$1b`, behind a `Seal::Cond` whose condition (`std::env_default(...)`, a `?comptime` fn)
+  folds to a **known** value. The const-eval worklist therefore followed the sealing statement
+  straight to the taken branch and **never visited** block `$1b` (20 of func#149's 31 blocks
+  are visited), so its captured literal was legitimately absent from the constant table. The
+  bug was that `validate_comptime_context` iterated **all** blocks regardless of reachability
+  and flagged that absent value. Fix: skip blocks whose `ConstNodeState.computation_counter ==
+  0` (i.e. never reached by the worklist). This is *not* a worklist bug — the dead branch is
+  correctly unreachable — it is a validator over-reach. **The main.eq:330 "non-constant"
+  error is now gone.**
+- **Net effect on the production sim**: all three const-eval "non-constant captured" failures
+  (ch.eq `init()` re-execution, the D1 poisoning, and the main.eq:330 unreachable-block
+  validator over-reach) are resolved. The regression test
+  (`test_const_eval_loop_capture`) passes; the edlc test suites show only pre-existing
+  failures (`conversions` in `edlc_codegen_cranelift`; 15 ast/hir/resolver/compiler in
+  `edlc_core`).
+- **New, separate downstream failure (follow-up, NOT this bug)**: with the const-eval errors
+  resolved, the compiler now progresses further and panics in the SSA **deconstruction** pass —
+  `DataOrigin::Unknown for value $a6` in `PartialSsaDeconstruction::consolidate`
+  (`deconstruction.rs`) for func#149 (`simple_outer`). This is a distinct deconstruction
+  inconsistency that the earlier errors previously masked; it is tracked separately.
 
 ## 1. The bug
 
