@@ -21,10 +21,11 @@ use edlc_core::prelude::mir_backend::Backend;
 use edlc_core::prelude::mir_expr::mir_call::MirCall;
 use edlc_core::prelude::mir_expr::{MirFlowGraph, MirValue};
 use edlc_core::prelude::mir_type::abi::AbiConfig;
-use edlc_core::prelude::mir_type::MirTypeRegistry;
+use edlc_core::prelude::mir_type::{MirType, MirTypeId, MirTypeRegistry};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use edlc_core::prelude::mir_expr::mir_type_init::MirTypeInit;
 
 pub struct SysV {
     abi: Arc<AbiConfig>,
@@ -136,9 +137,10 @@ impl CallingConv for SysV {
         &self,
         cfg: &MirFlowGraph,
         reg: &MirTypeRegistry,
+        return_type: Option<MirTypeId>,
     ) -> Result<FunctionLayout, Self::Error> {
         let mut args = ArgumentOrdering::new(6, 8);
-        let ret_ty = cfg.get_return_type();
+        let ret_ty = return_type.unwrap_or_else(|| cfg.get_return_type(reg));
         let ret_ty_size = reg.byte_size(ret_ty).unwrap();
         let return_type = if ret_ty_size > self.abi.large_aggregate_bytes {
             args.push(Argument {

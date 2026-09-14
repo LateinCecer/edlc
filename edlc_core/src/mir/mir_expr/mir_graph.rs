@@ -2156,7 +2156,7 @@ impl MirFlowGraph {
     /// Gets the return type for the MIR flow graph.
     /// If the return type does not match for all sealing statements in the CFG, this method will
     /// panic!
-    pub fn get_return_type(&self) -> MirTypeId {
+    pub fn get_return_type(&self, mir_reg: &MirTypeRegistry) -> MirTypeId {
         let mut out: Option<MirTypeId> = None;
         for block in self.blocks.iter() {
             let Seal::Return(val, _) = &block.seal else {
@@ -2169,7 +2169,7 @@ impl MirFlowGraph {
                 out = Some(ty);
             }
         }
-        out.expect("no return statement in CFG")
+        mir_reg.never()
     }
 
     /// All links for the block, incoming and outgoing.

@@ -1224,6 +1224,69 @@ impl MirFlowGraph {
         while consts.remove_unused_consts(self) > 0 {}
     }
 
+    /// Only execute after non of the existing const eval infrastructure is needed anymore, as
+    /// the block indices will change, which will mess up coherence in any existing analysis data.
+    ///
+    /// # Note for the future
+    ///
+    /// When cleanup blocks are introduced to the CFG, make sure that they aren't pruned here.
+    /// With the reachability check as executed here, all cleanup blocks will just be deleted.
+    fn remove_dead_blocks(&mut self) {
+        let mut reachable = vec![false; self.blocks.len()];
+        let mut worklist = vec![self.root().0];
+        reachable[self.root().0] = true;
+        while let Some(block_idx) = worklist.pop() {
+            for succ in self.blocks[block_idx].down_link() {
+                if !reachable[succ.0] {
+                    reachable[succ.0] = true;
+                    worklist.push(succ.0);
+                }
+            }
+        }
+
+        let num_reachable = reachable.iter().filter(|&&r| r).count();
+        if num_reachable == self.blocks.len() {
+            return;
+        }
+
+        let mut mapping = vec![0usize; self.blocks.len()];
+        let mut next = 0usize;
+        for (old_idx, &is_reachable) in reachable.iter().enumerate() {
+            if is_reachable {
+                mapping[old_idx] = next;
+                next += 1;
+            }
+        }
+
+        for block in self.blocks.iter_mut() {
+            match &mut block.seal {
+                Seal::Jump(call, _) => {
+                    call.target = MirBlockRef(mapping[call.target.0]);
+                },
+                Seal::Cond { then_target, else_target, .. } => {
+                    then_target.target = MirBlockRef(mapping[then_target.target.0]);
+                    else_target.target = MirBlockRef(mapping[else_target.target.0]);
+                },
+                Seal::Switch { targets, default, .. } => {
+                    for target in targets.iter_mut() {
+                        target.block_call.target = MirBlockRef(mapping[target.block_call.target.0]);
+                    }
+                    default.target = MirBlockRef(mapping[default.target.0]);
+                },
+                _ => (),
+            }
+        }
+
+        let mut new_blocks = Vec::with_capacity(num_reachable);
+        for (old_idx, block) in self.blocks.iter().enumerate() {
+            if reachable[old_idx] {
+                new_blocks.push(block.clone());
+            }
+        }
+        self.blocks = new_blocks;
+        self.build_reverse_jump_list();
+    }
+
     fn replace_constant_statements(&mut self, consts: &ConstEval) {
         for block in self.blocks.iter_mut() {
             // iterate through the statements in the block and replace all statements that write
@@ -2223,6 +2286,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     }
     const_eval.validate_comptime_context(&body.body, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.body.remove_dead_blocks();
 
     let borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
@@ -2605,6 +2669,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     body.eliminate_dead_code(&res); // includes the compile-time analysis results into the
     res.validate_comptime_context(body, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.remove_dead_blocks();
 
     // CFG for optimization
     // After after all modifications to the CFG, run final verification steps
