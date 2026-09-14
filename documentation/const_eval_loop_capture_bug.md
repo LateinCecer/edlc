@@ -1,8 +1,10 @@
 # Const-eval: "non-constant captured in `comptime` block" — investigation
 
-Status: **const-eval "non-constant captured" bug FIXED (three fixes); a separate, deeper
-deconstruction panic (`DataOrigin::Unknown`) now surfaces further down the pipeline — tracked
-as a distinct follow-up**
+Status: **const-eval "non-constant captured" bug FIXED (three fixes) AND the downstream
+deconstruction panic (`DataOrigin::Unknown`) FIXED (orphaned dead blocks left by a folded
+`Seal::Cond`, removed by a new `remove_dead_blocks` DCE step — §8). The production sim now
+compiles and transitions to runtime; a separate, unrelated runtime ordering bug in acodyn's
+dispatcher now surfaces further down (tracked separately).**
 Last updated: 2026-09-14
 
 ## 0. Progress this session (2026-09-14, continued)
@@ -372,3 +374,75 @@ invasive and equally sound, per the argument in §2.
       end-to-end.
 - [ ] Remove the temporary `CE_DEBUG` instrumentation before merging.
 - [ ] D4 (partial-eq instead of byte compare) — tracked separately.
+
+## 8. Deconstruction panic: root cause + fix (2026-09-14)
+
+The §0 follow-up (the `DataOrigin::Unknown` deconstruction panic in
+`PartialSsaDeconstruction::consolidate`, `deconstruction.rs`) is now **root-caused and fixed**.
+
+### Root cause
+
+- With the three const-eval "non-constant" fixes landed, the compiler progressed further and
+  the *second* SSA deconstruction (the post-mutation `deconstruct`, `const_eval.rs:2644`)
+  panicked with `DataOrigin::Unknown` for func#149 (`simple_outer`).
+- The 16 `Unknown` values were all block parameters of the **dead body** of
+  `if std::env_default("adaptive_timestep", false)` (`main.eq:317–337`) — a `?comptime`
+  condition that folds to `false`.
+- `reduce_const_branching` (`const_eval.rs:1338`) rewrites that `Seal::Cond` into a
+  `Seal::Jump` to the merge block, **orphaning the then-branch** (dead region
+  `@13 → @16/@17 → @18/@19 → @15 → @1b(comptime) → @1a → @1d/@1e → @1c → @12`).
+- `eliminate_dead_code` (`const_eval.rs:1220`) only collapses branches / swaps constant
+  params + statements / drops unused consts — it **never removed the orphaned dead blocks**.
+- The second `deconstruct` runs a forward worklist over **all** blocks (`cfg.all_nodes()`),
+  including the dead region. The dead region's entry block `@13` has **zero predecessors**,
+  so its parameters (`$b2`, `$cf`) are never joined → absent from the state. But `@13`'s seal
+  forwards them to `@16`/`@17`, whose params then join to `Unknown`, propagating the
+  `Unknown` origin → the `consolidate` `panic!("invalid state")`.
+- Confirmed the invariant: **every transfer function that writes the state attaches a valid
+  `DataOrigin::Sources(...)`** (no-op non-writers: `Seal::transfer`, `TransferSync`,
+  `TransferDrop`). The only source-less `Unknown` writer is the **block-param join**
+  (`join_forward_call`, mir_graph.rs:3259 → `element_value_mut`, graph.rs:969), which inserts
+  the block param as a key even when the joined result is `Unknown` (happens only when every
+  seal call-param feeding it is `Unknown`/unset — i.e. a dead entry block's params).
+
+### Fix
+
+Add `MirFlowGraph::remove_dead_blocks` (mir_graph.rs): compute reachability from `root()` via
+`down_link`, build an old→new index map, rewrite every surviving seal target
+(`Jump`/`Cond`/`Switch`), keep only reachable blocks, rebuild backlinks via
+`build_reverse_jump_list`.
+
+**Placement is critical**: removing blocks reindexes them, invalidating any analysis keyed by
+block/value id (borrow graph, lifetime, etc.). So the removal must run **after** the
+`ConstEval` data structure goes out of scope (after the last consumer of the stale analysis
+data) but **before** the final SSA deconstruction. Invoked at `const_eval.rs:2289` and
+`const_eval.rs:2672` (right after `validate_comptime_context`, once the const-eval infra is
+dropped); the downstream analysis passes rebuild their data from the pruned CFG anyway.
+(An earlier naive placement inside `eliminate_dead_code` broke `test_unwind` / `test_fracht` /
+`test_test_bin` — "no return statement in CFG" — because it reindexed blocks while
+borrow/lifetime analysis was still live.)
+
+Supporting changes so the pruned CFG still codegens cleanly:
+- `get_return_type` (mir_graph.rs:2156) no longer panics on a CFG with no return statement —
+  returns `mir_reg.never()` instead of `out.expect("no return statement in CFG")` (a function
+  whose only exit is a panic/unwind trap has no `Seal::Return`).
+- Cranelift `make_function_layout` now takes an `Option<MirTypeId>` return type, passed
+  `self.signature.ret` (func.rs / stack_frame.rs / sysv.rs), so the layout uses the
+  *signature's* return type rather than `cfg.get_return_type()` (which may be `never` for
+  unwind functions).
+
+### Verification
+
+- `edlc_core`: 39 passed / 15 failed — the 15 are the pre-existing ast/hir/resolver/compiler
+  failures (unchanged from baseline).
+- `edlc_codegen_cranelift`: 27 passed / 1 failed — only the pre-existing `conversions`
+  failure (unchanged from baseline).
+- The `consolidate()` instrumentation used to localize the dangling values was removed
+  (purely diagnostic).
+- **Production sim (`acodyn run`)**: the deconstruction panic is **gone** — the sim now
+  compiles the std lib + solver, builds the 92552-cell mesh, sets boundary conditions, and
+  transitions from compiletime to runtime. It then hits a **separate, unrelated** runtime
+  ordering bug in acodyn's dispatcher (`dyn_dispatch.rs:1052`, "thread local context is not
+  in building mode!"): the EDL script's `BoundaryField::associate_boundaries` (JIT host fn,
+  `boundary_source.rs:458`) adds resources after `main.rs:315` has already transitioned to
+  runtime mode. Tracked separately — not a compiler issue.

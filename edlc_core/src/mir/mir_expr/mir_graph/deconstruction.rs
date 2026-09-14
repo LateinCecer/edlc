@@ -29,7 +29,7 @@ use crate::mir::mir_expr::mir_graph::{ExprEval, Seal, SealEval, TransferCopy, Tr
 use crate::mir::mir_expr::mir_literal::MirLiteral;
 use crate::mir::mir_expr::mir_type_init::MirTypeInit;
 use crate::mir::mir_expr::mir_variable::MirGlobalVar;
-use crate::mir::mir_expr::{AsciPrinter, BorrowGraph, MirBlockRef, MirDeref, MirDowncastRef, MirExprVariant, MirFlowGraph, MirGraphLoc, MirLoc, MirPrinter, MirRef, MirValue, Statement};
+use crate::mir::mir_expr::{AsciPrinter, BorrowGraph, MirBlockRef, MirDeref, MirDowncastRef, MirFlowGraph, MirGraphLoc, MirLoc, MirPrinter, MirRef, MirValue, Statement};
 use crate::mir::mir_type::{MirTypeId, MirTypeRegistry};
 use crate::prelude::ExecutorVM;
 use edlc_analysis::graph::{CfgNodeState, HashNodeState, IsDefault, LatticeElement};
@@ -289,91 +289,6 @@ impl PartialSsaDeconstruction {
         // init transition mapping with a neutral mapping -> each data source points to itself
         for source_index in 0..self.source_count {
             self.transition_mapping.view_mut(source_index).set(DataSource(source_index));
-        }
-
-        // DEBUG (temporary): dump every value that resolved to Unknown — the exact condition that
-        // makes the loop below panic. For each, print its definition kind and, if it is a block
-        // parameter, the seal call-params feeding it together with their resolved origin, so the
-        // dangling (source-less) value can be localized.
-        {
-            #[derive(Debug)]
-            enum DefKind {
-                RootParam,
-                BlockParam(usize, usize),
-                VarDef(usize, usize, MirExprVariant),
-                VarMove(usize, usize, MirValue),
-                VarCopy(usize, usize, MirValue),
-            }
-            let mut def_map: HashMap<MirValue, DefKind> = HashMap::new();
-            for param in cfg.get_root_parameters() {
-                def_map.insert(*param, DefKind::RootParam);
-            }
-            for (block_idx, block) in cfg.blocks.iter().enumerate() {
-                for (param_idx, param) in block.parameters.iter().enumerate() {
-                    def_map.insert(*param, DefKind::BlockParam(block_idx, param_idx));
-                }
-                for (uid, statement) in block.statements.iter().enumerate() {
-                    match statement {
-                        Statement::VarDef { var, value, .. } => {
-                            def_map.insert(*var, DefKind::VarDef(block_idx, uid, value.ty));
-                        }
-                        Statement::VarMove { var, value, .. } => {
-                            def_map.insert(*var, DefKind::VarMove(block_idx, uid, *value));
-                        }
-                        Statement::VarCopy { var, value, .. } => {
-                            def_map.insert(*var, DefKind::VarCopy(block_idx, uid, *value));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            let unknowns: Vec<MirValue> = state
-                .iter()
-                .filter(|(_, origin)| matches!(origin, DataOrigin::Unknown))
-                .map(|(key, _)| *key)
-                .collect();
-            if !unknowns.is_empty() {
-                // dump the full CFG of the failing function for manual inspection
-                if let Ok(file) = std::fs::File::create("/tmp/opencode/decon_debug.mir") {
-                    let mut out = std::io::BufWriter::new(file);
-                    let mut writer = AsciPrinter::new(&mut out);
-                    let _ = writer.print(cfg);
-                    eprintln!("[decon-debug] CFG written to /tmp/opencode/decon_debug.mir");
-                }
-                eprintln!("[decon-debug] {} value(s) resolved to Unknown:", unknowns.len());
-                for val in unknowns.iter() {
-                    eprintln!("[decon-debug]   ${:x} def={:?}", val.0, def_map.get(val));
-                    if let Some(DefKind::BlockParam(block_idx, param_idx)) = def_map.get(val) {
-                        let block_idx = *block_idx;
-                        let param_idx = *param_idx;
-                        let block_ref = MirBlockRef(block_idx);
-                        let mut params: Vec<Vec<MirValue>> =
-                            vec![vec![]; cfg.blocks[block_idx].parameters.len()];
-                        for predecessor_ref in cfg.backlinks[block_idx].iter() {
-                            cfg.collect_block_forward_params(
-                                &block_ref,
-                                &cfg.blocks[predecessor_ref.0],
-                                &mut params,
-                            );
-                        }
-                        eprintln!(
-                            "[decon-debug]     feeding call-params for block#{block_idx} param#{param_idx}:",
-                        );
-                        if params[param_idx].is_empty() {
-                            eprintln!("[decon-debug]       (none — no predecessor forwards a value)");
-                        }
-                        for feed in params[param_idx].iter() {
-                            let in_state = state.iter().any(|(k, _)| k == feed);
-                            let feed_origin = state.element_value(feed);
-                            eprintln!(
-                                "[decon-debug]       feed=${:x} in_state={} origin={}",
-                                feed.0, in_state, feed_origin
-                            );
-                        }
-                    }
-                }
-            }
         }
 
         while let Some(loc) = worklist.pop_front() {
