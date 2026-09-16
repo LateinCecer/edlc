@@ -52,7 +52,7 @@ impl<Runtime: 'static> FnCodeGen<JIT<Runtime>> for MirFn {
         ip: usize,
     ) -> Result<Self::Ret, MirError<JIT<Runtime>>> {
         let calling_conv = native_calling_conv();
-        let function_layout = calling_conv.make_function_layout(&self.body, &phase.types)
+        let function_layout = calling_conv.make_function_layout(&self.body, &phase.types, Some(self.signature.ret))
             .unwrap();
         let sig = function_layout.signature(&mut backend.module, &self.body, &phase.types, &backend.abi);
         backend.ctx.func.signature = sig;

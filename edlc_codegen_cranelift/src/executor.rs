@@ -2384,4 +2384,94 @@ fn test_readlock() {
         assert!(compiler.catch_unwind(readlock_test, ()).is_ok());
         Ok(())
     }
+
+    /// Regression test for the const-eval "non-constant captured in `comptime` block" bug.
+    ///
+    /// A `comptime` block inside a loop calls a side-effecting `comptime` function — one that
+    /// returns a fresh value on every execution (like a resource allocation in AcoDyn). Because
+    /// the enclosing loop re-drives the const-eval worklist, the block is processed more than
+    /// once per worklist run. Before the fix, the side-effecting call was re-executed on every
+    /// pass, producing different bytes each time; the byte divergence latched the captured value
+    /// to `Runtime`, and the comptime-capture validation then (incorrectly) reported it as
+    /// non-constant.
+    ///
+    /// A `comptime` statement must execute at most once per worklist run: it may carry side
+    /// effects (memory allocation), and re-executing it would both change the captured value and
+    /// leak shadow resources that the runtime never deallocates. This test asserts that
+    /// compilation succeeds and that the side-effecting call ran exactly once.
+    #[test]
+    fn test_const_eval_loop_capture() -> Result<(), anyhow::Error> {
+        #[derive(Debug, Default)]
+        struct AllocRuntime {
+            allocations: usize,
+        }
+
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<AllocRuntime>::default();
+        compiler.init()?;
+        compiler.backend.insert_runtime(0, "runtime", AllocRuntime::default())?;
+        setup_print(&mut compiler)?;
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+
+        compiler.compiler.parse_and_insert_type_def(inline_code!("Resource"), inline_code!("<>"))?;
+        compiler.compiler.insert_type_instance::<usize>(inline_code!("Resource"))?;
+        let [new, intern, field, consume] = compiler.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!("Resource"),
+            [
+                inline_code!("comptime fn new() -> Self"),
+                inline_code!("comptime fn intern(self) -> Self"),
+                inline_code!("comptime fn field(self) -> Self"),
+                inline_code!("fn consume(self, i: usize) -> usize"),
+            ],
+            None,
+        )?;
+
+        jit_func!(for ("Resource") impl &mut compiler, fn(new),
+            const fn new_resource<>() -> usize where; { 0 }
+        );
+        // side-effecting comptime call: returns a fresh id on every execution
+        jit_func!(for ("Resource") impl &mut compiler, fn(intern), 0,
+            const fn intern_resource<>(runtime: AllocRuntime, this: usize) -> usize where; {
+                let runtime = unsafe { &*runtime }.as_ref().unwrap();
+                let mut runtime = runtime.write().unwrap();
+                let id = runtime.allocations;
+                runtime.allocations += 1;
+                id
+            }
+        );
+        jit_func!(for ("Resource") impl &mut compiler, fn(field),
+            const fn field_resource<>(this: usize) -> usize where; { this }
+        );
+        jit_func!(for ("Resource") impl &mut compiler, fn(consume),
+            fn consume_resource<>(this: usize, i: usize) -> usize where; { i + this }
+        );
+
+        compiler.compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::Resource;
+
+let phi = Resource::new();
+
+fn test() {
+    let mut i = 0usize;
+    loop {
+        if i >= 4usize { break; }
+        let r = comptime { phi.intern().field() };
+        let _ = r.consume(i);
+        i += 1;
+    }
+    print("done\n");
+}
+        "#))?;
+
+        let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test"))?;
+        assert!(compiler.catch_unwind(prog, ()).is_ok());
+
+        // the side-effecting comptime call must have executed exactly once, not once per
+        // worklist pass of the enclosing loop
+        let rt = compiler.backend.get_runtime(0.into())?.read().unwrap();
+        assert_eq!(rt.allocations, 1);
+        Ok(())
+    }
 }

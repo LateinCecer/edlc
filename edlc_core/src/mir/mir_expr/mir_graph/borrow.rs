@@ -862,6 +862,22 @@ impl<V> ReferenceStateForest<V> {
         ReferenceStateForest { forest: forest_state }
     }
 
+    /// Re-initializes every tree to `base_value`, discarding all accumulated state.
+    ///
+    /// The flow-state forest is an incremental, non-idempotent structure: `set_value` is
+    /// sticky-max, so a single `Floating` node poisons the whole root-to-leaf chain it sits on
+    /// and the poisoning is never undone. To keep each worklist block pass a deterministic
+    /// function of that pass's inputs (mirroring the per-pass `avail` set), the forest must be
+    /// scoped per pass and reset to `base_value` before every re-processing of a block.
+    pub fn reset(&mut self, forest: &BorrowForest, base_value: V)
+    where V: Clone {
+        let mut forest_state = HashMap::new();
+        for (src, tree) in forest.trees.iter() {
+            forest_state.insert(*src, ReferenceState::new(tree, base_value.clone()));
+        }
+        self.forest = forest_state;
+    }
+
     pub fn get_max_for_deref(
         &self,
         value: &MirValue,

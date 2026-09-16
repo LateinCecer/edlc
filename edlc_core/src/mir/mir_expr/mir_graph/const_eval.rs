@@ -194,6 +194,13 @@ struct ConstNodeState {
     output: Vec<CallParameterCopy>,
     /// Number of iterations this node has already been visited
     computation_counter: usize,
+    /// Statements (by block-local UID) that have already been executed on the executor VM during
+    /// this worklist run. A `comptime` statement may carry side effects (e.g. resource
+    /// allocation), so it must never be executed a second time: re-executing it would change its
+    /// result across worklist passes and leak resources the runtime never deallocates. Statements
+    /// in this set are re-validated (from their cached result) instead of re-executed when the
+    /// block is processed again.
+    executed_statements: HashSet<BlockLocalStatementUid>,
 }
 
 #[derive(Debug)]
@@ -211,6 +218,7 @@ impl ConstNodeState {
             block_parameters: CallParameterCopy::empty(block, cfg),
             output: vec![],
             computation_counter: 0,
+            executed_statements: HashSet::new(),
         }
     }
 
@@ -438,6 +446,13 @@ impl CallParameterCopy {
     ) -> bool {
         let mut changed = false;
         consts.block_frame.avail.clear();
+        // Scope the flow-state forest to this block pass, exactly like `avail`: reset it to
+        // `FlowState::Fixed` so that stale `Floating` state from a previous pass (the sticky-max
+        // `set_value` never undoes a poisoning) does not leak into this pass and spuriously make
+        // a constant capture report as `is_avail == false`.
+        consts.block_frame
+            .references
+            .reset(&consts.borrow_graph.forest, FlowState::Fixed);
         for (param, param_value) in cfg.blocks[self.block.0]
             .parameters
             .iter()
@@ -462,8 +477,10 @@ impl CallParameterCopy {
 
 impl ConstFrame {
     pub fn is_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
-        self.avail.contains(value) && self.references.get_max_for_owners(value, graph, FlowState::cmp)
-            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed
+        let in_avail = self.avail.contains(value);
+        let owner_fixed = self.references.get_max_for_owners(value, graph, FlowState::cmp)
+            .cloned().unwrap_or(FlowState::Fixed) == FlowState::Fixed;
+        in_avail && owner_fixed
     }
 
     pub fn is_deref_avail(&self, value: &MirValue, graph: &BorrowGraph) -> bool {
@@ -844,6 +861,32 @@ impl ConstEval {
         changed
     }
 
+    /// Restores a previously-executed statement's cached constant result into the current block
+    /// frame without re-executing the statement on the VM.
+    ///
+    /// Used for statements that must only ever execute once per worklist run (side-effecting
+    /// `comptime` calls). On a later pass the statement is not re-executed; instead its cached
+    /// value is re-validated. Returns `true` if the value's constant state changed (it does not,
+    /// since the value was already recorded as a constant when it was first executed).
+    fn revalidate_cached_value(
+        &mut self,
+        value: &MirValue,
+        vm: &mut ExecutorVM,
+        stack_frame: &StackFrameLayout,
+    ) -> bool {
+        let Some(data) = self.get_constant_value(value).cloned() else {
+            // no cached known value (the value has been invalidated as runtime); keep it
+            // unavailable in the current frame
+            self.block_frame.avail.remove(value);
+            return false;
+        };
+        self.block_frame.set_avail(value, &self.borrow_graph);
+        let (range, ty) = stack_frame.get_offset(value, vm).unwrap();
+        let [mut dst] = vm.get_data_mut([range], &[ty]);
+        dst.memcpy(&data.as_data());
+        false
+    }
+
     fn get_constant_value(&self, value: &MirValue) -> Option<&AmorphusDataCopy> {
         self.state.consts.get(value.0).and_then(|state| match state {
             ConstEvalState::Runtime | ConstEvalState::Unknown => None,
@@ -853,6 +896,14 @@ impl ConstEval {
 
     /// Validates that all values that are used in a comptime context are actually known at
     /// compile time.
+    ///
+    /// Only blocks that the constant-folding worklist actually reached are validated. A comptime
+    /// block behind a condition that folds to a known value (e.g. a `?comptime`
+    /// `std::env_default`) is never visited by the worklist: the const-eval follows the sealing
+    /// statement straight to the taken branch and the dead branch is never processed. Its
+    /// captured values are therefore legitimately absent from the constant table, so they must not
+    /// be reported as non-constant captures. `computation_counter > 0` is exactly the set of
+    /// blocks the worklist visited.
     pub fn validate_comptime_context(
         &self,
         cfg: &MirFlowGraph,
@@ -860,6 +911,9 @@ impl ConstEval {
     ) -> Report<ConstError, ()> {
         let mut report = Report::default();
         for (block_ref, block) in cfg.blocks.iter().enumerate() {
+            if self.state.map.get(block_ref).map_or(true, |s| s.computation_counter == 0) {
+                continue; // block was never reached by the const-eval worklist -> not validated
+            }
             for statement in block.statements.iter() {
                 match statement {
                     Statement::VarDef { var: _, value, uid: _, debug } => {
@@ -1168,6 +1222,69 @@ impl MirFlowGraph {
         self.replace_constant_parameters(consts);
         self.replace_constant_statements(consts);
         while consts.remove_unused_consts(self) > 0 {}
+    }
+
+    /// Only execute after non of the existing const eval infrastructure is needed anymore, as
+    /// the block indices will change, which will mess up coherence in any existing analysis data.
+    ///
+    /// # Note for the future
+    ///
+    /// When cleanup blocks are introduced to the CFG, make sure that they aren't pruned here.
+    /// With the reachability check as executed here, all cleanup blocks will just be deleted.
+    fn remove_dead_blocks(&mut self) {
+        let mut reachable = vec![false; self.blocks.len()];
+        let mut worklist = vec![self.root().0];
+        reachable[self.root().0] = true;
+        while let Some(block_idx) = worklist.pop() {
+            for succ in self.blocks[block_idx].down_link() {
+                if !reachable[succ.0] {
+                    reachable[succ.0] = true;
+                    worklist.push(succ.0);
+                }
+            }
+        }
+
+        let num_reachable = reachable.iter().filter(|&&r| r).count();
+        if num_reachable == self.blocks.len() {
+            return;
+        }
+
+        let mut mapping = vec![0usize; self.blocks.len()];
+        let mut next = 0usize;
+        for (old_idx, &is_reachable) in reachable.iter().enumerate() {
+            if is_reachable {
+                mapping[old_idx] = next;
+                next += 1;
+            }
+        }
+
+        for block in self.blocks.iter_mut() {
+            match &mut block.seal {
+                Seal::Jump(call, _) => {
+                    call.target = MirBlockRef(mapping[call.target.0]);
+                },
+                Seal::Cond { then_target, else_target, .. } => {
+                    then_target.target = MirBlockRef(mapping[then_target.target.0]);
+                    else_target.target = MirBlockRef(mapping[else_target.target.0]);
+                },
+                Seal::Switch { targets, default, .. } => {
+                    for target in targets.iter_mut() {
+                        target.block_call.target = MirBlockRef(mapping[target.block_call.target.0]);
+                    }
+                    default.target = MirBlockRef(mapping[default.target.0]);
+                },
+                _ => (),
+            }
+        }
+
+        let mut new_blocks = Vec::with_capacity(num_reachable);
+        for (old_idx, block) in self.blocks.iter().enumerate() {
+            if reachable[old_idx] {
+                new_blocks.push(block.clone());
+            }
+        }
+        self.blocks = new_blocks;
+        self.build_reverse_jump_list();
     }
 
     fn replace_constant_statements(&mut self, consts: &ConstEval) {
@@ -1668,7 +1785,34 @@ impl Statement {
             Self::VarDef { var, value, uid, debug: _ } => {
                 // check if the expression can be executed in comptime
                 let mut changed = false;
-                if cfg.expressions.is_avail(
+
+                // A statement that has already been executed on the VM during this worklist run
+                // is never executed again: a `comptime` call may carry side effects (e.g. resource
+                // allocation), and re-executing it would change its result across worklist passes
+                // and leak resources the runtime never deallocates. Instead, its cached result is
+                // re-validated: if all inputs are still available, the known value is restored to
+                // the current frame; if any input has since become runtime, the value is
+                // invalidated as runtime.
+                let already_executed = {
+                    let state = const_eval.state.map.get_mut(block_ref.0).unwrap();
+                    state.executed_statements.contains(uid)
+                };
+
+                if already_executed {
+                    if cfg.expressions.is_avail(
+                        *value,
+                        backend,
+                        &const_eval.block_frame,
+                        &const_eval.borrow_graph,
+                    ) {
+                        changed |= const_eval.revalidate_cached_value(var, vm, stack_frame);
+                    } else {
+                        // an input became runtime after the statement was executed: the cached
+                        // result can no longer be trusted, so the value is invalidated
+                        changed |= const_eval.mark_runtime(var);
+                    }
+                    Ok(changed)
+                } else if cfg.expressions.is_avail(
                     *value,
                     backend,
                     &const_eval.block_frame,
@@ -1684,6 +1828,15 @@ impl Statement {
                         &MirLoc::GraphLoc(MirGraphLoc::new(*block_ref, *uid)),
                     )?;
                     changed |= const_eval.insert_const_value(cfg, var, vm, stack_frame, reg);
+
+                    // record the execution of the statement so that a later worklist pass of this
+                    // block does not re-execute it. Only calls are recorded: they are the only
+                    // statements that may carry side effects (pure data operations are safe to
+                    // re-execute, as they re-derive the same result from the same inputs).
+                    if value.ty == MirExprVariant::Call {
+                        const_eval.state.map.get_mut(block_ref.0).unwrap()
+                            .executed_statements.insert(*uid);
+                    }
 
                     // assigns and calls have the power to change values behind references
                     match value.ty {
@@ -2133,6 +2286,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>>, {
     }
     const_eval.validate_comptime_context(&body.body, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.body.remove_dead_blocks();
 
     let borrow_graph = body.body.borrows(
         &mut compiler.mir_phase.types,
@@ -2515,6 +2669,7 @@ where MirFn: FnCodeGen<B, CallGen=Box<dyn CodeGen<B>>> {
     body.eliminate_dead_code(&res); // includes the compile-time analysis results into the
     res.validate_comptime_context(body, &mut compiler.phase)
         .ok::<OptimizationError>()?;
+    body.remove_dead_blocks();
 
     // CFG for optimization
     // After after all modifications to the CFG, run final verification steps

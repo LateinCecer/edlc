@@ -312,7 +312,7 @@ impl MirCall {
         for comp_param in self.comptime_args.iter() {
             if !frame.is_avail(&comp_param.value_expr, graph) {
                 report_comptime_unknown(comp_param.value_expr);
-                panic!();
+                return false;
             }
         }
         self.args.iter().all(|param| frame.is_avail(param, graph))

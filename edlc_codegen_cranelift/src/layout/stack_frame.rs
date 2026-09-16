@@ -1374,6 +1374,7 @@ pub trait CallingConv {
         &self,
         cfg: &MirFlowGraph,
         reg: &MirTypeRegistry,
+        return_type: Option<MirTypeId>,
     ) -> Result<FunctionLayout, Self::Error>;
 
     /// Returns the supported architecture triplet for this calling convention.
