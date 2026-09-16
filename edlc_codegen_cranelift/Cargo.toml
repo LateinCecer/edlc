@@ -18,11 +18,11 @@ edlc_core = { workspace = true }
 edlc_layout = { workspace = true }
 
 log = "0.4.22"
-cranelift = { version = "0.134.3", features=[] }
-cranelift-codegen = { version = "0.134.3", features=["gimli", "unwind"] }
-cranelift-jit = { version = "0.134.3", features = [] }
-cranelift-module = { version = "0.134.3", features=[] }
-cranelift-native = { version = "0.134.3", features=[] }
+cranelift = { version = "0.135.2", features=[] }
+cranelift-codegen = { version = "0.135.2", features=["gimli", "unwind"] }
+cranelift-jit = { version = "0.135.2", features = [] }
+cranelift-module = { version = "0.135.2", features=[] }
+cranelift-native = { version = "0.135.2", features=[] }
 anyhow = "1.0.99"
 regex = "1.12.3"
 num = "0.4.3"
@@ -30,7 +30,8 @@ serde = { version="1.0.228", features=["derive"], optional = true }
 
 libc = "1.0.0-alpha.3"
 rustix = { version="1.1.4", features=["mm"] }
-gimli = { version="0.33.0", features=["endian-reader", "read", "write"] }
+# version 33.1 is yanked, unfortunately we low-key need that version to match the version used in cranelift :(
+gimli = { version= "^0.33", features=["endian-reader", "read", "write"] }
 
 [dev-dependencies]
 fern = { version= "0.7.1", features=["colored"] }
