@@ -16,7 +16,6 @@
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#![feature(exact_size_is_empty)]
 pub mod graph;
 
 pub fn add(left: u64, right: u64) -> u64 {
