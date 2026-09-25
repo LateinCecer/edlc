@@ -23,12 +23,16 @@
 //!
 //! ## Usage
 //!
+//! Run from the workspace root; relative paths in `--db` resolve against the current working
+//! directory. The example database is built with `cargo run -p build_doc_db`
+//! (writes `examples/build_doc_db/docs.db`):
+//!
 //! ```sh
 //! # MCP mode
-//! edlc_doc_server mcp --db docs.db
+//! cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
 //!
-//! # HTTP mode
-//! edlc_doc_server serve --db docs.db
+//! # HTTP mode (requires the frontend bundle: `cargo leptos build` first)
+//! cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db
 //!
 //! # With TOML config
 //! edlc_doc_server serve --config server.toml

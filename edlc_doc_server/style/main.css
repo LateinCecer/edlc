@@ -33,6 +33,19 @@
     --kind-const: #bd8113;
     --kind-module: #5d88a1;
     --muted: #6a6a6a;
+
+    /* Syntax highlighting tokens (light theme) */
+    --tok-keyword: #a81b72;
+    --tok-type: #0c7a35;
+    --tok-fn: #296faa;
+    --tok-var: #1a1a1a;
+    --tok-const: #9a6200;
+    --tok-path: #6a6a6a;
+    --tok-operator: #b35309;
+    --tok-punct: #6a6a6a;
+    --tok-num: #9a6700;
+    --tok-str: #a15c17;
+    --tok-bool: #96033c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -51,7 +64,81 @@
         --kind-const: #bd8113;
         --kind-module: #abb0ab;
         --muted: #9a9a9a;
+
+        /* Syntax highlighting tokens (dark theme, ported from edlc_docs) */
+        --tok-keyword: #a81b72;
+        --tok-type: #0c9935;
+        --tok-fn: #5d88a1;
+        --tok-var: #e8e8e6;
+        --tok-const: #bd8113;
+        --tok-path: #abb0ab;
+        --tok-operator: #de6b0d;
+        --tok-punct: #9a9a9a;
+        --tok-num: #d69c13;
+        --tok-str: #d17f13;
+        --tok-bool: #96033c;
     }
+}
+
+/* Syntax highlighting for rendered signatures */
+
+.tok-keyword {
+    color: var(--tok-keyword);
+    font-style: italic;
+}
+
+.tok-type-name {
+    color: var(--tok-type);
+}
+
+.tok-fn-name {
+    color: var(--tok-fn);
+}
+
+.tok-var-name {
+    color: var(--tok-var);
+}
+
+.tok-const-name {
+    color: var(--tok-const);
+}
+
+.tok-path-segment {
+    color: var(--tok-path);
+}
+
+.tok-operator {
+    color: var(--tok-operator);
+}
+
+.tok-punct {
+    color: var(--tok-punct);
+}
+
+.tok-num-literal,
+.tok-str-literal,
+.tok-char-literal {
+    color: var(--tok-num);
+}
+
+.tok-str-literal,
+.tok-char-literal {
+    color: var(--tok-str);
+}
+
+.tok-bool-literal {
+    color: var(--tok-bool);
+}
+
+/* Type and module references rendered inside a signature */
+.sig a {
+    color: var(--tok-type);
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.sig a:hover {
+    text-decoration: underline;
 }
 
 * {

@@ -452,6 +452,13 @@ impl Display for TypeDoc {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TypeNameDoc(Vec<TypeNameSegmentDoc>);
 
+impl TypeNameDoc {
+    /// Returns the last segment of the type name, if any.
+    pub fn last_segment(&self) -> Option<&TypeNameSegmentDoc> {
+        self.0.last()
+    }
+}
+
 impl From<Vec<TypeNameSegmentDoc>> for TypeNameDoc {
     fn from(value: Vec<TypeNameSegmentDoc>) -> Self {
         TypeNameDoc(value)

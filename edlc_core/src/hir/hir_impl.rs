@@ -22,7 +22,7 @@ use log::{debug, info};
 use crate::core::edl_impl::{EdlImpl, EdlModuleId, EdlTraitImpl};
 use crate::core::edl_type::{EdlEnvId, EdlFnInstance, EdlTraitInstance, EdlTypeInstance};
 use crate::core::type_analysis::{ExtConstUid, Infer, InferState, TypeUid};
-use crate::documentation::{DocCompilerState, DocElement};
+use crate::documentation::{DocCompilerState, DocElement, TypeDoc};
 use crate::file::ModuleSrc;
 use crate::hir::hir_fn::HirFn;
 use crate::hir::{HirError, HirPhase, ResolveFn, ResolveNames, ResolveTypes};
@@ -33,7 +33,7 @@ use crate::lexer::SrcPos;
 use crate::mir::mir_backend::{Backend, CodeGen};
 use crate::mir::mir_funcs::{CallId, ComptimeParams, DependencyAnalyser, FnCodeGen, MirFn, MirFuncRegistry};
 use crate::mir::MirPhase;
-use crate::resolver::{ResolveError, ScopeId};
+use crate::resolver::{QualifierName, ResolveError, ScopeId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirImpl {
@@ -50,17 +50,33 @@ pub struct HirImpl {
 
 impl HirImpl {
     /// Registers the contents of the implementation to the code registry of the HIR phase.
-    pub fn register_code(&self, phase: &mut HirPhase) -> Result<(), ResolveError> {
+    /// `full_name` is the qualified name of the module the implementation is defined in.
+    pub fn register_code(
+        &self,
+        phase: &mut HirPhase,
+        full_name: &QualifierName,
+    ) -> Result<(), ResolveError> {
         let associated = self.base_name.doc(&DocCompilerState {
             types: &phase.types,
             vars: &phase.vars,
         });
 
+        let base_segment = match &associated {
+            TypeDoc::Base(name, _) => name.last_segment().and_then(|seg| seg.name.last().cloned()),
+            _ => None,
+        };
+
         for func in self.funcs.iter() {
+            let mut name = full_name.clone();
+            if let Some(base) = &base_segment {
+                name.push(base.clone());
+            }
+            name.push(func.signature.name.clone());
             let mut doc = func.signature.doc(&DocCompilerState {
                 types: &phase.types,
                 vars: &phase.vars,
             });
+            doc.name = name;
             doc.associated_type = Some(associated.clone());
             phase.code.insert_doc(doc);
         }

@@ -20,6 +20,7 @@
 //
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Arguments, Debug, Display, Formatter};
 use std::hash::DefaultHasher;
@@ -1131,6 +1132,7 @@ impl HirModule {
     /// Registers the code contained in the module inside of the HIR phase code container
     pub fn register_code(&self, phase: &mut HirPhase) -> Result<(), ResolveError> {
         phase.code.insert_module(&self.full_name, &self.doc);
+        let submod_srcs = self.submod_srcs();
         for item in self.items.iter() {
             match item {
                 HirItem::Let(val) => {
@@ -1158,22 +1160,39 @@ impl HirModule {
                     phase.code.insert_doc(doc);
                 }
                 HirItem::Impl(val) => {
-                    val.register_code(phase)?;
+                    val.register_code(phase, &self.full_name)?;
                 }
                 HirItem::Submod(val, _) => {
                     val.register_code(phase)?;
                 }
                 HirItem::Use(_) => (),
                 HirItem::Type(t) => {
-                    let doc = t.doc(&DocCompilerState {
+                    let module = submod_srcs
+                        .get(&t.src).copied()
+                        .unwrap_or(&self.full_name);
+                    let mut name = module.clone();
+                    name.push(t.name.clone());
+                    let mut doc = t.doc(&DocCompilerState {
                         types: &phase.types,
                         vars: &phase.vars,
                     });
+                    doc.name = name;
                     phase.code.insert_doc(doc);
-                },
+                }
             }
         }
         Ok(())
+    }
+
+    fn submod_srcs(&self) -> HashMap<&ModuleSrc, &QualifierName> {
+        let mut srcs = HashMap::new();
+        for item in self.items.iter() {
+            if let HirItem::Submod(m, _) = item {
+                srcs.insert(&m.src, &m.full_name);
+                srcs.extend(m.submod_srcs());
+            }
+        }
+        srcs
     }
 }
 

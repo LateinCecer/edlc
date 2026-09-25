@@ -13,17 +13,19 @@ The resulting `docs.db` is used to test and showcase `edlc_doc_db` (and, in late
 
 ## Usage
 
-Run from this crate's directory (the `project/` path is resolved relative to the cwd):
+Run from anywhere in the workspace — the `project/` directory and the output path are resolved
+relative to this crate's manifest dir at compile time:
 
 ```sh
 cargo run -p build_doc_db --
 ```
 
-This writes `docs.db` in the current directory. Inspect it with `sqlite3`:
+This writes `docs.db` next to this crate's `Cargo.toml` (i.e. `examples/build_doc_db/docs.db`).
+Inspect it with `sqlite3`:
 
 ```sh
-sqlite3 docs.db "SELECT kind, COUNT(*) FROM items GROUP BY kind;"
-sqlite3 docs.db "SELECT id, kind, name, qual_name FROM items WHERE qual_name LIKE '%example%';"
+sqlite3 examples/build_doc_db/docs.db "SELECT kind, COUNT(*) FROM items GROUP BY kind;"
+sqlite3 examples/build_doc_db/docs.db "SELECT id, kind, name, qual_name FROM items WHERE qual_name LIKE '%example%';"
 ```
 
 ## Bundled project

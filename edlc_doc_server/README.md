@@ -9,10 +9,10 @@ not depend on the EDL compiler (`edlc_core`) — it only reads the pre-built dat
 ## MCP mode
 
 Run as an MCP server over stdio for use with Claude Desktop, Cursor, or any MCP-compatible
-client:
+client (from the workspace root):
 
 ```sh
-edlc_doc_server mcp --db docs.db
+cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
 ```
 
 ### Tools exposed
@@ -30,13 +30,15 @@ async info, modifiers, params, etc.).
 
 ## HTTP mode
 
-Run as an HTTP server with a docs.rs-style web frontend (Leptos SSR + client hydration):
+Run as an HTTP server with a docs.rs-style web frontend (Leptos SSR + client hydration) from
+the workspace root:
 
 ```sh
-edlc_doc_server serve --db docs.db
+cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db
 ```
 
-Then browse to `http://127.0.0.1:8080/`.
+Then browse to `http://127.0.0.1:8080/`. The Leptos frontend bundle must have been built first
+(see [Build](#build)) — the server exits with a hint if `target/site` is missing.
 
 ### Pages
 
@@ -66,20 +68,33 @@ cargo leptos watch
 
 # Production build
 cargo leptos build --release
-
-# Run the server
-./target/debug/edlc_doc_server serve --db docs.db
 ```
 
 The `wasm32-unknown-unknown` target is required (`rustup target add wasm32-unknown-unknown`).
+
+### Running
+
+Everything runs from the workspace root — the site bundle location is resolved at compile time
+(`target/site`), and `build_doc_db` writes its database next to its own manifest:
+
+```sh
+# (Re)build the example documentation database (writes examples/build_doc_db/docs.db)
+cargo run -p build_doc_db
+
+# Build the frontend bundle once (or use `cargo leptos watch` during development)
+cargo leptos build
+
+# Serve
+cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db
+```
 
 ## Configuration
 
 A TOML config file can be provided with `--config` for either mode:
 
 ```sh
-edlc_doc_server mcp --config server.toml
-edlc_doc_server serve --config server.toml
+cargo run -p edlc_doc_server mcp --config server.toml
+cargo run -p edlc_doc_server serve --config server.toml
 ```
 
 Example config:

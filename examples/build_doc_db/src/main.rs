@@ -20,8 +20,16 @@
 //! This binary wires `edlc_core` to `edlc_doc_db`. It is the reference for how an implementor
 //! populates the documentation database: load sources via `FileSupplier`, drive a compile with
 //! `EdlCompiler`, then call `generate_docs(&mut DocDbWriter)`.
+//!
+//! All paths are resolved relative to this crate's manifest dir (compile-time
+//! `CARGO_MANIFEST_DIR`), so it can be run from anywhere in the workspace and always reads
+//! `project/` and writes `docs.db` next to its own `Cargo.toml`:
+//!
+//! ```sh
+//! cargo run -p build_doc_db   # writes examples/build_doc_db/docs.db
+//! ```
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use edlc_codegen_cranelift::prelude::CraneliftJIT;
@@ -29,8 +37,9 @@ use edlc_core::prelude::FileSupplier;
 use edlc_doc_db::DocDbWriter;
 
 fn main() -> ExitCode {
-    let out_path = PathBuf::from("docs.db");
-    match run(&out_path) {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out_path = manifest_dir.join("docs.db");
+    match run(manifest_dir.join("project").as_path(), &out_path) {
         Ok(()) => {
             println!("wrote {}", out_path.display());
             ExitCode::SUCCESS
@@ -42,7 +51,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run(project_dir: &Path, out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Using the cranelift JIT backend (rather than a bare `EdlCompiler`) makes the compiler
     // register the EDL standard library — intrinsics, trait impls like `core::Add`, `std::io`,
     // etc. — so the example project can use realistic EDL code (operators, std calls, loops).
@@ -51,7 +60,6 @@ fn run(out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut jit = CraneliftJIT::<()>::default();
     jit.init()?;
 
-    let project_dir = Path::new("project");
     let supplier = FileSupplier::new(project_dir)
         .ok_or_else(|| format!("project directory not found: {}", project_dir.display()))?;
     jit.compile_lib("example", &supplier)?;

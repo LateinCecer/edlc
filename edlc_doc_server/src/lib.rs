@@ -19,6 +19,8 @@
 //! and server functions. The binary (`main.rs`) selects between MCP and HTTP (Leptos+axum) modes.
 
 pub mod app;
+pub mod doc_repr;
+pub mod signature;
 
 #[cfg(feature = "ssr")]
 pub mod config;

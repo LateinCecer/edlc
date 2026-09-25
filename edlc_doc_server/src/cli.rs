@@ -94,6 +94,14 @@ fn load_config(
 
 fn open_db(config: &ServerConfig) -> Result<DocDb, ()> {
     eprintln!("opening database: {}", config.db_path.display());
+    if !config.db_path.exists() {
+        eprintln!(
+            "error: documentation database not found: {}",
+            config.db_path.display()
+        );
+        eprintln!("help: build it with `cargo run -p build_doc_db` (writes examples/build_doc_db/docs.db)");
+        return Err(());
+    }
     DocDb::open_readonly(&config.db_path).map_err(|e| {
         eprintln!("error opening database: {e}");
     })
@@ -127,6 +135,41 @@ fn run_serve(db_path: Option<String>, config_path: Option<String>) -> Result<(),
         return Err(());
     }
 
+    // cargo-leptos puts the site output at <workspace-root>/target/site/.
+    // We resolve it relative to the crate's manifest dir (CARGO_MANIFEST_DIR),
+    // which is set at compile time and points to edlc_doc_server/ within the
+    // workspace — so the parent is the workspace root. This is independent of
+    // the current working directory, so `serve` works from anywhere.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let site_root = manifest_dir
+        .parent()
+        .unwrap_or(&manifest_dir)
+        .join("target/site");
+
+    if !site_root.join("pkg").is_dir() {
+        eprintln!(
+            "error: Leptos site assets not found at {}",
+            site_root.join("pkg").display()
+        );
+        eprintln!("help: build the frontend bundle first with `cargo leptos build` (or `cargo leptos watch` for development)");
+        return Err(());
+    }
+
+    // cargo-leptos 0.3.x renames wasm-bindgen's `edlc_doc_server_bg.wasm` to
+    // `edlc_doc_server.wasm`, but the name the hydration script requests
+    // depends on whether the leptos crate happened to be compiled with
+    // LEPTOS_OUTPUT_NAME set (cargo reuses cached builds regardless, so both
+    // outcomes occur in practice). Ensure both spellings exist so the client
+    // can always load the wasm.
+    let pkg_dir = site_root.join("pkg");
+    let wasm_plain = pkg_dir.join("edlc_doc_server.wasm");
+    let wasm_bg = pkg_dir.join("edlc_doc_server_bg.wasm");
+    if wasm_plain.exists() && !wasm_bg.exists() {
+        let _ = std::fs::copy(&wasm_plain, &wasm_bg);
+    } else if wasm_bg.exists() && !wasm_plain.exists() {
+        let _ = std::fs::copy(&wasm_bg, &wasm_plain);
+    }
+
     let db = open_db(&config)?;
     let db_handle: DbHandle = Arc::new(Mutex::new(db));
 
@@ -145,15 +188,6 @@ fn run_serve(db_path: Option<String>, config_path: Option<String>) -> Result<(),
         use leptos::prelude::*;
         use leptos_axum::{generate_route_list, LeptosRoutes};
 
-        // cargo-leptos puts the site output at <workspace-root>/target/site/.
-        // We resolve it relative to the crate's manifest dir (CARGO_MANIFEST_DIR),
-        // which is set at compile time and points to edlc_doc_server/ within the
-        // workspace — so the parent is the workspace root.
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let site_root = manifest_dir
-            .parent()
-            .unwrap_or(&manifest_dir)
-            .join("target/site");
         let leptos_opts = LeptosOptions::builder()
             .site_addr(addr.parse::<std::net::SocketAddr>().unwrap())
             .output_name("edlc_doc_server".to_string())

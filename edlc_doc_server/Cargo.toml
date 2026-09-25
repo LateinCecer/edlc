@@ -42,6 +42,10 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 # uuid needs a randomness source on WASM
 uuid = { version = "1", features = ["js"] }
 
+[dev-dependencies]
+# Used in tests to verify the signature tokenizer matches the compiler's `Display` output.
+edlc_core = { workspace = true }
+
 [features]
 hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook"]
 ssr = [

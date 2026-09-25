@@ -32,6 +32,7 @@ use leptos_router::{
 // DocSummary is shared between SSR and hydrate builds.
 #[cfg(feature = "ssr")]
 use crate::server::DocSummary;
+use crate::signature::SignatureView;
 
 #[cfg(not(feature = "ssr"))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -137,8 +138,8 @@ fn Sidebar() -> impl IntoView {
                             mods.into_iter().map(|m| {
                                 view! {
                                     <li>
-                                        <A href=format!("/module/{}", m.name)>
-                                            {m.name}
+                                        <A href=format!("/module/{}", m.qual_name)>
+                                            {m.qual_name}
                                         </A>
                                     </li>
                                 }
@@ -198,7 +199,7 @@ fn HomePage() -> impl IntoView {
                                 <ul class="module-grid">
                                     {mods.into_iter().map(|m| {
                                         let desc = m.doc_text.clone();
-                                        let name = m.name.clone();
+                                        let name = m.qual_name.clone();
                                         let has_desc = !desc.is_empty();
                                         view! {
                                             <li>
@@ -265,7 +266,11 @@ fn SearchPage() -> impl IntoView {
                                                     <span class="result-kind">{item.kind.clone()}</span>
                                                     <span class="result-name">{item.name.clone()}</span>
                                                 </A>
-                                                <pre class="result-signature">{item.signature.clone()}</pre>
+                                                <SignatureView
+                                                    blob=item.blob.clone()
+                                                    plain=item.signature.clone()
+                                                    class="result-signature"
+                                                />
                                                 <Show when=move || has_doc>
                                                     <p class="result-doc">{doc.clone()}</p>
                                                 </Show>
@@ -312,7 +317,6 @@ fn ItemPage() -> impl IntoView {
                             }.into_any(),
                             Some(doc) => {
                                 let qual = doc.qual_name.clone();
-                                let sig = doc.signature.clone();
                                 let doc_text = doc.doc_text.clone();
                                 let module = doc.module.clone();
                                 let kind = doc.kind.clone();
@@ -320,8 +324,7 @@ fn ItemPage() -> impl IntoView {
                                 let has_qual = qual != name;
                                 let has_doc_text = !doc_text.is_empty();
                                 let has_module = module.is_some();
-                                let module_name = module.clone().unwrap_or_default();
-                                let module_link = module_name.clone();
+                                let module_link = module.clone().unwrap_or_default();
                                 view! {
                                     <div class="item-header">
                                         <span class="item-kind">{kind.clone()}</span>
@@ -330,7 +333,11 @@ fn ItemPage() -> impl IntoView {
                                             <span class="item-qual">{qual.clone()}</span>
                                         </Show>
                                     </div>
-                                    <pre class="item-signature">{sig.clone()}</pre>
+                                    <SignatureView
+                                        blob=doc.blob.clone()
+                                        plain=doc.signature.clone()
+                                        class="item-signature"
+                                    />
                                     <Show when=move || has_doc_text>
                                         <div class="item-doc">
                                             <h2>"Documentation"</h2>
@@ -339,10 +346,9 @@ fn ItemPage() -> impl IntoView {
                                     </Show>
                                     <div class="item-meta">
                                         <Show when=move || has_module>
-                                            <span class="item-module">
-                                                "Module: "
-                                                {module_link.clone()}
-                                            </span>
+                                            <A href=format!("/module/{}", module_link.clone())>
+                                                {format!("Module: {}", module_link)}
+                                            </A>
                                         </Show>
                                     </div>
                                 }.into_any()
@@ -427,12 +433,21 @@ fn item_group_view(title: &str, items: Vec<DocSummary>) -> impl IntoView {
                 <h2>{title.clone()}</h2>
                 <ul>
                     {items.into_iter().map(|item| {
+                        let href = if item.kind == "module" {
+                            format!("/module/{}", item.qual_name)
+                        } else {
+                            format!("/item/{}", item.qual_name)
+                        };
                         view! {
                             <li>
-                                <A href=format!("/item/{}", item.qual_name)>
+                                <A href={href}>
                                     {item.name.clone()}
                                 </A>
-                                <pre class="group-signature">{item.signature.clone()}</pre>
+                                <SignatureView
+                                    blob=item.blob.clone()
+                                    plain=item.signature.clone()
+                                    class="group-signature"
+                                />
                             </li>
                         }
                     }).collect::<Vec<_>>()}
