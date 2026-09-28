@@ -36,11 +36,48 @@ pub struct ServerConfig {
 }
 
 /// MCP-specific configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     /// Whether the MCP server is enabled. Default: `true`.
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// The MCP transport: `stdio` (the client spawns the server and talks over its stdio
+    /// streams) or `http` (Streamable HTTP on a TCP socket at `http://{bind}:{port}/mcp`).
+    /// Default: `stdio`.
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+
+    /// The port for the `http` transport. Default: `3000`.
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+
+    /// The address to bind for the `http` transport. Default: `127.0.0.1`.
+    #[serde(default = "default_mcp_bind")]
+    pub bind: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        McpConfig {
+            enabled: true,
+            transport: default_mcp_transport(),
+            port: default_mcp_port(),
+            bind: default_mcp_bind(),
+        }
+    }
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_string()
+}
+
+fn default_mcp_port() -> u16 {
+    3000
+}
+
+fn default_mcp_bind() -> String {
+    "127.0.0.1".to_string()
 }
 
 /// HTTP-specific configuration.
@@ -53,6 +90,13 @@ pub struct HttpConfig {
     /// The port to listen on. Default: `8080`.
     #[serde(default = "default_http_port")]
     pub port: u16,
+
+    /// Directory containing the built Leptos site (must hold a `pkg/` subdirectory).
+    /// Overrides the automatic site-root discovery; the `--site` flag and the
+    /// `EDL_DOC_SITE` environment variable take precedence over this setting.
+    /// Default: none (discovered automatically).
+    #[serde(default)]
+    pub site_dir: Option<PathBuf>,
 }
 
 impl Default for HttpConfig {
@@ -60,6 +104,7 @@ impl Default for HttpConfig {
         HttpConfig {
             enabled: true,
             port: 8080,
+            site_dir: None,
         }
     }
 }
@@ -76,7 +121,7 @@ impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             db_path: PathBuf::from("docs.db"),
-            mcp: McpConfig { enabled: true },
+            mcp: McpConfig::default(),
             http: HttpConfig::default(),
         }
     }

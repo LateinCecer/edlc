@@ -146,7 +146,7 @@ pub async fn search_docs(query: String, limit: usize) -> Result<Vec<DocSummary>,
     })?;
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<DocRow>, DocError> {
         let guard = db.lock()?;
-        Ok(guard.search(&query, limit)?)
+        Ok(guard.search(&query, limit, None)?)
     })
     .await
     .map_err(|e| DocError::Internal {

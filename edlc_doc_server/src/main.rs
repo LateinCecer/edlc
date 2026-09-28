@@ -18,7 +18,8 @@
 //! Binary entry point for the EDL documentation server.
 //!
 //! Supports two modes:
-//! - `mcp` — MCP server over stdio (for LLM clients)
+//! - `mcp` — MCP server over stdio (default) or Streamable HTTP on a TCP socket
+//!   (`--transport http`, endpoint `/mcp`)
 //! - `serve` — HTTP server with Leptos + axum (web frontend)
 //!
 //! ## Usage
@@ -28,8 +29,11 @@
 //! (writes `examples/build_doc_db/docs.db`):
 //!
 //! ```sh
-//! # MCP mode
+//! # MCP mode (stdio)
 //! cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
+//!
+//! # MCP mode (Streamable HTTP on a TCP socket, http://127.0.0.1:3000/mcp)
+//! cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db --transport http
 //!
 //! # HTTP mode (requires the frontend bundle: `cargo leptos build` first)
 //! cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db

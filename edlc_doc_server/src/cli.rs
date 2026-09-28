@@ -37,7 +37,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run as an MCP server over stdio.
+    /// Run as an MCP server: over stdio (default) or Streamable HTTP on a TCP socket
+    /// (`--transport http`).
     Mcp {
         /// Path to the SQLite documentation database.
         #[arg(long)]
@@ -46,6 +47,18 @@ enum Command {
         /// Path to a TOML config file. If present, overrides `--db`.
         #[arg(long)]
         config: Option<String>,
+
+        /// The MCP transport: `stdio` or `http` (Streamable HTTP on a TCP socket).
+        #[arg(long, value_name = "stdio|http")]
+        transport: Option<String>,
+
+        /// Port for the `http` transport (default: 3000).
+        #[arg(long)]
+        mcp_port: Option<u16>,
+
+        /// Address to bind for the `http` transport (default: 127.0.0.1).
+        #[arg(long)]
+        mcp_bind: Option<String>,
     },
     /// Run as an HTTP server with Leptos + axum.
     Serve {
@@ -56,14 +69,26 @@ enum Command {
         /// Path to a TOML config file. If present, overrides `--db`.
         #[arg(long)]
         config: Option<String>,
+
+        /// Directory containing the built Leptos site (must hold a `pkg/`
+        /// subdirectory). Takes precedence over the `EDL_DOC_SITE` environment
+        /// variable, the config file, and automatic discovery.
+        #[arg(long)]
+        site: Option<std::path::PathBuf>,
     },
 }
 
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Mcp { db, config } => run_mcp(db, config),
-        Command::Serve { db, config } => run_serve(db, config),
+        Command::Mcp {
+            db,
+            config,
+            transport,
+            mcp_port,
+            mcp_bind,
+        } => run_mcp(db, config, transport, mcp_port, mcp_bind),
+        Command::Serve { db, config, site } => run_serve(db, config, site),
     };
     if result.is_err() {
         ExitCode::FAILURE
@@ -107,7 +132,13 @@ fn open_db(config: &ServerConfig) -> Result<DocDb, ()> {
     })
 }
 
-fn run_mcp(db_path: Option<String>, config_path: Option<String>) -> Result<(), ()> {
+fn run_mcp(
+    db_path: Option<String>,
+    config_path: Option<String>,
+    transport: Option<String>,
+    mcp_port: Option<u16>,
+    mcp_bind: Option<String>,
+) -> Result<(), ()> {
     let config = load_config(db_path, config_path)?;
 
     if !config.mcp.enabled {
@@ -115,21 +146,104 @@ fn run_mcp(db_path: Option<String>, config_path: Option<String>) -> Result<(), (
         return Err(());
     }
 
+    // CLI flags override the config file.
+    let transport = transport.unwrap_or_else(|| config.mcp.transport.clone());
+    let port = mcp_port.unwrap_or(config.mcp.port);
+    let bind = mcp_bind.unwrap_or_else(|| config.mcp.bind.clone());
+
     let db = open_db(&config)?;
 
-    eprintln!("starting MCP server on stdio...");
     let runtime = tokio::runtime::Runtime::new().map_err(|e| {
         eprintln!("error creating tokio runtime: {e}");
     })?;
 
-    runtime
-        .block_on(edlc_doc_server::mcp::serve_stdio(db))
-        .map_err(|e| {
-            eprintln!("MCP server error: {e}");
-        })
+    match transport.as_str() {
+        "stdio" => {
+            eprintln!("starting MCP server on stdio...");
+            runtime
+                .block_on(edlc_doc_server::mcp::serve_stdio(db))
+                .map_err(|e| {
+                    eprintln!("MCP server error: {e}");
+                })
+        }
+        "http" => {
+            let addr = format!("{bind}:{port}");
+            let listener = runtime
+                .block_on(tokio::net::TcpListener::bind(&addr))
+                .map_err(|e| {
+                    eprintln!("error binding MCP HTTP transport to {addr}: {e}");
+                })?;
+            eprintln!("starting MCP server on http://{addr}/mcp...");
+            runtime
+                .block_on(edlc_doc_server::mcp::serve_http(listener, db, &bind))
+                .map_err(|e| {
+                    eprintln!("MCP server error: {e}");
+                })
+        }
+        other => {
+            eprintln!(
+                "error: unknown MCP transport '{other}' (expected 'stdio' or 'http')"
+            );
+            Err(())
+        }
+    }
 }
 
-fn run_serve(db_path: Option<String>, config_path: Option<String>) -> Result<(), ()> {
+/// Site-root candidates in priority order:
+///
+/// 1. the explicit `--site` flag,
+/// 2. the `EDL_DOC_SITE` environment variable,
+/// 3. `site_dir` from the config file,
+/// 4. the executable's grandparent directory joined with `site/` — this covers
+///    every layout we support, since the site always sits two levels above the
+///    executable:
+///    - `target/debug/edlc_doc_server`  -> `target/site` (development),
+///    - `target/release/edlc_doc_server` -> `target/site` (in-tree release run;
+///      cargo-leptos writes the site to `target/site` for both profiles),
+///    - `~/.edl/bin/edl_docs`           -> `~/.edl/site` (local install),
+/// 5. the compile-time `CARGO_MANIFEST_DIR/../target/site` (the original
+///    behavior, kept as a last resort).
+///
+/// The caller selects the first candidate that holds a `pkg/` subdirectory, so
+/// missing directories never shadow a later, valid candidate.
+fn site_candidates(
+    explicit: Option<&std::path::Path>,
+    env_dir: Option<&str>,
+    config_dir: Option<&std::path::Path>,
+    exe: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(p) = explicit {
+        candidates.push(p.to_path_buf());
+    }
+    if let Some(p) = env_dir.map(std::path::Path::new).filter(|p| !p.as_os_str().is_empty()) {
+        candidates.push(p.to_path_buf());
+    }
+    if let Some(p) = config_dir {
+        candidates.push(p.to_path_buf());
+    }
+    if let Some(exe) = exe {
+        if let Some(exe_dir) = exe.parent() {
+            if let Some(root) = exe_dir.parent() {
+                candidates.push(root.join("site"));
+            }
+        }
+    }
+
+    // Compile-time fallback: the workspace target directory.
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace = manifest_dir.parent().unwrap_or(&manifest_dir);
+    candidates.push(workspace.join("target/site"));
+
+    candidates
+}
+
+fn run_serve(
+    db_path: Option<String>,
+    config_path: Option<String>,
+    site_path: Option<std::path::PathBuf>,
+) -> Result<(), ()> {
     let config = load_config(db_path, config_path)?;
 
     if !config.http.enabled {
@@ -137,25 +251,28 @@ fn run_serve(db_path: Option<String>, config_path: Option<String>) -> Result<(),
         return Err(());
     }
 
-    // cargo-leptos puts the site output at <workspace-root>/target/site/.
-    // We resolve it relative to the crate's manifest dir (CARGO_MANIFEST_DIR),
-    // which is set at compile time and points to edlc_doc_server/ within the
-    // workspace — so the parent is the workspace root. This is independent of
-    // the current working directory, so `serve` works from anywhere.
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let site_root = manifest_dir
-        .parent()
-        .unwrap_or(&manifest_dir)
-        .join("target/site");
+    let exe = std::env::current_exe().ok();
+    let candidates = site_candidates(
+        site_path.as_deref(),
+        std::env::var("EDL_DOC_SITE").ok().as_deref(),
+        config.http.site_dir.as_deref(),
+        exe.as_deref(),
+    );
 
-    if !site_root.join("pkg").is_dir() {
-        eprintln!(
-            "error: Leptos site assets not found at {}",
-            site_root.join("pkg").display()
-        );
-        eprintln!("help: build the frontend bundle first with `cargo leptos build` (or `cargo leptos watch` for development)");
-        return Err(());
-    }
+    // The first candidate that actually holds a `pkg/` subdirectory wins.
+    let site_root = match candidates.iter().find(|c| c.join("pkg").is_dir()) {
+        Some(root) => root.clone(),
+        None => {
+            eprintln!("error: Leptos site assets not found; looked for a `pkg/` directory in:");
+            for c in &candidates {
+                eprintln!("  {}", c.display());
+            }
+            eprintln!("help: build the frontend bundle first with `cargo leptos build` (or `cargo leptos watch` for development)");
+            eprintln!("help: or point the server at an existing site directory with `--site <dir>` or the EDL_DOC_SITE environment variable");
+            return Err(());
+        }
+    };
+    eprintln!("serving site assets from {}", site_root.display());
 
     // cargo-leptos 0.3.x renames wasm-bindgen's `edlc_doc_server_bg.wasm` to
     // `edlc_doc_server.wasm`, but the name the hydration script requests
@@ -228,4 +345,78 @@ fn run_serve(db_path: Option<String>, config_path: Option<String>) -> Result<(),
         .map_err(|_| ())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::site_candidates;
+
+    fn p(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
+    #[test]
+    fn candidates_priority_order() {
+        let c = site_candidates(
+            Some(p("/flag/site").as_path()),
+            Some("/env/site"),
+            Some(p("/config/site").as_path()),
+            Some(p("/home/u/.edl/bin/edl_docs").as_path()),
+        );
+        assert_eq!(c[0], p("/flag/site"));
+        assert_eq!(c[1], p("/env/site"));
+        assert_eq!(c[2], p("/config/site"));
+        assert_eq!(c[3], p("/home/u/.edl/site"));
+        // The last candidate is always the compile-time workspace target dir.
+        assert!(c.last().unwrap().ends_with("target/site"));
+        assert_eq!(c.len(), 5);
+    }
+
+    #[test]
+    fn candidates_skip_empty_sources() {
+        let c = site_candidates(
+            None,
+            Some(""),
+            None,
+            Some(p("/target/debug/edlc_doc_server").as_path()),
+        );
+        assert_eq!(c[0], p("/target/site"));
+        assert!(c.last().unwrap().ends_with("target/site"));
+        assert_eq!(c.len(), 2);
+    }
+
+    #[test]
+    fn candidates_in_tree_debug_layout() {
+        let c =
+            site_candidates(None, None, None, Some(p("/repo/target/debug/edlc_doc_server").as_path()));
+        assert_eq!(c[0], p("/repo/target/site"));
+    }
+
+    #[test]
+    fn candidates_in_tree_release_layout() {
+        // cargo-leptos writes the site to target/site for both profiles, so the
+        // exe-relative candidate is the same for release.
+        let c = site_candidates(
+            None,
+            None,
+            None,
+            Some(p("/repo/target/release/edlc_doc_server").as_path()),
+        );
+        assert_eq!(c[0], p("/repo/target/site"));
+    }
+
+    #[test]
+    fn candidates_installed_layout() {
+        let c = site_candidates(None, None, None, Some(p("/home/u/.edl/bin/edl_docs").as_path()));
+        assert_eq!(c[0], p("/home/u/.edl/site"));
+    }
+
+    #[test]
+    fn candidates_bare_exe_name() {
+        // An exe path without directory components contributes no candidate;
+        // only the compile-time fallback remains.
+        let c = site_candidates(None, None, None, Some(p("edlc_doc_server").as_path()));
+        assert!(c.last().unwrap().ends_with("target/site"));
+        assert_eq!(c.len(), 1);
+    }
 }

@@ -8,29 +8,50 @@ not depend on the EDL compiler (`edlc_core`) — it only reads the pre-built dat
 
 ## MCP mode
 
-Run as an MCP server over stdio for use with Claude Desktop, Cursor, or any MCP-compatible
-client (from the workspace root):
+MCP supports two transports:
 
-```sh
-cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
-```
+- **stdio** (default) — the client spawns the server and talks to it over its stdio streams.
+  This is the spec-standard local transport and what desktop MCP clients (Claude Desktop,
+  Cursor, ...) use to launch local servers:
+
+  ```sh
+  cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
+  ```
+
+- **Streamable HTTP over TCP** — the spec's network transport, for clients that connect over
+  the network. The server listens on a TCP socket and serves the MCP endpoint at `/mcp`
+  (default `http://127.0.0.1:3000/mcp`):
+
+  ```sh
+  cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db --transport http \
+      [--mcp-port 3000] [--mcp-bind 127.0.0.1]
+  ```
+
+  Clients configure the full endpoint URL, e.g. `http://127.0.0.1:3000/mcp`.
 
 `cargo run` is fine here — MCP mode never touches the Leptos frontend. (It does rebuild the
 server binary with plain cargo, so if you afterwards want to serve the HTTP frontend, re-run
 `cargo leptos build` first — see [HTTP mode](#http-mode).)
 
+> **Security note:** The MCP HTTP endpoint has no authentication. It binds to `127.0.0.1` by
+> default and then enforces loopback-only `Host` headers. If you bind to a non-loopback
+> address, `Host` validation is disabled — put an authenticating reverse proxy in front of
+> such a deployment.
+
 ### Tools exposed
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `search_docs` | `query` (string), `limit` (int, optional, default 20) | Full-text search across item names, modules, signatures, and doc text via FTS5. |
-| `get_doc` | `name` (string) | Fetch a single item by its simple or qualified name. |
-| `list_modules` | — | List all modules in the database. |
-| `get_module` | `name` (string) | List all items belonging to a module. |
+| `search_docs` | `query` (string), `limit` (int, optional, default 20), `kind` (string, optional), `details` (bool, optional, default false) | Full-text search across item names, modules, signatures, and doc text via FTS5 (prefix matching, names ranked highest). |
+| `get_doc` | `name` (string), `details` (bool, optional, default false) | Fetch a single item by its qualified name. If a simple name is ambiguous, an error lists the candidate qualified names. |
+| `list_modules` | `details` (bool, optional, default false) | List all modules in the database. |
+| `get_module` | `name` (string), `details` (bool, optional, default false) | List all items belonging to a module (including nested submodules). |
+| `list_items` | `kind` (string, optional), `details` (bool, optional, default false) | List all items in the database, including crate-root items that `get_module` cannot reach. |
 
-Each tool returns JSON containing the item's `id`, `kind`, `name`, `qual_name`, `module`,
-`signature`, `doc_text`, and the full serde-JSON `blob` of the original `Item` (which includes
-async info, modifiers, params, etc.).
+`kind` accepts `fn`, `let`, `const`, `type`, or `module`. Each item is returned as JSON with
+`id`, `kind`, `name`, `qual_name`, `module`, `signature`, and `doc_text`; the full serde-JSON
+`blob` of the original `Item` (async info, modifiers, params, fields, variants, ...) is only
+included when `details: true`, to keep listing and search responses small.
 
 ## HTTP mode
 
@@ -86,9 +107,6 @@ The `wasm32-unknown-unknown` target is required (`rustup target add wasm32-unkno
 
 ### Running
 
-Everything runs from the workspace root — the site bundle location is resolved at compile time
-(`target/site`), and `build_doc_db` writes its database next to its own manifest:
-
 ```sh
 # (Re)build the example documentation database (writes examples/build_doc_db/docs.db)
 cargo run -p build_doc_db
@@ -107,6 +125,50 @@ For a release build, run `cargo leptos build --release` and then
 > `cargo run -p edlc_doc_server serve` here — plain `cargo run` produces a server binary whose
 > SSR output does not match the wasm bundle, which breaks client-side hydration.
 
+### Locating the site bundle
+
+`serve` needs the Leptos site bundle (a directory containing `pkg/` with the wasm, js, and css
+assets). It resolves the site root by trying these in order and using the first one that holds
+a `pkg/` subdirectory:
+
+1. `--site <dir>` flag,
+2. `EDL_DOC_SITE` environment variable,
+3. `site_dir` in the `[http]` config section,
+4. two directories above the executable plus `site/` — this covers the in-tree layouts
+   (`target/debug/edlc_doc_server` and `target/release/edlc_doc_server` both resolve to
+   `target/site`, where `cargo-leptos` writes the bundle for every profile) and the local
+   install layout (`~/.edl/bin/edl_docs` resolves to `~/.edl/site`),
+5. the compile-time `<workspace>/target/site` (the original behavior, last resort).
+
+If none exists, the server exits listing every candidate it tried.
+
+## Local install (Linux)
+
+`install.sh` installs the doc server into `~/.edl` in the user account:
+
+```sh
+cd edlc_doc_server
+sh install.sh
+```
+
+It performs a release build, then lays out:
+
+- `~/.edl/bin/edl_docs` — the server binary,
+- `~/.edl/site/` — the Leptos site bundle (where `serve` finds it via the
+  executable-relative rule above),
+- `~/.edl/env` — shell snippet that adds `~/.edl/bin` to `$PATH` and exports
+  `EDL_DOC_SITE="$HOME/.edl/site"`; the script appends `. "$HOME/.edl/env"` to
+  `~/.bashrc` and `~/.profile` (idempotently).
+
+After restarting the shell:
+
+```sh
+edl_docs serve --db /path/to/docs.db
+```
+
+Re-running `install.sh` reinstalls over the previous installation. The MCP mode (`edl_docs mcp`)
+is installed alongside and does not need the site bundle.
+
 ## Configuration
 
 A TOML config file can be provided with `--config` for either mode:
@@ -123,10 +185,14 @@ db_path = "docs.db"
 
 [mcp]
 enabled = true
+transport = "stdio"  # or "http"
+port = 3000          # used when transport = "http"
+bind = "127.0.0.1"   # used when transport = "http"
 
 [http]
 enabled = true
 port = 8080
+site_dir = "/path/to/site"  # optional; see "Locating the site bundle"
 ```
 
 If `--config` is omitted, `--db` can be used to specify the database path directly (defaults to

@@ -26,7 +26,7 @@ use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
     components::{Route, Router, Routes, A},
     hooks::{use_navigate, use_params_map, use_query_map},
-    ParamSegment, StaticSegment,
+    NavigateOptions, ParamSegment, StaticSegment,
 };
 
 use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
@@ -169,11 +169,23 @@ fn Sidebar() -> impl IntoView {
 
 // --- Search bar ---
 
-/// Top search bar. Navigates to `/search?q=...` on submit.
+/// Top search bar. Navigates to `/search?q=...` on every keystroke (replacing the current
+/// history entry) so the search page's results update live as the user types.
 #[component]
 fn SearchBar() -> impl IntoView {
-    let (query, set_query) = signal(String::new());
-    let navigate = leptos_router::hooks::use_navigate();
+    let query_map = use_query_map();
+    // Start from the current `?q` param, so a direct load of `/search?q=...` pre-fills the box.
+    let (query, set_query) = signal(query_map.get().get("q").unwrap_or_default());
+    let navigate = use_navigate();
+
+    // Keep the input in sync when the URL changes externally (browser back/forward). Input-driven
+    // navigation sets both the signal and the URL to the same value, so this is a no-op then.
+    Effect::new(move || {
+        let url_q = query_map.get().get("q").unwrap_or_default();
+        if url_q != query.get_untracked() {
+            set_query(url_q);
+        }
+    });
 
     view! {
         <div class="search-bar">
@@ -181,11 +193,17 @@ fn SearchBar() -> impl IntoView {
                 type="text"
                 placeholder="Search documentation..."
                 prop:value=move || query.get()
-                on:input=move |ev| set_query.set(event_target_value(&ev))
-                on:keydown=move |ev| {
-                    if ev.key() == "Enter" && !query.get().is_empty() {
-                        navigate(&format!("/search?q={}", query.get()), Default::default());
-                    }
+                on:input=move |ev| {
+                    let v = event_target_value(&ev);
+                    set_query(v.clone());
+                    navigate(
+                        &format!("/search?q={}", urlencoding::encode(&v)),
+                        NavigateOptions {
+                            replace: true,
+                            scroll: false,
+                            ..Default::default()
+                        },
+                    );
                 }
             />
         </div>
@@ -259,7 +277,7 @@ fn SearchPage() -> impl IntoView {
             if q.is_empty() {
                 Ok(Vec::new())
             } else {
-                search_docs(q, 50).await
+                search_docs(q, 20).await
             }
         },
     );

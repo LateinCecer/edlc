@@ -17,13 +17,16 @@
  */
 //! MCP server implementation for EDL documentation.
 //!
-//! Exposes four tools over the Model Context Protocol (stdio transport):
+//! Exposes five tools over the Model Context Protocol, over stdio (the default local transport,
+//! [`serve_stdio`]) or Streamable HTTP on a TCP socket (the spec's network transport,
+//! [`serve_http`], endpoint `/mcp`):
 //!
-//! - `search_docs(query, limit?)` — full-text search across item names, modules, signatures,
-//!   and doc text.
-//! - `get_doc(name)` — fetch a single documentation item by its (qualified) name.
-//! - `list_modules()` — list all modules in the database.
-//! - `get_module(name)` — list all items belonging to a module.
+//! - `search_docs(query, limit?, kind?, details?)` — full-text search across item names,
+//!   modules, signatures, and doc text.
+//! - `get_doc(name, details?)` — fetch a single documentation item by its (qualified) name.
+//! - `list_modules(details?)` — list all modules in the database.
+//! - `get_module(name, details?)` — list all items belonging to a module.
+//! - `list_items(kind?, details?)` — list all items in the database, including crate-root items.
 //!
 //! ## What is MCP?
 //!
@@ -36,6 +39,9 @@
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
     schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
@@ -58,8 +64,14 @@ pub struct DocMcpServer {
 impl DocMcpServer {
     /// Creates a new MCP server backed by the given database.
     pub fn new(db: DocDb) -> Self {
+        Self::from_handle(Arc::new(Mutex::new(db)))
+    }
+
+    /// Creates an MCP server sharing an existing database handle. The Streamable HTTP transport
+    /// constructs one handler per client session, so all sessions share one `DocDb` connection.
+    pub fn from_handle(db: Arc<Mutex<DocDb>>) -> Self {
         DocMcpServer {
-            db: Arc::new(Mutex::new(db)),
+            db,
             tool_router: Self::tool_router(),
         }
     }
@@ -69,12 +81,20 @@ impl DocMcpServer {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchDocsParams {
-    /// The search query. Matched against item names, module paths, signatures, and doc text
-    /// using SQLite FTS5 full-text search.
+    /// The search query. Each whitespace-separated token must match a token prefix in an item
+    /// name, module path, signature, or doc text (implicit AND), using SQLite FTS5 full-text
+    /// search — e.g. `add ov` matches `add_overflow`.
     query: String,
     /// Maximum number of results to return. Defaults to 20.
     #[serde(default = "default_search_limit")]
     limit: usize,
+    /// Optional kind filter: one of `fn`, `let`, `const`, `type`, `module`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// When true, include the full structured `blob` of each item in the results. Defaults to
+    /// false — the `signature` and `doc_text` fields usually suffice for writing code.
+    #[serde(default)]
+    details: bool,
 }
 
 fn default_search_limit() -> usize {
@@ -83,15 +103,39 @@ fn default_search_limit() -> usize {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetDocParams {
-    /// The name of the item to fetch. Can be a simple name (e.g. "add") or a qualified name
-    /// (e.g. "example::add").
+    /// The name of the item to fetch. Prefer a qualified name (e.g. "example::add"); a simple
+    /// name (e.g. "add") is ambiguous when several items share it, in which case the response
+    /// lists the candidate qualified names to retry with.
     name: String,
+    /// When true, include the full structured `blob` of the item. Defaults to false.
+    #[serde(default)]
+    details: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetModuleParams {
     /// The name of the module whose items should be listed.
     name: String,
+    /// When true, include the full structured `blob` of each item. Defaults to false.
+    #[serde(default)]
+    details: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListModulesParams {
+    /// When true, include the full structured `blob` of each module. Defaults to false.
+    #[serde(default)]
+    details: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ListItemsParams {
+    /// Optional kind filter: one of `fn`, `let`, `const`, `type`, `module`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// When true, include the full structured `blob` of each item. Defaults to false.
+    #[serde(default)]
+    details: bool,
 }
 
 // --- Result type ---
@@ -106,24 +150,31 @@ struct DocSummary {
     signature: String,
     doc_text: String,
     /// The full serde-JSON of the original `Item`, containing all structured fields including
-    /// `async_return`, `modifiers`, params, etc. Deserializable by the client if it needs
-    /// details beyond the summary fields.
-    blob: String,
+    /// `async_return`, `modifiers`, params, etc. Only present when the tool is called with
+    /// `details: true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob: Option<String>,
 }
 
-impl From<DocRow> for DocSummary {
-    fn from(row: DocRow) -> Self {
-        DocSummary {
-            id: row.id,
-            kind: row.kind.as_str().to_string(),
-            name: row.name,
-            qual_name: row.qual_name,
-            module: row.module,
-            signature: row.signature,
-            doc_text: row.doc_text,
-            blob: row.blob,
-        }
+/// Converts a database row into a summary, including the `blob` only when `details` is set.
+fn row_to_summary(row: DocRow, details: bool) -> DocSummary {
+    DocSummary {
+        id: row.id,
+        kind: row.kind.as_str().to_string(),
+        name: row.name,
+        qual_name: row.qual_name,
+        module: row.module,
+        signature: row.signature,
+        doc_text: row.doc_text,
+        blob: details.then(|| row.blob),
     }
+}
+
+/// Validates a user-supplied kind filter string.
+fn parse_kind(kind: &str) -> Result<edlc_doc_db::Kind, String> {
+    edlc_doc_db::Kind::parse(kind).ok_or_else(|| {
+        format!("unknown kind '{kind}' (expected one of: fn, let, const, type, module)")
+    })
 }
 
 fn error_json(msg: &str) -> String {
@@ -136,22 +187,34 @@ fn error_json(msg: &str) -> String {
 impl DocMcpServer {
     /// Search EDL documentation by full-text query.
     #[tool(
-        description = "Search EDL documentation items (functions, types, variables, constants, modules) by full-text query. Returns matching items with their signatures and doc text."
+        description = "Search EDL documentation items by full-text query (prefix matching: each token must match a token prefix; 'add ov' matches 'add_overflow'). Use this to discover APIs. Returns up to `limit` best matches (default 20) with their signatures and doc text, names ranked highest. Optionally filter by `kind` (fn, let, const, type, module). Pass `details: true` to also get each item's full structured blob."
     )]
     async fn search_docs(
         &self,
-        Parameters(SearchDocsParams { query, limit }): Parameters<SearchDocsParams>,
+        Parameters(SearchDocsParams {
+            query,
+            limit,
+            kind,
+            details,
+        }): Parameters<SearchDocsParams>,
     ) -> String {
+        let kind = match kind.as_deref().map(parse_kind).transpose() {
+            Ok(k) => k,
+            Err(e) => return error_json(&e),
+        };
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
             let guard = db.lock().map_err(|e| e.to_string())?;
-            guard.search(&query, limit).map_err(|e| e.to_string())
+            guard.search(&query, limit, kind).map_err(|e| e.to_string())
         })
         .await;
 
         match result {
             Ok(Ok(rows)) => {
-                let summaries: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
+                let summaries: Vec<DocSummary> = rows
+                    .into_iter()
+                    .map(|row| row_to_summary(row, details))
+                    .collect();
                 serde_json::to_string_pretty(&summaries)
                     .unwrap_or_else(|e| error_json(&e.to_string()))
             }
@@ -162,30 +225,57 @@ impl DocMcpServer {
 
     /// Get a single documentation item by name.
     #[tool(
-        description = "Fetch a single EDL documentation item by its name (simple or qualified). Returns the item's full details including its signature and doc text."
+        description = "Fetch a single EDL documentation item by name. Prefer a qualified name (e.g. 'example::add'): if a simple name matches several items (overloads), the response is an error listing the candidate qualified names — retry with one of them. Returns the item's signature and doc text; pass `details: true` to also get the full structured blob."
     )]
-    async fn get_doc(&self, Parameters(GetDocParams { name }): Parameters<GetDocParams>) -> String {
+    async fn get_doc(
+        &self,
+        Parameters(GetDocParams { name, details }): Parameters<GetDocParams>,
+    ) -> String {
         let target = name.clone();
         let query = target.clone();
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
             let guard = db.lock().map_err(|e| e.to_string())?;
-            guard.get_item_by_name(&query).map_err(|e| e.to_string())
+            guard.get_item_by_name_candidates(&query).map_err(|e| e.to_string())
         })
         .await;
 
         match result {
-            Ok(Ok(found)) => match found {
-                Some(row) => {
-                    let summary = DocSummary::from(row);
-                    serde_json::to_string_pretty(&summary)
-                        .unwrap_or_else(|e| error_json(&e.to_string()))
-                }
-                None => serde_json::to_string_pretty(&serde_json::json!({
+            Ok(Ok(rows)) => match rows.len() {
+                0 => serde_json::to_string_pretty(&serde_json::json!({
                     "error": "not found",
                     "name": target,
                 }))
                 .unwrap(),
+                1 => {
+                    let summary = row_to_summary(rows.into_iter().next().unwrap(), details);
+                    serde_json::to_string_pretty(&summary)
+                        .unwrap_or_else(|e| error_json(&e.to_string()))
+                }
+                // Ambiguous simple name: report the candidates instead of silently picking one.
+                _ => {
+                    let mut candidates: Vec<serde_json::Value> = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "qual_name": r.qual_name,
+                                "kind": r.kind.as_str(),
+                                "signature": r.signature,
+                            })
+                        })
+                        .collect();
+                    // Keep the error bounded for names with many overloads.
+                    if candidates.len() > 100 {
+                        candidates.truncate(100);
+                    }
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "error": "ambiguous",
+                        "name": target,
+                        "hint": "The name matches several items. Retry get_doc with a qualified name from the candidates list.",
+                        "candidates": candidates,
+                    }))
+                    .unwrap_or_else(|e| error_json(&e.to_string()))
+                }
             },
             Ok(Err(e)) => error_json(&e),
             Err(e) => error_json(&e.to_string()),
@@ -194,9 +284,13 @@ impl DocMcpServer {
 
     /// List all modules in the documentation database.
     #[tool(
-        description = "List all modules in the EDL documentation database. Returns an array of module names with their doc text."
+        description = "List all modules in the EDL documentation database, with their doc text. Use this for an overview of the library; list_items and get_module list the items inside."
     )]
-    async fn list_modules(&self) -> String {
+    async fn list_modules(
+        &self,
+        Parameters(params): Parameters<ListModulesParams>,
+    ) -> String {
+        let details = params.details;
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
             let guard = db.lock().map_err(|e| e.to_string())?;
@@ -206,7 +300,10 @@ impl DocMcpServer {
 
         match result {
             Ok(Ok(rows)) => {
-                let summaries: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
+                let summaries: Vec<DocSummary> = rows
+                    .into_iter()
+                    .map(|row| row_to_summary(row, details))
+                    .collect();
                 serde_json::to_string_pretty(&summaries)
                     .unwrap_or_else(|e| error_json(&e.to_string()))
             }
@@ -217,11 +314,11 @@ impl DocMcpServer {
 
     /// List all items in a specific module.
     #[tool(
-        description = "List all documentation items (functions, types, variables, etc.) belonging to a specific module. Returns matching items with their signatures and doc text."
+        description = "List all documentation items (functions, types, variables, etc.) belonging to a module, including nested submodules. Use this to browse a module; note that items at the crate root (no module) are only listed by list_items."
     )]
     async fn get_module(
         &self,
-        Parameters(GetModuleParams { name }): Parameters<GetModuleParams>,
+        Parameters(GetModuleParams { name, details }): Parameters<GetModuleParams>,
     ) -> String {
         let target = name.clone();
         let db = self.db.clone();
@@ -233,8 +330,44 @@ impl DocMcpServer {
 
         match result {
             Ok(Ok(rows)) => {
-                let filtered: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
+                let filtered: Vec<DocSummary> = rows
+                    .into_iter()
+                    .map(|row| row_to_summary(row, details))
+                    .collect();
                 serde_json::to_string_pretty(&filtered)
+                    .unwrap_or_else(|e| error_json(&e.to_string()))
+            }
+            Ok(Err(e)) => error_json(&e),
+            Err(e) => error_json(&e.to_string()),
+        }
+    }
+
+    /// List all documented items in the database, optionally filtered by kind.
+    #[tool(
+        description = "List all documented items in the database, optionally filtered by `kind` (fn, let, const, type, module). Unlike get_module, this also includes items at the crate root that belong to no module. Use it to browse the whole library; use search_docs to narrow by content."
+    )]
+    async fn list_items(
+        &self,
+        Parameters(ListItemsParams { kind, details }): Parameters<ListItemsParams>,
+    ) -> String {
+        let kind = match kind.as_deref().map(parse_kind).transpose() {
+            Ok(k) => k,
+            Err(e) => return error_json(&e),
+        };
+        let db = self.db.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let guard = db.lock().map_err(|e| e.to_string())?;
+            guard.list_items(kind).map_err(|e| e.to_string())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(rows)) => {
+                let summaries: Vec<DocSummary> = rows
+                    .into_iter()
+                    .map(|row| row_to_summary(row, details))
+                    .collect();
+                serde_json::to_string_pretty(&summaries)
                     .unwrap_or_else(|e| error_json(&e.to_string()))
             }
             Ok(Err(e)) => error_json(&e),
@@ -247,9 +380,12 @@ impl DocMcpServer {
 impl ServerHandler for DocMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "EDL documentation server. Use search_docs to search for items, get_doc to fetch \
-             a specific item, list_modules to see all modules, and get_module to list items \
-             in a module.",
+            "EDL documentation server. Recommended workflow: use search_docs to discover APIs \
+             (prefix matching, optional kind filter), list_modules / list_items / get_module \
+             to browse (summaries without the heavy blob by default), and get_doc with a \
+             qualified name to fetch one item — if get_doc reports an 'ambiguous' error, retry \
+             with a qualified name from its candidates list. Pass details: true only when you \
+             need an item's full structured blob (fields, variants, generics).",
         )
     }
 }
@@ -260,4 +396,43 @@ pub async fn serve_stdio(db: DocDb) -> Result<(), Box<dyn std::error::Error>> {
     let running = server.serve(rmcp::transport::io::stdio()).await?;
     running.waiting().await?;
     Ok(())
+}
+
+/// Serves the MCP server over TCP using the Streamable HTTP transport (the MCP spec's network
+/// transport). The endpoint is nested at `/mcp` on the given, already-bound listener. Blocks
+/// until the process is terminated.
+///
+/// `bind` is the address the listener was bound to and decides how strict the `Host` header
+/// validation is: loopback binds keep the default loopback-only validation (DNS-rebinding
+/// protection); non-loopback binds disable it, so such deployments must be put behind a reverse
+/// proxy with authentication.
+pub async fn serve_http(
+    listener: tokio::net::TcpListener,
+    db: DocDb,
+    bind: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let handle = Arc::new(Mutex::new(db));
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let mut config = StreamableHttpServerConfig::default();
+    if !bind_is_loopback(bind) {
+        eprintln!(
+            "warning: MCP HTTP endpoint is bound to non-loopback address {bind}; \
+             Host-header validation is disabled. Put an authenticating reverse proxy in front \
+             of this endpoint."
+        );
+        config = config.disable_allowed_hosts();
+    }
+    let service = StreamableHttpService::new(
+        move || Ok(DocMcpServer::from_handle(handle.clone())),
+        session_manager,
+        config,
+    );
+    let app = axum::Router::new().nest_service("/mcp", service);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Whether `bind` names a loopback address (anything else is treated as network-exposed).
+fn bind_is_loopback(bind: &str) -> bool {
+    matches!(bind, "127.0.0.1" | "localhost" | "::1")
 }

@@ -51,7 +51,8 @@ impl Kind {
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    /// Parses a kind name (`"fn"`, `"let"`, `"const"`, `"type"`, `"module"`).
+    pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "fn" => Kind::Fn,
             "let" => Kind::Let,
@@ -176,16 +177,33 @@ impl DocDb {
     }
 
     /// Full-text search over `(name, module, doc_text, signature)` via the FTS5 index.
-    pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<DocRow>> {
-        // Sanitize: FTS5 query syntax can be injected; wrap in quotes for a phrase/term search.
-        let sanitized = sanitize_fts(query);
+    ///
+    /// Each whitespace-separated token of `query` must match a token prefix in at least one
+    /// indexed column (implicit AND). Results are ranked with bm25, weighting name matches
+    /// highest, then signatures, doc text, and module paths. When `kind` is `Some`, only items
+    /// of that kind are returned. An empty or whitespace-only query matches nothing and returns
+    /// an empty list.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        kind: Option<Kind>,
+    ) -> rusqlite::Result<Vec<DocRow>> {
+        let fts_query = match build_fts_query(query) {
+            Some(q) => q,
+            None => return Ok(Vec::new()),
+        };
+        let kind_name = kind.map(|k| k.as_str().to_string());
         let sql =
             "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.blob \
-                   FROM search_index s JOIN items i ON s.rowid = i.id \
-                   WHERE search_index MATCH ?1 \
-                   ORDER BY rank LIMIT ?2";
+                    FROM search_index s JOIN items i ON s.rowid = i.id \
+                    WHERE search_index MATCH ?1 AND (?3 IS NULL OR i.kind = ?3) \
+                    ORDER BY bm25(search_index, 10.0, 1.0, 2.0, 3.0) LIMIT ?2";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![sanitized, limit as i64], row_mapper())?;
+        let rows = stmt.query_map(
+            params![fts_query, limit as i64, kind_name],
+            row_mapper(),
+        )?;
         rows.collect()
     }
 
@@ -203,11 +221,24 @@ impl DocDb {
     /// Returns `Ok(None)` when no item matches.
     pub fn get_item_by_name(&self, name: &str) -> rusqlite::Result<Option<DocRow>> {
         let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
-                   FROM items WHERE qual_name = ?1 OR name = ?1 \
-                   ORDER BY (qual_name != ?1), kind, name LIMIT 1";
+                    FROM items WHERE qual_name = ?1 OR name = ?1 \
+                    ORDER BY (qual_name != ?1), kind, name LIMIT 1";
         let mut stmt = self.conn.prepare(sql)?;
         let mut rows = stmt.query_map(params![name], row_mapper())?;
         rows.next().transpose()
+    }
+
+    /// Fetches all items matching `name` — an exact `qual_name` match plus all simple-`name`
+    /// matches — in the same order as [`get_item_by_name`] (exact qual names first, then
+    /// `(kind, name)`). Use this to detect and report ambiguous simple names instead of
+    /// silently picking the first match.
+    pub fn get_item_by_name_candidates(&self, name: &str) -> rusqlite::Result<Vec<DocRow>> {
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+                    FROM items WHERE qual_name = ?1 OR name = ?1 \
+                    ORDER BY (qual_name != ?1), kind, name";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![name], row_mapper())?;
+        rows.collect()
     }
 
     /// Lists all items belonging to `module` — items directly inside it plus items of nested
@@ -280,12 +311,18 @@ fn row_mapper() -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<DocRow> {
     }
 }
 
-/// Escapes a user query for safe FTS5 MATCH input. Wraps the query in double quotes with any
-/// embedded double-quotes doubled, turning it into a phrase query. This intentionally avoids
-/// exposing FTS5 query operators (AND/OR/NOT, column filters) to callers.
-fn sanitize_fts(query: &str) -> String {
-    let escaped = query.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+/// Builds a safe FTS5 MATCH query from a user query: each whitespace-separated token is
+/// wrapped in double quotes (with embedded double-quotes doubled) and suffixed with `*`,
+/// turning it into a prefix term. The terms are separated by spaces, which FTS5 interprets
+/// as an implicit AND. This matches partial words while typing (e.g. `add ov` matches
+/// `add_overflow`) and intentionally avoids exposing FTS5 query operators (OR/NOT, column
+/// filters) to callers. Returns `None` when the query has no tokens.
+fn build_fts_query(query: &str) -> Option<String> {
+    let terms = query
+        .split_whitespace()
+        .map(|t| format!("\"{}\"*", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" "))
 }
 
 /// Creates the schema: `items` table, FTS5 external-content index, and sync triggers.
@@ -389,7 +426,7 @@ mod tests {
         let db = DocDb::from_connection(conn);
 
         // search for "pi" hits the let
-        let hits = db.search("pi", 10).expect("search");
+        let hits = db.search("pi", 10, None).expect("search");
         assert!(
             hits.iter().any(|r| r.kind == Kind::Let && r.name == "pi"),
             "search for 'pi' should find the let: {hits:?}"
@@ -439,12 +476,106 @@ mod tests {
         assert_eq!(mods.len(), 1);
     }
 
-    /// `sanitize_fts` neutralizes FTS5 operators by wrapping input in a quoted phrase.
+    /// `build_fts_query` turns each token into a quoted prefix term (implicit AND).
     #[test]
-    fn sanitize_fts_quotes_input() {
-        assert_eq!(sanitize_fts("foo"), "\"foo\"");
-        assert_eq!(sanitize_fts("foo OR bar"), "\"foo OR bar\"");
-        assert_eq!(sanitize_fts("a\"b"), "\"a\"\"b\"");
+    fn build_fts_query_prefix_terms() {
+        assert_eq!(build_fts_query("foo").as_deref(), Some("\"foo\"*"));
+        assert_eq!(
+            build_fts_query("foo bar").as_deref(),
+            Some("\"foo\"* \"bar\"*")
+        );
+        assert_eq!(
+            build_fts_query("foo   bar").as_deref(),
+            Some("\"foo\"* \"bar\"*")
+        );
+        // FTS5 operators are not special: "OR" is just another (prefix) term.
+        assert_eq!(
+            build_fts_query("foo OR bar").as_deref(),
+            Some("\"foo\"* \"OR\"* \"bar\"*")
+        );
+        assert_eq!(build_fts_query("a\"b").as_deref(), Some("\"a\"\"b\"*"));
+        assert_eq!(build_fts_query(""), None);
+        assert_eq!(build_fts_query("   \t "), None);
+    }
+
+    /// A partial token matches items whose tokens start with it.
+    #[test]
+    fn search_matches_token_prefixes() {
+        let db = db_with(&[let_item(&["example", "vector"]), let_item(&["example", "pi"])]);
+        let hits = db.search("vect", 10, None).expect("search");
+        let names: Vec<&str> = hits.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["vector"]);
+        assert!(db.search("pi", 10, None).expect("search").len() == 1);
+        assert!(db.search("p", 10, None).expect("search").len() == 1);
+        // no token starts with "q"
+        assert!(db.search("q", 10, None).expect("search").is_empty());
+    }
+
+    /// Multi-token queries implicitly AND: all token prefixes must occur.
+    #[test]
+    fn search_multi_token_is_implicit_and() {
+        let mut writer = DocDbWriter::open_memory().expect("open memory db");
+        let item = let_item(&["example", "add_overflow"]);
+        writer.insert_definition(&item).expect("insert item");
+        let db = DocDb::from_connection(writer.conn);
+
+        // Both prefixes occur in the name's tokens ("add", "overflow").
+        let hits = db.search("add ov", 10, None).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "add_overflow");
+
+        // One prefix occurs, the other does not.
+        assert!(db.search("add xyz", 10, None).expect("search").is_empty());
+        // Tokens in reverse order also match (AND is order-insensitive).
+        assert_eq!(db.search("ov add", 10, None).expect("search").len(), 1);
+    }
+
+    /// An empty or whitespace-only query is not an error: an empty list is returned.
+    #[test]
+    fn search_empty_query_returns_empty() {
+        let db = db_with(&[let_item(&["a", "f"])]);
+        assert!(db.search("", 10, None).expect("search").is_empty());
+        assert!(db.search("   ", 10, None).expect("search").is_empty());
+    }
+
+    /// The `kind` filter restricts results to one item kind.
+    #[test]
+    fn search_kind_filter() {
+        let db = db_with(&[
+            module_item(&["m"]),
+            let_item(&["m", "vec_push"]),
+            let_item(&["m", "vec_pop"]),
+        ]);
+        let all = db.search("vec", 10, None).expect("search");
+        assert_eq!(all.len(), 2);
+        let lets = db.search("vec", 10, Some(Kind::Let)).expect("search");
+        assert_eq!(lets.len(), 2);
+        let fns = db.search("vec", 10, Some(Kind::Fn)).expect("search");
+        assert!(fns.is_empty());
+        // A kind the query text does not match in yields no rows.
+        assert_eq!(db.search("m", 10, Some(Kind::Module)).expect("search").len(), 1);
+        assert_eq!(db.search("m", 10, Some(Kind::Fn)).expect("search").len(), 0);
+    }
+
+    /// `get_item_by_name_candidates` returns every match, exact qual names first.
+    #[test]
+    fn get_item_by_name_candidates_ambiguous_simple_name() {
+        let db = db_with(&[let_item(&["a", "f"]), let_item(&["b", "f"]), let_item(&["f"])]);
+        let rows = db
+            .get_item_by_name_candidates("f")
+            .expect("candidates");
+        let quals: Vec<&str> = rows.iter().map(|r| r.qual_name.as_str()).collect();
+        // The exact qual name "f" comes first, then the simple-name matches in (kind, name) order.
+        assert_eq!(quals, vec!["f", "a::f", "b::f"]);
+        let exact = db
+            .get_item_by_name_candidates("a::f")
+            .expect("candidates");
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].qual_name, "a::f");
+        assert!(db
+            .get_item_by_name_candidates("nope")
+            .expect("candidates")
+            .is_empty());
     }
 
     /// Builds a `Let` item from the segments of a qualifier path.
