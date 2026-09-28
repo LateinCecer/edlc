@@ -26,7 +26,6 @@ pub mod signature;
 pub mod config;
 #[cfg(feature = "ssr")]
 pub mod mcp;
-#[cfg(feature = "ssr")]
 pub mod server;
 
 #[cfg(feature = "hydrate")]

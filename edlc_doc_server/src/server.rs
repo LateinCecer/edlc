@@ -20,9 +20,12 @@
 //! These functions are called from the client (via Leptos server function machinery) and
 //! executed on the server, where they have access to the `DocDb` provided as context.
 
+#[cfg(feature = "ssr")]
 use std::sync::{Arc, Mutex};
 
-use edlc_doc_db::{DocDb, DocRow, Kind};
+#[cfg(feature = "ssr")]
+use edlc_doc_db::{DocDb, DocRow};
+use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// A documentation item summary, serializable for both SSR and client.
@@ -38,6 +41,82 @@ pub struct DocSummary {
     pub blob: String,
 }
 
+/// Error type returned by the documentation server functions. Serializable to both builds
+/// (it crosses the server->client wire and the hydration context).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DocError {
+    /// The documentation database could not be queried.
+    Db { message: String },
+    /// The requested item does not exist in the database.
+    ItemNotFound { name: String },
+    /// The requested module does not exist in the database.
+    ModuleNotFound { name: String },
+    /// The server function could not be reached or its request/response could not be
+    /// (de)serialized (client-side transport failures).
+    Request { message: String },
+    /// An unexpected internal error.
+    Internal { message: String },
+}
+
+impl std::fmt::Display for DocError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DocError::Db { message } => write!(f, "Documentation database error: {message}"),
+            DocError::ItemNotFound { name } => {
+                write!(f, "The documentation item '{name}' was not found.")
+            }
+            DocError::ModuleNotFound { name } => {
+                write!(f, "The module '{name}' was not found.")
+            }
+            DocError::Request { message } => {
+                write!(f, "Could not reach the documentation server: {message}")
+            }
+            DocError::Internal { message } => {
+                write!(f, "An unexpected error occurred: {message}")
+            }
+        }
+    }
+}
+
+impl FromServerFnError for DocError {
+    type Encoder = leptos::server_fn::codec::JsonEncoding;
+
+    fn from_server_fn_error(value: ServerFnErrorErr) -> Self {
+        match value {
+            ServerFnErrorErr::Request(message)
+            | ServerFnErrorErr::UnsupportedRequestMethod(message)
+            | ServerFnErrorErr::Serialization(message)
+            | ServerFnErrorErr::Deserialization(message)
+            | ServerFnErrorErr::Args(message)
+            | ServerFnErrorErr::MissingArg(message) => DocError::Request { message },
+            ServerFnErrorErr::Registration(message)
+            | ServerFnErrorErr::ServerError(message)
+            | ServerFnErrorErr::MiddlewareError(message)
+            | ServerFnErrorErr::Response(message) => DocError::Internal { message },
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+impl From<rusqlite::Error> for DocError {
+    fn from(e: rusqlite::Error) -> Self {
+        DocError::Db {
+            message: e.to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+impl<T> From<std::sync::PoisonError<T>> for DocError {
+    fn from(e: std::sync::PoisonError<T>) -> Self {
+        DocError::Internal {
+            message: format!("the documentation database lock was poisoned: {e}"),
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
 impl From<DocRow> for DocSummary {
     fn from(row: DocRow) -> Self {
         DocSummary {
@@ -58,67 +137,212 @@ impl From<DocRow> for DocSummary {
 pub type DbHandle = Arc<Mutex<DocDb>>;
 
 /// Search documentation items by full-text query.
-#[cfg(feature = "ssr")]
-pub async fn search_docs(query: String, limit: usize) -> Result<Vec<DocSummary>, String> {
-    let db = leptos::prelude::use_context::<DbHandle>()
-        .ok_or("database not available in server context")?;
-    let rows = tokio::task::spawn_blocking(move || {
-        let guard = db.lock().map_err(|e| e.to_string())?;
-        guard.search(&query, limit).map_err(|e| e.to_string())
+///
+/// An empty query or a query with no matches is not an error: an empty list is returned.
+#[server]
+pub async fn search_docs(query: String, limit: usize) -> Result<Vec<DocSummary>, DocError> {
+    let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
+        message: "database not available in server context".into(),
+    })?;
+    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<DocRow>, DocError> {
+        let guard = db.lock()?;
+        Ok(guard.search(&query, limit)?)
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| DocError::Internal {
+        message: e.to_string(),
+    })??;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// Fetch a single documentation item by its name (simple or qualified).
-#[cfg(feature = "ssr")]
-pub async fn get_doc(name: String) -> Result<Option<DocSummary>, String> {
-    let db = leptos::prelude::use_context::<DbHandle>()
-        .ok_or("database not available in server context")?;
-    let rows = tokio::task::spawn_blocking(move || {
-        let guard = db.lock().map_err(|e| e.to_string())?;
-        guard.list_items(None).map_err(|e| e.to_string())
+///
+/// Returns [`DocError::ItemNotFound`] when no item matches (including an empty name).
+#[server]
+pub async fn get_doc(name: String) -> Result<DocSummary, DocError> {
+    let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
+        message: "database not available in server context".into(),
+    })?;
+    let query = name.clone();
+    let row = tokio::task::spawn_blocking(move || -> Result<Option<DocRow>, DocError> {
+        let guard = db.lock()?;
+        Ok(guard.get_item_by_name(&query)?)
     })
     .await
-    .map_err(|e| e.to_string())??;
-    Ok(rows
-        .into_iter()
-        .find(|row| row.qual_name == name || row.name == name)
-        .map(Into::into))
+    .map_err(|e| DocError::Internal {
+        message: e.to_string(),
+    })??;
+    row.map(Into::into)
+        .ok_or_else(|| DocError::ItemNotFound { name })
 }
 
 /// List all modules in the documentation database.
-#[cfg(feature = "ssr")]
-pub async fn list_modules() -> Result<Vec<DocSummary>, String> {
-    let db = leptos::prelude::use_context::<DbHandle>()
-        .ok_or("database not available in server context")?;
-    let rows = tokio::task::spawn_blocking(move || {
-        let guard = db.lock().map_err(|e| e.to_string())?;
-        guard.modules().map_err(|e| e.to_string())
+#[server]
+pub async fn list_modules() -> Result<Vec<DocSummary>, DocError> {
+    let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
+        message: "database not available in server context".into(),
+    })?;
+    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<DocRow>, DocError> {
+        let guard = db.lock()?;
+        Ok(guard.modules()?)
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| DocError::Internal {
+        message: e.to_string(),
+    })??;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
 /// List all items belonging to a specific module.
-#[cfg(feature = "ssr")]
-pub async fn get_module_items(name: String) -> Result<Vec<DocSummary>, String> {
-    let db = leptos::prelude::use_context::<DbHandle>()
-        .ok_or("database not available in server context")?;
-    let rows = tokio::task::spawn_blocking(move || {
-        let guard = db.lock().map_err(|e| e.to_string())?;
-        guard.list_items(None).map_err(|e| e.to_string())
+///
+/// Returns [`DocError::ModuleNotFound`] when the module does not exist. An existing module
+/// without items is not an error: an empty list is returned.
+#[server]
+pub async fn get_module_items(name: String) -> Result<Vec<DocSummary>, DocError> {
+    let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
+        message: "database not available in server context".into(),
+    })?;
+    let query = name.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<DocRow>, DocError> {
+        let guard = db.lock()?;
+        let rows = guard.list_module_items(&query)?;
+        if rows.is_empty() && !guard.modules()?.iter().any(|m| m.qual_name == query) {
+            return Err(DocError::ModuleNotFound { name: query });
+        }
+        Ok(rows)
     })
     .await
-    .map_err(|e| e.to_string())??;
-    Ok(rows
-        .into_iter()
-        .filter(|row| {
-            row.module.as_deref() == Some(name.as_str())
-                || row.qual_name.starts_with(&format!("{}::", name))
-        })
-        .map(Into::into)
-        .collect())
+    .map_err(|e| DocError::Internal {
+        message: e.to_string(),
+    })??;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_messages() {
+        assert_eq!(
+            DocError::Db {
+                message: "boom".into()
+            }
+            .to_string(),
+            "Documentation database error: boom"
+        );
+        assert_eq!(
+            DocError::ItemNotFound {
+                name: "example::foo".into()
+            }
+            .to_string(),
+            "The documentation item 'example::foo' was not found."
+        );
+        assert_eq!(
+            DocError::ModuleNotFound {
+                name: "example".into()
+            }
+            .to_string(),
+            "The module 'example' was not found."
+        );
+        assert_eq!(
+            DocError::Request {
+                message: "net down".into()
+            }
+            .to_string(),
+            "Could not reach the documentation server: net down"
+        );
+        assert_eq!(
+            DocError::Internal {
+                message: "oops".into()
+            }
+            .to_string(),
+            "An unexpected error occurred: oops"
+        );
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let errors = [
+            DocError::Db {
+                message: "boom".into(),
+            },
+            DocError::ItemNotFound {
+                name: "example::foo".into(),
+            },
+            DocError::ModuleNotFound {
+                name: "example".into(),
+            },
+            DocError::Request {
+                message: "net down".into(),
+            },
+            DocError::Internal {
+                message: "oops".into(),
+            },
+        ];
+        for err in &errors {
+            let json = serde_json::to_string(err).unwrap();
+            assert_eq!(&serde_json::from_str::<DocError>(&json).unwrap(), err);
+        }
+    }
+
+    #[test]
+    fn serde_wire_shape() {
+        assert_eq!(
+            serde_json::to_string(&DocError::ItemNotFound { name: "x".into() }).unwrap(),
+            r#"{"kind":"item_not_found","name":"x"}"#
+        );
+    }
+
+    #[test]
+    fn from_server_fn_error_maps_transport_failures_to_request() {
+        for (input, expected) in [
+            (
+                ServerFnErrorErr::Request("net down".into()),
+                DocError::Request {
+                    message: "net down".into(),
+                },
+            ),
+            (
+                ServerFnErrorErr::UnsupportedRequestMethod("bad method".into()),
+                DocError::Request {
+                    message: "bad method".into(),
+                },
+            ),
+            (
+                ServerFnErrorErr::Deserialization("bad json".into()),
+                DocError::Request {
+                    message: "bad json".into(),
+                },
+            ),
+        ] {
+            assert_eq!(DocError::from_server_fn_error(input), expected);
+        }
+    }
+
+    #[test]
+    fn from_server_fn_error_maps_internal_failures_to_internal() {
+        for (input, message) in [
+            (
+                ServerFnErrorErr::Registration("poisoned".into()),
+                "poisoned",
+            ),
+            (ServerFnErrorErr::ServerError("boom".into()), "boom"),
+            (
+                ServerFnErrorErr::MiddlewareError("middleware down".into()),
+                "middleware down",
+            ),
+            (
+                ServerFnErrorErr::Response("bad response".into()),
+                "bad response",
+            ),
+        ] {
+            assert_eq!(
+                DocError::from_server_fn_error(input),
+                DocError::Internal {
+                    message: message.into()
+                }
+            );
+        }
+    }
 }

@@ -33,6 +33,7 @@
     --kind-const: #bd8113;
     --kind-module: #5d88a1;
     --muted: #6a6a6a;
+    --error: #c0392b;
 
     /* Syntax highlighting tokens (light theme) */
     --tok-keyword: #a81b72;
@@ -64,6 +65,7 @@
         --kind-const: #bd8113;
         --kind-module: #abb0ab;
         --muted: #9a9a9a;
+        --error: #f2705f;
 
         /* Syntax highlighting tokens (dark theme, ported from edlc_docs) */
         --tok-keyword: #a81b72;
@@ -380,4 +382,29 @@ a:hover {
     font-family: monospace;
     font-size: 0.85em;
     overflow-x: auto;
+}
+
+/* Error page */
+
+.error-page {
+    padding: 20px 25px;
+    margin-bottom: 20px;
+    border: 1px solid var(--error);
+    border-radius: 5px;
+    background: var(--code-bg);
+}
+
+.error-page h1 {
+    margin-bottom: 10px;
+}
+
+.error-message {
+    font-weight: bold;
+    color: var(--error);
+    margin-bottom: 10px;
+}
+
+.error-page p {
+    color: var(--muted);
+    margin-bottom: 10px;
 }

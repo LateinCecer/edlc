@@ -19,7 +19,7 @@
 //!
 //! [`DocDbWriter`] implements [`DocGenerator`] and writes [`Item`]s produced by the EDL compiler
 //! into a single-file SQLite database. [`DocDb`] is the read handle used by servers to query the
-//! database, including full-text search via an FTS5 index.
+//! database: full-text search via an FTS5 index, lookup by name, and per-module listing.
 //!
 //! This crate contains no compile logic — an implementor links `edlc_core`, drives a compile, and
 //! calls `compiler.generate_docs(&mut DocDbWriter::open(path)?)`.
@@ -179,7 +179,8 @@ impl DocDb {
     pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<DocRow>> {
         // Sanitize: FTS5 query syntax can be injected; wrap in quotes for a phrase/term search.
         let sanitized = sanitize_fts(query);
-        let sql = "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.blob \
+        let sql =
+            "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.blob \
                    FROM search_index s JOIN items i ON s.rowid = i.id \
                    WHERE search_index MATCH ?1 \
                    ORDER BY rank LIMIT ?2";
@@ -195,6 +196,34 @@ impl DocDb {
         let mut stmt = self.conn.prepare(sql)?;
         let mut rows = stmt.query_map(params![id], row_mapper())?;
         rows.next().transpose()
+    }
+
+    /// Fetches a single item by name. An exact `qual_name` match takes precedence over a simple
+    /// `name` match; on a simple-name match the first row in `(kind, name)` order is returned.
+    /// Returns `Ok(None)` when no item matches.
+    pub fn get_item_by_name(&self, name: &str) -> rusqlite::Result<Option<DocRow>> {
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+                   FROM items WHERE qual_name = ?1 OR name = ?1 \
+                   ORDER BY (qual_name != ?1), kind, name LIMIT 1";
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query_map(params![name], row_mapper())?;
+        rows.next().transpose()
+    }
+
+    /// Lists all items belonging to `module` — items directly inside it plus items of nested
+    /// submodules — ordered by `(kind, name)`.
+    pub fn list_module_items(&self, module: &str) -> rusqlite::Result<Vec<DocRow>> {
+        let escaped = module
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let prefix = format!("{escaped}::%");
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+                   FROM items WHERE module = ?1 OR qual_name LIKE ?2 ESCAPE '\\' \
+                   ORDER BY kind, name";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![module, prefix], row_mapper())?;
+        rows.collect()
     }
 
     /// Lists items, optionally filtered by kind. Ordered by `(kind, name)`.
@@ -308,11 +337,11 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edlc_core::lexer::SrcPos;
     use edlc_core::prelude::{
         EnvDoc, FuncParamsDoc, LetDoc, Modifiers, ModuleDoc, PortableModuleSrc, TypeDefDoc,
         TypeDefVariant, TypeDoc,
     };
-    use edlc_core::lexer::SrcPos;
 
     /// Builds a small set of `Item`s covering every kind, writes them, reopens read-only, and
     /// verifies search + `blob` round-trips back to the same `Item` via serde_json.
@@ -342,10 +371,7 @@ mod tests {
                 doc: "A vector type.".to_string(),
                 env: EnvDoc { params: vec![] },
                 params: FuncParamsDoc::default(),
-                variant: TypeDefVariant::Alias(TypeDoc::Base(
-                    "usize".to_string().into(),
-                    None,
-                )),
+                variant: TypeDefVariant::Alias(TypeDoc::Base("usize".to_string().into(), None)),
             }),
         ];
         let original: Vec<(Kind, String)> = items
@@ -364,8 +390,10 @@ mod tests {
 
         // search for "pi" hits the let
         let hits = db.search("pi", 10).expect("search");
-        assert!(hits.iter().any(|r| r.kind == Kind::Let && r.name == "pi"),
-            "search for 'pi' should find the let: {hits:?}");
+        assert!(
+            hits.iter().any(|r| r.kind == Kind::Let && r.name == "pi"),
+            "search for 'pi' should find the let: {hits:?}"
+        );
 
         // every inserted kind is present in list_items(None)
         let all = db.list_items(None).expect("list_items");
@@ -392,13 +420,17 @@ mod tests {
             // `Item` serializes externally tagged, e.g. {"GlobalVar": {...}}. The inner doc has a
             // `name` field (a QualifierName serialized as {"path": [...]}). Descend one level and
             // check the inner object carries the expected module name.
-            let inner = v.as_object()
+            let inner = v
+                .as_object()
                 .and_then(|m| m.values().next())
                 .unwrap_or_else(|| panic!("item {i} blob has no variant wrapper"));
-            let name = inner.get("name")
+            let name = inner
+                .get("name")
                 .unwrap_or_else(|| panic!("item {i} blob has no name field"));
-            assert!(name.to_string().contains("example"),
-                "item {i} blob name {name} should contain 'example'");
+            assert!(
+                name.to_string().contains("example"),
+                "item {i} blob name {name} should contain 'example'"
+            );
         }
 
         // modules() returns only module rows
@@ -413,5 +445,119 @@ mod tests {
         assert_eq!(sanitize_fts("foo"), "\"foo\"");
         assert_eq!(sanitize_fts("foo OR bar"), "\"foo OR bar\"");
         assert_eq!(sanitize_fts("a\"b"), "\"a\"\"b\"");
+    }
+
+    /// Builds a `Let` item from the segments of a qualifier path.
+    fn let_item(parts: &[&str]) -> Item {
+        Item::from(LetDoc {
+            name: parts
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .into(),
+            src: PortableModuleSrc::File("test.eq".to_string()),
+            pos: SrcPos::new(0, 0, 0),
+            doc: String::new(),
+            ty: TypeDoc::Base("f32".to_string().into(), None),
+            ms: Modifiers::default(),
+        })
+    }
+
+    /// Builds a `Module` item from the segments of a qualifier path.
+    fn module_item(parts: &[&str]) -> Item {
+        Item::from(ModuleDoc {
+            name: parts
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .into(),
+            doc: String::new(),
+        })
+    }
+
+    /// Writes `items` into an in-memory database and returns a read handle over it.
+    fn db_with(items: &[Item]) -> DocDb {
+        let mut writer = DocDbWriter::open_memory().expect("open memory db");
+        for item in items {
+            writer.insert_definition(item).expect("insert item");
+        }
+        DocDb::from_connection(writer.conn)
+    }
+
+    /// `get_item_by_name` finds an item by its exact qualified name.
+    #[test]
+    fn get_item_by_name_exact_qual_name() {
+        let db = db_with(&[let_item(&["a", "b", "f"])]);
+        let row = db.get_item_by_name("a::b::f").expect("get_item_by_name");
+        let row = row.expect("exact qual name should match");
+        assert_eq!(row.qual_name, "a::b::f");
+        assert_eq!(row.name, "f");
+        assert_eq!(row.module.as_deref(), Some("a::b"));
+    }
+
+    /// `get_item_by_name` falls back to a simple-name match when no qual name matches.
+    #[test]
+    fn get_item_by_name_falls_back_to_simple_name() {
+        let db = db_with(&[let_item(&["a", "f"])]);
+        let row = db.get_item_by_name("f").expect("get_item_by_name");
+        let row = row.expect("simple name should match");
+        assert_eq!(row.qual_name, "a::f");
+        assert_eq!(row.name, "f");
+    }
+
+    /// An exact `qual_name` match wins over a colliding simple-`name` match.
+    #[test]
+    fn get_item_by_name_prefers_exact_qual_name_over_simple() {
+        let db = db_with(&[let_item(&["a", "f"]), let_item(&["f"])]);
+        let row = db.get_item_by_name("f").expect("get_item_by_name");
+        let row = row.expect("name should match");
+        assert_eq!(row.qual_name, "f");
+    }
+
+    /// `get_item_by_name` returns `Ok(None)` for a name that matches no item.
+    #[test]
+    fn get_item_by_name_unknown_returns_none() {
+        let db = db_with(&[let_item(&["a", "f"])]);
+        let row = db.get_item_by_name("nope").expect("get_item_by_name");
+        assert!(row.is_none());
+    }
+
+    /// `list_module_items` returns items directly in the module plus items of nested submodules.
+    #[test]
+    fn list_module_items_includes_nested_submodules() {
+        let db = db_with(&[
+            module_item(&["m"]),
+            let_item(&["m", "f"]),
+            module_item(&["m", "s"]),
+            let_item(&["m", "s", "g"]),
+        ]);
+        let rows = db.list_module_items("m").expect("list_module_items");
+        let quals: Vec<&str> = rows.iter().map(|r| r.qual_name.as_str()).collect();
+        assert_eq!(quals, vec!["m::f", "m::s::g", "m::s"]);
+        let nested = db.list_module_items("m::s").expect("list_module_items");
+        let quals: Vec<&str> = nested.iter().map(|r| r.qual_name.as_str()).collect();
+        assert_eq!(quals, vec!["m::s::g"]);
+    }
+
+    /// `list_module_items` returns an empty list for a module with no items.
+    #[test]
+    fn list_module_items_unknown_module_returns_empty() {
+        let db = db_with(&[module_item(&["m"]), let_item(&["m", "f"])]);
+        let rows = db.list_module_items("nope").expect("list_module_items");
+        assert!(rows.is_empty());
+    }
+
+    /// `_` in a module name is not treated as a LIKE single-char wildcard.
+    #[test]
+    fn list_module_items_escapes_underscore_in_like() {
+        let db = db_with(&[
+            module_item(&["my_mod"]),
+            let_item(&["my_mod", "x"]),
+            module_item(&["myXmod"]),
+            let_item(&["myXmod", "x"]),
+        ]);
+        let rows = db.list_module_items("my_mod").expect("list_module_items");
+        let quals: Vec<&str> = rows.iter().map(|r| r.qual_name.as_str()).collect();
+        assert_eq!(quals, vec!["my_mod::x"]);
     }
 }

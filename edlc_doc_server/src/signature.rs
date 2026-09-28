@@ -47,11 +47,8 @@ pub const C_BOOL: &str = "tok-bool-literal";
 /// Core language types and keywords that have no documentation page and must not be linked.
 /// Mirrors the `CORE_*` constants in `edlc_core::lexer`.
 const UNLINKABLE: &[&str] = &[
-    "bool", "str", "char",
-    "u8", "u16", "u32", "u64", "u128", "usize",
-    "i8", "i16", "i32", "i64", "i128", "isize",
-    "f32", "f64",
-    "Self",
+    "bool", "str", "char", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64",
+    "i128", "isize", "f32", "f64", "Self",
 ];
 
 /// Context for deciding which references can be linked: the names of generic (env) parameters
@@ -75,7 +72,10 @@ impl Ctx {
                 }
             }
         }
-        Ctx { type_params, const_params }
+        Ctx {
+            type_params,
+            const_params,
+        }
     }
 }
 
@@ -623,7 +623,9 @@ mod tests {
     fn base(name: &str) -> TypeDoc {
         TypeDoc::Base(
             TypeNameDoc(vec![TypeNameSegmentDoc {
-                name: QualifierName { path: vec![name.to_string()] },
+                name: QualifierName {
+                    path: vec![name.to_string()],
+                },
                 parameters: EnvInstDoc::default(),
                 pos: None,
             }]),
@@ -639,9 +641,15 @@ mod tests {
         async_return: bool,
     ) -> Item {
         Item::Func(FuncDoc {
-            name: QualifierName { path: vec!["m".into(), "f".into()] },
+            name: QualifierName {
+                path: vec!["m".into(), "f".into()],
+            },
             src: PortableModuleSrc::File("x.edl".into()),
-            pos: SrcPos { line: 1, col: 1, size: 1 },
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
             doc: String::new(),
             env: EnvDoc { params: env },
             params: FuncParamsDoc(params),
@@ -655,7 +663,11 @@ mod tests {
     fn param(name: &str, ty: TypeDoc, ms: Vec<Modifier>) -> FuncParamDoc {
         FuncParamDoc {
             name: name.to_string(),
-            pos: SrcPos { line: 1, col: 1, size: 1 },
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
             ty,
             ms: Modifiers(ms),
         }
@@ -664,11 +676,21 @@ mod tests {
     #[test]
     fn let_tokens() {
         let item = Item::GlobalVar(LetDoc {
-            name: QualifierName { path: vec!["m".into(), "v".into()] },
+            name: QualifierName {
+                path: vec!["m".into(), "v".into()],
+            },
             src: PortableModuleSrc::File("x.edl".into()),
-            pos: SrcPos { line: 1, col: 1, size: 1 },
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
             doc: String::new(),
-            ty: TypeDoc::Array(Box::new(base("u32")), DocConstValue::Literal(EdlLiteralValue::U8(5)), None),
+            ty: TypeDoc::Array(
+                Box::new(base("u32")),
+                DocConstValue::Literal(EdlLiteralValue::U8(5)),
+                None,
+            ),
             ms: Modifiers(vec![Modifier::Mut]),
         });
         let span = item_span(&item);
@@ -679,50 +701,91 @@ mod tests {
     fn func_tokens_async() {
         let item = func(
             vec![
-                EnvParamDoc::Type { name: "T".into(), pos: None },
-                EnvParamDoc::Const { name: "N".into(), pos: None, ty: base("u32") },
+                EnvParamDoc::Type {
+                    name: "T".into(),
+                    pos: None,
+                },
+                EnvParamDoc::Const {
+                    name: "N".into(),
+                    pos: None,
+                    ty: base("u32"),
+                },
             ],
-            vec![param("x", base("T"), vec![Modifier::Mut]), param("y", base("str"), vec![])],
+            vec![
+                param("x", base("T"), vec![Modifier::Mut]),
+                param("y", base("str"), vec![]),
+            ],
             TypeDoc::Tuple(vec![base("T"), base("u32")], None),
             vec![Modifier::Async],
             true,
         );
         let span = item_span(&item);
         // Mirrors core's Display, including the trailing comma in the tuple type.
-        assert_eq!(span_text(&span), "async fn f<T, const N: u32>(mut x: T, y: str) -> async (T, u32, )");
+        assert_eq!(
+            span_text(&span),
+            "async fn f<T, const N: u32>(mut x: T, y: str) -> async (T, u32, )"
+        );
     }
 
     #[test]
     fn type_def_tokens() {
         let item = Item::TypeDef(TypeDefDoc {
-            name: QualifierName { path: vec!["m".into(), "S".into()] },
+            name: QualifierName {
+                path: vec!["m".into(), "S".into()],
+            },
             src: PortableModuleSrc::File("x.edl".into()),
-            pos: SrcPos { line: 1, col: 1, size: 1 },
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
             doc: String::new(),
-            env: EnvDoc { params: vec![EnvParamDoc::Const { name: "N".into(), pos: None, ty: base("u32") }] },
+            env: EnvDoc {
+                params: vec![EnvParamDoc::Const {
+                    name: "N".into(),
+                    pos: None,
+                    ty: base("u32"),
+                }],
+            },
             params: FuncParamsDoc(vec![param("n", base("u32"), vec![])]),
             variant: TypeDefVariant::Struct(StructTypeDoc::Named(vec![StructMemberDoc {
                 name: "x".into(),
-                pos: SrcPos { line: 1, col: 1, size: 1 },
+                pos: SrcPos {
+                    line: 1,
+                    col: 1,
+                    size: 1,
+                },
                 doc: String::new(),
-                ty: TypeDoc::Array(Box::new(base("u8")), DocConstValue::Const(TypeNameDoc(vec![TypeNameSegmentDoc {
-                    name: QualifierName { path: vec!["N".into()] },
-                    parameters: EnvInstDoc::default(),
-                    pos: None,
-                }])), None),
+                ty: TypeDoc::Array(
+                    Box::new(base("u8")),
+                    DocConstValue::Const(TypeNameDoc(vec![TypeNameSegmentDoc {
+                        name: QualifierName {
+                            path: vec!["N".into()],
+                        },
+                        parameters: EnvInstDoc::default(),
+                        pos: None,
+                    }])),
+                    None,
+                ),
                 modifiers: Modifiers(vec![Modifier::Shared]),
             }])),
         });
         let span = item_span(&item);
         // Mirrors core's Display, including the missing parentheses around the function-style
         // parameters and the double space after the member modifier.
-        assert_eq!(span_text(&span), "type S<const N: u32>n: u32 = struct { shared  x: [u8; N] }");
+        assert_eq!(
+            span_text(&span),
+            "type S<const N: u32>n: u32 = struct { shared  x: [u8; N] }"
+        );
     }
 
     #[test]
     fn type_links() {
         let item = func(
-            vec![EnvParamDoc::Type { name: "T".into(), pos: None }],
+            vec![EnvParamDoc::Type {
+                name: "T".into(),
+                pos: None,
+            }],
             vec![
                 param("a", base("T"), vec![]),
                 param("b", base("u32"), vec![]),
@@ -731,12 +794,16 @@ mod tests {
                     TypeDoc::Base(
                         TypeNameDoc(vec![
                             TypeNameSegmentDoc {
-                                name: QualifierName { path: vec!["m".into(), "T".into()] },
+                                name: QualifierName {
+                                    path: vec!["m".into(), "T".into()],
+                                },
                                 parameters: EnvInstDoc::default(),
                                 pos: None,
                             },
                             TypeNameSegmentDoc {
-                                name: QualifierName { path: vec!["U".into()] },
+                                name: QualifierName {
+                                    path: vec!["U".into()],
+                                },
                                 parameters: EnvInstDoc::default(),
                                 pos: None,
                             },
@@ -758,14 +825,22 @@ mod tests {
         // `T` is a generic parameter (no link), `u32` is a core type (no link); the
         // qualified references link to their item pages.
         assert_eq!(links.len(), 2);
-        assert_eq!(links[0], ("m::T::U".to_string(), Some("/item/m::T::U".to_string())));
-        assert_eq!(links[1], ("m::T".to_string(), Some("/item/m::T".to_string())));
+        assert_eq!(
+            links[0],
+            ("m::T::U".to_string(), Some("/item/m::T::U".to_string()))
+        );
+        assert_eq!(
+            links[1],
+            ("m::T".to_string(), Some("/item/m::T".to_string()))
+        );
     }
 
     #[test]
     fn module_links() {
         let item = Item::Module(ModuleDoc {
-            name: QualifierName { path: vec!["a".into(), "b".into()] },
+            name: QualifierName {
+                path: vec!["a".into(), "b".into()],
+            },
             doc: String::new(),
         });
         let span = item_span(&item);
@@ -773,16 +848,25 @@ mod tests {
             .into_iter()
             .filter(|(_, l)| l.is_some())
             .collect();
-        assert_eq!(links, vec![("a::b".to_string(), Some("/module/a::b".to_string()))]);
+        assert_eq!(
+            links,
+            vec![("a::b".to_string(), Some("/module/a::b".to_string()))]
+        );
         assert_eq!(span_text(&span), "mod a::b");
     }
 
     #[test]
     fn elicit_and_refs() {
         let item = Item::GlobalVar(LetDoc {
-            name: QualifierName { path: vec!["v".into()] },
+            name: QualifierName {
+                path: vec!["v".into()],
+            },
             src: PortableModuleSrc::File("x.edl".into()),
-            pos: SrcPos { line: 1, col: 1, size: 1 },
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
             doc: String::new(),
             ty: TypeDoc::MutRef(Box::new(TypeDoc::Elicit), None),
             ms: Modifiers(vec![]),

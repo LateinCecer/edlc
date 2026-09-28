@@ -20,57 +20,17 @@
 //! Layout inspired by docs.rs: a top search bar, a left sidebar with module navigation, and a
 //! main content area showing item signatures and doc text.
 
-use leptos::prelude::*;
 use leptos::hydration::{AutoReload, HydrationScripts};
+use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
-    components::{Route, Router, Routes, A, Outlet},
-    hooks::{use_query_map, use_params_map},
-    StaticSegment, ParamSegment,
+    components::{Route, Router, Routes, A},
+    hooks::{use_navigate, use_params_map, use_query_map},
+    ParamSegment, StaticSegment,
 };
 
-// DocSummary is shared between SSR and hydrate builds.
-#[cfg(feature = "ssr")]
-use crate::server::DocSummary;
+use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
 use crate::signature::SignatureView;
-
-#[cfg(not(feature = "ssr"))]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-struct DocSummary {
-    pub id: i64,
-    pub kind: String,
-    pub name: String,
-    pub qual_name: String,
-    pub module: Option<String>,
-    pub signature: String,
-    pub doc_text: String,
-    pub blob: String,
-}
-
-// On the client side (hydrate), server functions are stubs that call the server.
-// The `server` module is only available with the `ssr` feature, so we provide
-// client-side stubs here for the hydrate build.
-#[cfg(not(feature = "ssr"))]
-mod server_stubs {
-    use super::DocSummary;
-    pub async fn search_docs(_query: String, _limit: usize) -> Result<Vec<DocSummary>, String> {
-        Err("server functions require SSR".to_string())
-    }
-    pub async fn get_doc(_name: String) -> Result<Option<DocSummary>, String> {
-        Err("server functions require SSR".to_string())
-    }
-    pub async fn list_modules() -> Result<Vec<DocSummary>, String> {
-        Err("server functions require SSR".to_string())
-    }
-    pub async fn get_module_items(_name: String) -> Result<Vec<DocSummary>, String> {
-        Err("server functions require SSR".to_string())
-    }
-}
-
-#[cfg(not(feature = "ssr"))]
-use server_stubs::{search_docs, get_doc, list_modules, get_module_items};
-#[cfg(feature = "ssr")]
-use crate::server::{search_docs, get_doc, list_modules, get_module_items};
 
 /// The HTML shell. Called from the server to produce the initial HTML document.
 #[cfg(feature = "ssr")]
@@ -111,6 +71,7 @@ pub fn App() -> impl IntoView {
                             <Route path=StaticSegment("search") view=SearchPage/>
                             <Route path=(StaticSegment("item"), ParamSegment("name")) view=ItemPage/>
                             <Route path=(StaticSegment("module"), ParamSegment("name")) view=ModulePage/>
+                            <Route path=StaticSegment("error") view=ErrorPage/>
                         </Routes>
                     </main>
                 </div>
@@ -119,12 +80,62 @@ pub fn App() -> impl IntoView {
     }
 }
 
+// --- Error display ---
+
+/// Shared error display, rendered inline where a resource failed (SSR) and on the `/error` page.
+#[component]
+fn ErrorView(message: String) -> impl IntoView {
+    view! {
+        <div class="error-page">
+            <h1>"Error"</h1>
+            <p class="error-message">{message}</p>
+            <p>"Something went wrong while loading the documentation. Please try again, or go back to the home page."</p>
+            <A href="/">"Back to home"</A>
+        </div>
+    }
+}
+
+/// Dedicated error page at `/error?message=...`.
+#[component]
+fn ErrorPage() -> impl IntoView {
+    let query_map = use_query_map();
+    let message = query_map
+        .get()
+        .get("message")
+        .unwrap_or_else(|| "An unknown error occurred.".to_string());
+
+    view! {
+        <ErrorView message={message}/>
+    }
+}
+
+/// On the client, navigates to `/error?message=<percent-encoded>` whenever the given reader
+/// yields an error message. Effects are disabled in the `ssr` build, so the SSR output (which
+/// renders [`ErrorView`] inline) is unaffected.
+fn redirect_on_error(read: impl Fn() -> Option<String> + 'static) {
+    let navigate = use_navigate();
+    Effect::new(move || {
+        if let Some(message) = read() {
+            navigate(
+                &format!("/error?message={}", urlencoding::encode(&message)),
+                Default::default(),
+            );
+        }
+    });
+}
+
 // --- Sidebar ---
 
 /// Left sidebar showing all modules (like docs.rs crate navigation).
 #[component]
 fn Sidebar() -> impl IntoView {
-    let modules = Resource::new(move || (), |_| async { list_modules().await.unwrap_or_default() });
+    let modules = Resource::new(move || (), |_| list_modules());
+    redirect_on_error(move || {
+        modules
+            .get()
+            .and_then(|res| res.err())
+            .map(|e| e.to_string())
+    });
 
     view! {
         <aside class="sidebar">
@@ -132,21 +143,25 @@ fn Sidebar() -> impl IntoView {
                 <h1>"EDL Docs"</h1>
             </div>
             <Suspense fallback=|| "Loading...".into_view()>
-                <ul class="module-list">
-                    {move || {
-                        modules.get().map(|mods| {
-                            mods.into_iter().map(|m| {
-                                view! {
-                                    <li>
-                                        <A href=format!("/module/{}", m.qual_name)>
-                                            {m.qual_name}
-                                        </A>
-                                    </li>
-                                }
-                            }).collect::<Vec<_>>()
-                        })
-                    }}
-                </ul>
+                {move || {
+                    modules.get().map(|res| match res {
+                        Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
+                        Ok(mods) => view! {
+                            <ul class="module-list">
+                                {mods.into_iter().map(|m| {
+                                    view! {
+                                        <li>
+                                            <A href=format!("/module/{}", m.qual_name)>
+                                                {m.qual_name}
+                                            </A>
+                                        </li>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </ul>
+                        }
+                        .into_any(),
+                    })
+                }}
             </Suspense>
         </aside>
     }
@@ -182,7 +197,13 @@ fn SearchBar() -> impl IntoView {
 /// Home page: shows a welcome message and module list.
 #[component]
 fn HomePage() -> impl IntoView {
-    let modules = Resource::new(move || (), |_| async { list_modules().await.unwrap_or_default() });
+    let modules = Resource::new(move || (), |_| list_modules());
+    redirect_on_error(move || {
+        modules
+            .get()
+            .and_then(|res| res.err())
+            .map(|e| e.to_string())
+    });
 
     view! {
         <div class="home">
@@ -191,28 +212,29 @@ fn HomePage() -> impl IntoView {
             <h2>"Modules"</h2>
             <Suspense fallback=|| "Loading...".into_view()>
                 {move || {
-                    modules.get().map(|mods| {
-                        if mods.is_empty() {
+                    modules.get().map(|res| match res {
+                        Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
+                        Ok(mods) if mods.is_empty() => {
                             view! { <p>"No modules found."</p> }.into_any()
-                        } else {
-                            view! {
-                                <ul class="module-grid">
-                                    {mods.into_iter().map(|m| {
-                                        let desc = m.doc_text.clone();
-                                        let name = m.qual_name.clone();
-                                        let has_desc = !desc.is_empty();
-                                        view! {
-                                            <li>
-                                                <A href=format!("/module/{}", name)>{name.clone()}</A>
-                                                <Show when=move || has_desc>
-                                                    <p class="module-desc">{desc.clone()}</p>
-                                                </Show>
-                                            </li>
-                                        }
-                                    }).collect::<Vec<_>>()}
-                                </ul>
-                            }.into_any()
                         }
+                        Ok(mods) => view! {
+                            <ul class="module-grid">
+                                {mods.into_iter().map(|m| {
+                                    let desc = m.doc_text.clone();
+                                    let name = m.qual_name.clone();
+                                    let has_desc = !desc.is_empty();
+                                    view! {
+                                        <li>
+                                            <A href=format!("/module/{}", name)>{name.clone()}</A>
+                                            <Show when=move || has_desc>
+                                                <p class="module-desc">{desc.clone()}</p>
+                                            </Show>
+                                        </li>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </ul>
+                        }
+                        .into_any(),
                     })
                 }}
             </Suspense>
@@ -225,18 +247,28 @@ fn HomePage() -> impl IntoView {
 fn SearchPage() -> impl IntoView {
     let query_map = use_query_map();
     let query = Signal::derive(move || {
-        query_map.get().get("q").map(|s| s.clone()).unwrap_or_default()
+        query_map
+            .get()
+            .get("q")
+            .map(|s| s.clone())
+            .unwrap_or_default()
     });
     let results = Resource::new(
         move || query.get(),
         move |q| async move {
             if q.is_empty() {
-                Vec::new()
+                Ok(Vec::new())
             } else {
-                search_docs(q, 50).await.unwrap_or_default()
+                search_docs(q, 50).await
             }
         },
     );
+    redirect_on_error(move || {
+        results
+            .get()
+            .and_then(|res| res.err())
+            .map(|e| e.to_string())
+    });
 
     view! {
         <div class="search-results">
@@ -251,35 +283,36 @@ fn SearchPage() -> impl IntoView {
             }}
             <Suspense fallback=|| "Searching...".into_view()>
                 {move || {
-                    results.get().map(|res| {
-                        if res.is_empty() {
+                    results.get().map(|res| match res {
+                        Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
+                        Ok(res) if res.is_empty() => {
                             view! { <p>"No results found."</p> }.into_any()
-                        } else {
-                            view! {
-                                <ul class="result-list">
-                                    {res.into_iter().map(|item| {
-                                        let doc = item.doc_text.clone();
-                                        let has_doc = !doc.is_empty();
-                                        view! {
-                                            <li class="result-item">
-                                                <A href=format!("/item/{}", item.qual_name)>
-                                                    <span class="result-kind">{item.kind.clone()}</span>
-                                                    <span class="result-name">{item.name.clone()}</span>
-                                                </A>
-                                                <SignatureView
-                                                    blob=item.blob.clone()
-                                                    plain=item.signature.clone()
-                                                    class="result-signature"
-                                                />
-                                                <Show when=move || has_doc>
-                                                    <p class="result-doc">{doc.clone()}</p>
-                                                </Show>
-                                            </li>
-                                        }
-                                    }).collect::<Vec<_>>()}
-                                </ul>
-                            }.into_any()
                         }
+                        Ok(res) => view! {
+                            <ul class="result-list">
+                                {res.into_iter().map(|item| {
+                                    let doc = item.doc_text.clone();
+                                    let has_doc = !doc.is_empty();
+                                    view! {
+                                        <li class="result-item">
+                                            <A href=format!("/item/{}", item.qual_name)>
+                                                <span class="result-kind">{item.kind.clone()}</span>
+                                                <span class="result-name">{item.name.clone()}</span>
+                                            </A>
+                                            <SignatureView
+                                                blob=item.blob.clone()
+                                                plain=item.signature.clone()
+                                                class="result-signature"
+                                            />
+                                            <Show when=move || has_doc>
+                                                <p class="result-doc">{doc.clone()}</p>
+                                            </Show>
+                                        </li>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </ul>
+                        }
+                        .into_any(),
                     })
                 }}
             </Suspense>
@@ -292,30 +325,32 @@ fn SearchPage() -> impl IntoView {
 fn ItemPage() -> impl IntoView {
     let params = use_params_map();
     let name = Signal::derive(move || {
-        params.get().get("name").map(|s| s.clone()).unwrap_or_default()
+        params
+            .get()
+            .get("name")
+            .map(|s| s.clone())
+            .unwrap_or_default()
     });
     let item = Resource::new(
         move || name.get(),
         move |n| async move {
             if n.is_empty() {
-                None
+                Err(DocError::ItemNotFound { name: n })
             } else {
-                get_doc(n).await.unwrap_or(None)
+                get_doc(n).await
             }
         },
     );
+    redirect_on_error(move || item.get().and_then(|res| res.err()).map(|e| e.to_string()));
 
     view! {
         <div class="item-page">
             <Suspense fallback=|| "Loading...".into_view()>
                 {move || {
-                    item.get().map(|opt| {
-                        match opt {
-                            None => view! {
-                                <h1>"Item not found"</h1>
-                                <p>"The requested documentation item could not be found."</p>
-                            }.into_any(),
-                            Some(doc) => {
+                    item.get().map(|res| {
+                        match res {
+                            Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
+                            Ok(doc) => {
                                 let qual = doc.qual_name.clone();
                                 let doc_text = doc.doc_text.clone();
                                 let module = doc.module.clone();
@@ -366,54 +401,62 @@ fn ItemPage() -> impl IntoView {
 fn ModulePage() -> impl IntoView {
     let params = use_params_map();
     let name = Signal::derive(move || {
-        params.get().get("name").map(|s| s.clone()).unwrap_or_default()
+        params
+            .get()
+            .get("name")
+            .map(|s| s.clone())
+            .unwrap_or_default()
     });
     let items = Resource::new(
         move || name.get(),
         move |n| async move {
             if n.is_empty() {
-                Vec::new()
+                Ok(Vec::new())
             } else {
-                get_module_items(n).await.unwrap_or_default()
+                get_module_items(n).await
             }
         },
     );
+    redirect_on_error(move || items.get().and_then(|res| res.err()).map(|e| e.to_string()));
 
     view! {
         <div class="module-page">
             <Suspense fallback=|| "Loading...".into_view()>
                 {move || {
                     let n = name.get();
-                    items.get().map(|items| {
-                        if items.is_empty() && !n.is_empty() {
-                            view! {
+                    items.get().map(|res| {
+                        match res {
+                            Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
+                            Ok(items) if items.is_empty() && !n.is_empty() => view! {
                                 <h1>{n.clone()}</h1>
                                 <p>"No items found in this module."</p>
-                            }.into_any()
-                        } else {
-                            let mut fns = Vec::new();
-                            let mut types = Vec::new();
-                            let mut lets = Vec::new();
-                            let mut consts = Vec::new();
-                            let mut modules = Vec::new();
-                            for item in items {
-                                match item.kind.as_str() {
-                                    "fn" => fns.push(item),
-                                    "type" => types.push(item),
-                                    "let" => lets.push(item),
-                                    "const" => consts.push(item),
-                                    "module" => modules.push(item),
-                                    _ => {}
-                                }
                             }
-                            view! {
-                                <h1>"Module: " {n.clone()}</h1>
-                                {item_group_view("Modules", modules)}
-                                {item_group_view("Functions", fns)}
-                                {item_group_view("Types", types)}
-                                {item_group_view("Variables", lets)}
-                                {item_group_view("Constants", consts)}
-                            }.into_any()
+                            .into_any(),
+                            Ok(items) => {
+                                let mut fns = Vec::new();
+                                let mut types = Vec::new();
+                                let mut lets = Vec::new();
+                                let mut consts = Vec::new();
+                                let mut modules = Vec::new();
+                                for item in items {
+                                    match item.kind.as_str() {
+                                        "fn" => fns.push(item),
+                                        "type" => types.push(item),
+                                        "let" => lets.push(item),
+                                        "const" => consts.push(item),
+                                        "module" => modules.push(item),
+                                        _ => {}
+                                    }
+                                }
+                                view! {
+                                    <h1>"Module: " {n.clone()}</h1>
+                                    {item_group_view("Modules", modules)}
+                                    {item_group_view("Functions", fns)}
+                                    {item_group_view("Types", types)}
+                                    {item_group_view("Variables", lets)}
+                                    {item_group_view("Constants", consts)}
+                                }.into_any()
+                            }
                         }
                     })
                 }}
@@ -453,6 +496,7 @@ fn item_group_view(title: &str, items: Vec<DocSummary>) -> impl IntoView {
                     }).collect::<Vec<_>>()}
                 </ul>
             </section>
-        }.into_any()
+        }
+        .into_any()
     }
 }

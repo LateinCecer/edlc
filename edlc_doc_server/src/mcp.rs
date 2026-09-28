@@ -135,7 +135,9 @@ fn error_json(msg: &str) -> String {
 #[tool_router]
 impl DocMcpServer {
     /// Search EDL documentation by full-text query.
-    #[tool(description = "Search EDL documentation items (functions, types, variables, constants, modules) by full-text query. Returns matching items with their signatures and doc text.")]
+    #[tool(
+        description = "Search EDL documentation items (functions, types, variables, constants, modules) by full-text query. Returns matching items with their signatures and doc text."
+    )]
     async fn search_docs(
         &self,
         Parameters(SearchDocsParams { query, limit }): Parameters<SearchDocsParams>,
@@ -150,7 +152,8 @@ impl DocMcpServer {
         match result {
             Ok(Ok(rows)) => {
                 let summaries: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
-                serde_json::to_string_pretty(&summaries).unwrap_or_else(|e| error_json(&e.to_string()))
+                serde_json::to_string_pretty(&summaries)
+                    .unwrap_or_else(|e| error_json(&e.to_string()))
             }
             Ok(Err(e)) => error_json(&e),
             Err(e) => error_json(&e.to_string()),
@@ -158,42 +161,41 @@ impl DocMcpServer {
     }
 
     /// Get a single documentation item by name.
-    #[tool(description = "Fetch a single EDL documentation item by its name (simple or qualified). Returns the item's full details including its signature and doc text.")]
-    async fn get_doc(
-        &self,
-        Parameters(GetDocParams { name }): Parameters<GetDocParams>,
-    ) -> String {
+    #[tool(
+        description = "Fetch a single EDL documentation item by its name (simple or qualified). Returns the item's full details including its signature and doc text."
+    )]
+    async fn get_doc(&self, Parameters(GetDocParams { name }): Parameters<GetDocParams>) -> String {
         let target = name.clone();
+        let query = target.clone();
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
             let guard = db.lock().map_err(|e| e.to_string())?;
-            guard.list_items(None).map_err(|e| e.to_string())
+            guard.get_item_by_name(&query).map_err(|e| e.to_string())
         })
         .await;
 
         match result {
-            Ok(Ok(all)) => {
-                let found = all.into_iter().find(|row| row.qual_name == target || row.name == target);
-                match found {
-                    Some(row) => {
-                        let summary = DocSummary::from(row);
-                        serde_json::to_string_pretty(&summary)
-                            .unwrap_or_else(|e| error_json(&e.to_string()))
-                    }
-                    None => serde_json::to_string_pretty(&serde_json::json!({
-                        "error": "not found",
-                        "name": target,
-                    }))
-                    .unwrap(),
+            Ok(Ok(found)) => match found {
+                Some(row) => {
+                    let summary = DocSummary::from(row);
+                    serde_json::to_string_pretty(&summary)
+                        .unwrap_or_else(|e| error_json(&e.to_string()))
                 }
-            }
+                None => serde_json::to_string_pretty(&serde_json::json!({
+                    "error": "not found",
+                    "name": target,
+                }))
+                .unwrap(),
+            },
             Ok(Err(e)) => error_json(&e),
             Err(e) => error_json(&e.to_string()),
         }
     }
 
     /// List all modules in the documentation database.
-    #[tool(description = "List all modules in the EDL documentation database. Returns an array of module names with their doc text.")]
+    #[tool(
+        description = "List all modules in the EDL documentation database. Returns an array of module names with their doc text."
+    )]
     async fn list_modules(&self) -> String {
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -205,7 +207,8 @@ impl DocMcpServer {
         match result {
             Ok(Ok(rows)) => {
                 let summaries: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
-                serde_json::to_string_pretty(&summaries).unwrap_or_else(|e| error_json(&e.to_string()))
+                serde_json::to_string_pretty(&summaries)
+                    .unwrap_or_else(|e| error_json(&e.to_string()))
             }
             Ok(Err(e)) => error_json(&e),
             Err(e) => error_json(&e.to_string()),
@@ -213,7 +216,9 @@ impl DocMcpServer {
     }
 
     /// List all items in a specific module.
-    #[tool(description = "List all documentation items (functions, types, variables, etc.) belonging to a specific module. Returns matching items with their signatures and doc text.")]
+    #[tool(
+        description = "List all documentation items (functions, types, variables, etc.) belonging to a specific module. Returns matching items with their signatures and doc text."
+    )]
     async fn get_module(
         &self,
         Parameters(GetModuleParams { name }): Parameters<GetModuleParams>,
@@ -222,21 +227,15 @@ impl DocMcpServer {
         let db = self.db.clone();
         let result = tokio::task::spawn_blocking(move || {
             let guard = db.lock().map_err(|e| e.to_string())?;
-            guard.list_items(None).map_err(|e| e.to_string())
+            guard.list_module_items(&target).map_err(|e| e.to_string())
         })
         .await;
 
         match result {
-            Ok(Ok(all)) => {
-                let filtered: Vec<DocSummary> = all
-                    .into_iter()
-                    .filter(|row| {
-                        row.module.as_deref() == Some(target.as_str())
-                            || row.qual_name.starts_with(&format!("{}::", target))
-                    })
-                    .map(Into::into)
-                    .collect();
-                serde_json::to_string_pretty(&filtered).unwrap_or_else(|e| error_json(&e.to_string()))
+            Ok(Ok(rows)) => {
+                let filtered: Vec<DocSummary> = rows.into_iter().map(Into::into).collect();
+                serde_json::to_string_pretty(&filtered)
+                    .unwrap_or_else(|e| error_json(&e.to_string()))
             }
             Ok(Err(e)) => error_json(&e),
             Err(e) => error_json(&e.to_string()),

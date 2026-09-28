@@ -15,6 +15,10 @@ client (from the workspace root):
 cargo run -p edlc_doc_server mcp --db examples/build_doc_db/docs.db
 ```
 
+`cargo run` is fine here — MCP mode never touches the Leptos frontend. (It does rebuild the
+server binary with plain cargo, so if you afterwards want to serve the HTTP frontend, re-run
+`cargo leptos build` first — see [HTTP mode](#http-mode).)
+
 ### Tools exposed
 
 | Tool | Parameters | Description |
@@ -34,11 +38,18 @@ Run as an HTTP server with a docs.rs-style web frontend (Leptos SSR + client hyd
 the workspace root:
 
 ```sh
-cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db
+cargo leptos watch serve --db examples/build_doc_db/docs.db
 ```
 
-Then browse to `http://127.0.0.1:8080/`. The Leptos frontend bundle must have been built first
-(see [Build](#build)) — the server exits with a hint if `target/site` is missing.
+Then browse to `http://127.0.0.1:8080/`. `cargo leptos watch` builds the wasm frontend bundle and
+the matching server binary, then runs the server with hot reload. For a one-off build + serve
+without watch, see [Running](#running).
+
+> **Note:** Do not start the HTTP server with `cargo run -p edlc_doc_server serve`. `cargo run`
+> compiles the server with plain cargo, producing a binary whose server-rendered HTML does not
+> match the wasm bundle that `cargo-leptos` builds — the page then fails to hydrate (a "hydration
+> error" in the console) and is non-interactive. The server binary must always be produced by
+> `cargo-leptos` (`cargo leptos watch` or `cargo leptos build`) so it matches the wasm.
 
 ### Pages
 
@@ -55,7 +66,8 @@ area — inspired by docs.rs. The theme supports light and dark mode via `prefer
 ### Build
 
 The HTTP frontend is a Leptos hybrid SSR + WASM hydration crate. Use `cargo-leptos` for
-development and production builds:
+development and production builds — it builds **both** the wasm frontend bundle and the server
+binary, so the two always match (a server binary built with plain cargo will not hydrate):
 
 ```sh
 # Install cargo-leptos (one-time)
@@ -63,10 +75,10 @@ cargo install cargo-leptos --locked
 # Install the wasm-bindgen-cli matching your wasm-bindgen version
 cargo install wasm-bindgen-cli
 
-# Development with hot reload
-cargo leptos watch
+# Development with hot reload (builds both artifacts, then runs the server)
+cargo leptos watch serve --db examples/build_doc_db/docs.db
 
-# Production build
+# Production build (builds both; the server binary lands in target/release)
 cargo leptos build --release
 ```
 
@@ -81,12 +93,19 @@ Everything runs from the workspace root — the site bundle location is resolved
 # (Re)build the example documentation database (writes examples/build_doc_db/docs.db)
 cargo run -p build_doc_db
 
-# Build the frontend bundle once (or use `cargo leptos watch` during development)
+# Build the frontend (wasm) bundle AND the matching server binary
 cargo leptos build
 
-# Serve
-cargo run -p edlc_doc_server serve --db examples/build_doc_db/docs.db
+# Serve — run the server binary that `cargo leptos build` just produced
+target/debug/edlc_doc_server serve --db examples/build_doc_db/docs.db
 ```
+
+For a release build, run `cargo leptos build --release` and then
+`target/release/edlc_doc_server serve --db examples/build_doc_db/docs.db` instead.
+
+> **Note:** The serve step must run the binary that `cargo-leptos` built. Do not substitute
+> `cargo run -p edlc_doc_server serve` here — plain `cargo run` produces a server binary whose
+> SSR output does not match the wasm bundle, which breaks client-side hydration.
 
 ## Configuration
 
@@ -94,7 +113,7 @@ A TOML config file can be provided with `--config` for either mode:
 
 ```sh
 cargo run -p edlc_doc_server mcp --config server.toml
-cargo run -p edlc_doc_server serve --config server.toml
+target/debug/edlc_doc_server serve --config server.toml   # bin built via `cargo leptos build`
 ```
 
 Example config:

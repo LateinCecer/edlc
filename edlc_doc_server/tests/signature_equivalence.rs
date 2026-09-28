@@ -44,7 +44,10 @@ fn base(name: &str) -> core::TypeDoc {
 
 /// A base type reference with a properly segmented qualified name.
 fn tref(parts: &[&str]) -> core::TypeDoc {
-    core::TypeDoc::Base(core::TypeNameDoc::from(vec![core::TypeNameSegmentDoc::from(qname(parts))]), None)
+    core::TypeDoc::Base(
+        core::TypeNameDoc::from(vec![core::TypeNameSegmentDoc::from(qname(parts))]),
+        None,
+    )
 }
 
 /// A base type reference with generic (turbofish) parameters.
@@ -162,8 +165,15 @@ fn fns() {
     check(&func(
         core::EnvDoc {
             params: vec![
-                core::EnvParamDoc::Type { name: "T".into(), pos: None },
-                core::EnvParamDoc::Const { name: "N".into(), pos: None, ty: base("u32") },
+                core::EnvParamDoc::Type {
+                    name: "T".into(),
+                    pos: None,
+                },
+                core::EnvParamDoc::Const {
+                    name: "N".into(),
+                    pos: None,
+                    ty: base("u32"),
+                },
             ],
         },
         core::FuncParamsDoc::from(vec![param("x", tref(&["T"]), Vec::new())]),
@@ -194,8 +204,16 @@ fn fns() {
     check(&func(
         core::EnvDoc { params: Vec::new() },
         core::FuncParamsDoc::from(vec![
-            param("a", core::TypeDoc::Ref(Box::new(base("str")), None), Vec::new()),
-            param("b", core::TypeDoc::MutRef(Box::new(base("str")), None), Vec::new()),
+            param(
+                "a",
+                core::TypeDoc::Ref(Box::new(base("str")), None),
+                Vec::new(),
+            ),
+            param(
+                "b",
+                core::TypeDoc::MutRef(Box::new(base("str")), None),
+                Vec::new(),
+            ),
         ]),
         core::TypeDoc::Ref(Box::new(tref(&["m", "T"])), None),
         Vec::new(),
@@ -220,7 +238,11 @@ fn fns() {
     // Slices, empty, and multi-segment type references.
     check(&func(
         core::EnvDoc { params: Vec::new() },
-        core::FuncParamsDoc::from(vec![param("s", core::TypeDoc::Slice(Box::new(base("u8")), None), Vec::new())]),
+        core::FuncParamsDoc::from(vec![param(
+            "s",
+            core::TypeDoc::Slice(Box::new(base("u8")), None),
+            Vec::new(),
+        )]),
         core::TypeDoc::Empty,
         Vec::new(),
         false,
@@ -247,8 +269,14 @@ fn fns() {
         tref_inst(
             &["m", "T"],
             vec![
-                core::EnvValueDoc::Type { ty: base("u32"), pos: None },
-                core::EnvValueDoc::Const { val: core::DocConstValue::Literal(core::edl_value::EdlLiteralValue::U32(7)), pos: None },
+                core::EnvValueDoc::Type {
+                    ty: base("u32"),
+                    pos: None,
+                },
+                core::EnvValueDoc::Const {
+                    val: core::DocConstValue::Literal(core::edl_value::EdlLiteralValue::U32(7)),
+                    pos: None,
+                },
             ],
         ),
         Vec::new(),
@@ -259,7 +287,10 @@ fn fns() {
         core::FuncParamsDoc::default(),
         tref_inst(
             &["m", "T"],
-            vec![core::EnvValueDoc::ElicitType, core::EnvValueDoc::ElicitConst],
+            vec![
+                core::EnvValueDoc::ElicitType,
+                core::EnvValueDoc::ElicitConst,
+            ],
         ),
         Vec::new(),
         false,
@@ -328,7 +359,10 @@ fn type_defs() {
         core::EnvDoc { params: Vec::new() },
         core::FuncParamsDoc::default(),
         core::TypeDefVariant::Enum(vec![
-            core::EnumVariantDoc { name: "A".into(), members: core::StructTypeDoc::ZeroSized },
+            core::EnumVariantDoc {
+                name: "A".into(),
+                members: core::StructTypeDoc::ZeroSized,
+            },
             core::EnumVariantDoc {
                 name: "B".into(),
                 members: core::StructTypeDoc::Named(vec![member("x", base("u32"), Vec::new())]),
@@ -354,8 +388,15 @@ fn type_defs() {
     check(&tdef(
         core::EnvDoc {
             params: vec![
-                core::EnvParamDoc::Type { name: "T".into(), pos: None },
-                core::EnvParamDoc::Const { name: "N".into(), pos: None, ty: base("u32") },
+                core::EnvParamDoc::Type {
+                    name: "T".into(),
+                    pos: None,
+                },
+                core::EnvParamDoc::Const {
+                    name: "N".into(),
+                    pos: None,
+                    ty: base("u32"),
+                },
             ],
         },
         core::FuncParamsDoc::default(),
@@ -369,7 +410,10 @@ fn type_defs() {
     // Function-style parameters (core's `Display` renders them without parentheses).
     check(&tdef(
         core::EnvDoc {
-            params: vec![core::EnvParamDoc::Type { name: "T".into(), pos: None }],
+            params: vec![core::EnvParamDoc::Type {
+                name: "T".into(),
+                pos: None,
+            }],
         },
         core::FuncParamsDoc::from(vec![param("n", base("u32"), Vec::new())]),
         core::TypeDefVariant::Alias(base("u32")),
@@ -409,7 +453,11 @@ fn literals_in_type_position() {
             src: src(),
             pos: pos(),
             doc: String::new(),
-            ty: core::TypeDoc::Array(Box::new(base("u8")), core::DocConstValue::Literal(lit), None),
+            ty: core::TypeDoc::Array(
+                Box::new(base("u8")),
+                core::DocConstValue::Literal(lit),
+                None,
+            ),
             ms: core::Modifiers::default(),
         }));
     }

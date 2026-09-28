@@ -374,7 +374,10 @@ mod tests {
                 "associated_type": null
             }
         }"#;
-        assert!(matches!(parse_item(const_blob).unwrap(), Item::GlobalConst(_)));
+        assert!(matches!(
+            parse_item(const_blob).unwrap(),
+            Item::GlobalConst(_)
+        ));
 
         let type_blob = r#"{
             "TypeDef": {
@@ -426,7 +429,10 @@ mod tests {
             Item::GlobalVar(d) => match &d.ty {
                 TypeDoc::Tuple(ts, _) => {
                     assert_eq!(ts.len(), 6);
-                    assert!(matches!(&ts[0], TypeDoc::Array(_, DocConstValue::Literal(EdlLiteralValue::U8(4)), _)));
+                    assert!(matches!(
+                        &ts[0],
+                        TypeDoc::Array(_, DocConstValue::Literal(EdlLiteralValue::U8(4)), _)
+                    ));
                     assert!(matches!(&ts[1], TypeDoc::Slice(_, _)));
                     assert!(matches!(&ts[2], TypeDoc::Ref(_, _)));
                     assert!(matches!(&ts[3], TypeDoc::MutRef(_, _)));
