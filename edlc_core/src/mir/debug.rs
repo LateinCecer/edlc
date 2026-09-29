@@ -162,7 +162,7 @@ pub struct SourceInfo {
     pub src: ModuleSrc,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrapInfo {
     DivideByZero,
     ArrayIndex,
@@ -171,7 +171,7 @@ pub enum TrapInfo {
     SliceRange,
     ExplicitPanic,
     AssertionFailed,
-    Other(&'static str),
+    Other(String),
 }
 
 pub struct DebugInformation {

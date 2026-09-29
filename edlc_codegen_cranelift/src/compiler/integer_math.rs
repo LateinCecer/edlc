@@ -71,7 +71,7 @@ macro_rules! insert_debug(
     () => (
 fn debug_info(&self, info: &mut DebugInformation, loc: &MirLoc) {
     if let Some(code) = self.fault_code.as_ref() {
-        info.insert_trap_info(loc, *code);
+        info.insert_trap_info(loc, code.clone());
     }
 }
     );

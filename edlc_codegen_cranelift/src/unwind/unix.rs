@@ -15,8 +15,9 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use gimli::UnwindContext;
 use log::error;
 use crate::compiler::{eh_frames, host_eh_frames, unwind_ctx};
@@ -45,6 +46,8 @@ macro_rules! jit_panic(
 
 pub use jit_panic;
 use crate::prelude::HostUnwindInfo;
+use crate::unwind::barrier::top_barrier;
+use crate::unwind::trampoline::edl_jit_landing;
 
 /// Causes a JIT panic.
 ///
@@ -59,11 +62,14 @@ pub unsafe fn cause_jit_async_panic() -> ! {
     panic!() // <-- is never reached, just there to make the type checker happy
 }
 
-
-static mut PREV_SIGSEGV: libc::sigaction = unsafe { mem::zeroed() };
-static mut PREV_SIGBUS: libc::sigaction = unsafe { mem::zeroed() };
-static mut PREV_SIGILL: libc::sigaction = unsafe { mem::zeroed() };
-static mut PREV_SIGFPE: libc::sigaction = unsafe { mem::zeroed() };
+thread_local! {
+    /// Counts the number of active try handlers.
+    static TRAP_HANDLER_COUNT: AtomicUsize = const { AtomicUsize::new(0) };
+    static PREV_SIGSEGV: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
+    static PREV_SIGBUS: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
+    static PREV_SIGILL: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
+    static PREV_SIGFPE: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
+}
 
 struct TrapHandlerInfo {
     sp: usize,
@@ -80,33 +86,49 @@ impl TrapHandler {
     /// Since trap handlers are attached to a **process** this also applies to handlers installed
     /// in another thread.
     pub unsafe fn new() -> TrapHandler {
-        sigalt_stack_init(); // lazy init sigalt stack
-        for_each_handler(|slot, sig| {
-            let mut handler: libc::sigaction = unsafe { mem::zeroed() };
-            handler.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER | libc::SA_ONSTACK;
-            handler.sa_sigaction = (trap_handler as *const ()).addr();
-            unsafe {
-                libc::sigemptyset(&mut handler.sa_mask);
-                if libc::sigaction(sig, &handler, slot) != 0 {
-                    panic!("unable to install signal handler. Cause: {}", std::io::Error::last_os_error());
+        if TRAP_HANDLER_COUNT.with(|s| s
+            .update(Ordering::SeqCst, Ordering::SeqCst, |s| s + 1)) == 0 {
+            // the previous count of active trap handlers for this thread is exactly 0:
+            // so, we actually register the trap handler with the kernel
+            sigalt_stack_init(); // lazy init sigalt stack
+            for_each_handler(|slot, sig| {
+                let mut handler: libc::sigaction = unsafe { mem::zeroed() };
+                handler.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER | libc::SA_ONSTACK;
+                handler.sa_sigaction = (trap_handler as *const ()).addr();
+                unsafe {
+                    libc::sigemptyset(&mut handler.sa_mask);
+                    if libc::sigaction(sig, &handler, slot) != 0 {
+                        panic!("unable to install signal handler. Cause: {}", std::io::Error::last_os_error());
+                    }
                 }
-            }
-        });
+            });
+        }
         TrapHandler
     }
 }
 
 unsafe fn for_each_handler(mut f: impl FnMut(*mut libc::sigaction, i32)) {
-    f(&raw mut PREV_SIGSEGV, libc::SIGSEGV);
+    PREV_SIGSEGV.with(|action| f(action.as_ptr(), libc::SIGSEGV));
     #[cfg(target_vendor="apple")]
-    f(&raw mut PREV_SIGBUS, libc::SIGBUS);
+    PREV_SIGBUG.with(|action| f(action.as_ptr(), libc::SIGBUG));
     #[cfg(target_arch="x86_64")]
-    f(&raw mut PREV_SIGFPE, libc::SIGFPE);
-    f(&raw mut PREV_SIGILL, libc::SIGILL);
+    PREV_SIGFPE.with(|action| f(action.as_ptr(), libc::SIGFPE));
+    PREV_SIGILL.with(|action| f(action.as_ptr(), libc::SIGILL));
 }
 
 impl Drop for TrapHandler {
     fn drop(&mut self) {
+        let prev_count = TRAP_HANDLER_COUNT.with(|c| c
+            .update(Ordering::SeqCst, Ordering::SeqCst, |s| usize::max(1, s) - 1));
+        if prev_count == 0 {
+            error!("tried to drop trap handler, but the count of trap handlers is already zero");
+            std::process::exit(-1);
+        }
+        if prev_count > 1 {
+            return; // there is more than 1 trap handler active, so don't drop this just yet.
+        }
+
+        // there is only one trap handler left: drop it
         unsafe {
             for_each_handler(|slot, sig| {
                 let mut prev: libc::sigaction = mem::zeroed();
@@ -130,10 +152,10 @@ unsafe extern "C" fn trap_handler(
     context: *mut libc::c_void,
 ) {
     let prev = match signum {
-        libc::SIGSEGV => &raw const PREV_SIGSEGV,
-        libc::SIGBUS => &raw const PREV_SIGBUS,
-        libc::SIGFPE => &raw const PREV_SIGFPE,
-        libc::SIGILL => &raw const PREV_SIGILL,
+        libc::SIGSEGV => PREV_SIGSEGV.get(),
+        libc::SIGBUS => PREV_SIGBUS.get(),
+        libc::SIGFPE => PREV_SIGFPE.get(),
+        libc::SIGILL => PREV_SIGILL.get(),
         _ => {
             // printout by logging is not async-signal save, but since we're terminating the process
             // in any case, this does not matter that much.
@@ -143,37 +165,34 @@ unsafe extern "C" fn trap_handler(
         },
     };
 
-
     let mut regs = Registers::load(context);
-    let handled = PanicData::set(|data| {
-        let eh_frames = eh_frames();
-        let host_eh_frames = host_eh_frames();
-        if let (
-            Ok(eh_frames),
-            Ok(host_eh_frames),
-        ) = (eh_frames.read(), host_eh_frames.read()) {
-            if backtrace_thread_local(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
-                // recover from the panic, continue after the JIT call in the host
-                regs.store(context);
-                true
-            } else{
-                false
-            }
-        } else {
-            false
+
+    match top_barrier() {
+        Some(sp) if regs.rsp < sp => {
+            PanicData::set(|data| {
+                let eh_frames = eh_frames();
+                let host_eh_frames = host_eh_frames();
+                if let (
+                    Ok(eh_frames),
+                    Ok(host_eh_frames),
+                ) = (eh_frames.read(), host_eh_frames.read()) {
+                    if backtrace_thread_local(eh_frames.slice(), &host_eh_frames, &mut regs, data) {
+                        // recover from the panic, continue after the JIT call in the host
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }, false);
+
+            redirect_to_barrier(&mut regs, sp);
+            regs.store(context);
         }
-    }, false);
-
-    // test if this is a trap that was caused within JIT generated code
-    // if so, handle the trap by jumping to the trap handler.
-    //
-    // otherwise, delegate to the previous trap handler (let this trap be handled by Rust)
-    if handled {
-        return;
-    }
-
-    unsafe {
-        delegate_sig(prev, signum, siginfo, context);
+        _ => unsafe {
+            delegate_sig(&prev as *const _, signum, siginfo, context);
+        }
     }
 }
 
@@ -185,14 +204,14 @@ unsafe extern "C" fn trap_handler(
 #[no_mangle]
 pub fn jit_sync_panic() -> ! {
     let mut regs = Registers::steal();
-    let handled = PanicData::set(|data| {
+    let _ = PanicData::set(|data| {
         let eh_frames = eh_frames();
         let host_eh_frames = host_eh_frames();
         if let (
             Ok(eh_frames),
             Ok(host_eh_frames),
         ) = (eh_frames.read(), host_eh_frames.read()) {
-            if backtrace_thread_local(eh_frames.slice(), &*host_eh_frames, &mut regs, data) {
+            if backtrace_thread_local(eh_frames.slice(), &host_eh_frames, &mut regs, data) {
                 // recover from the panic, continue after the JIT call in the host
                 true
             } else{
@@ -203,10 +222,8 @@ pub fn jit_sync_panic() -> ! {
         }
     }, false);
 
-    if handled {
-        // SAFETY: the registers that we're restoring here are taking from a stack unwind.
-        //         they should be fine to restore, provided that the initial context was valid.
-        unsafe { regs.restore() }
+    if let Some(barrier) = top_barrier() {
+        unsafe { jump_to_barrier(barrier) }
     } else {
         eprintln!("failed to initialize JIT panic");
         std::process::exit(-1);
@@ -235,8 +252,11 @@ unsafe fn backtrace(
     data: &mut PanicPayload,
     context: &mut UnwindContext<usize>,
 ) -> bool {
-    let mut jit_frame_c: u32 = 0;
-    for frame_num in 0..16 {
+    let Some(barrier) = top_barrier() else {
+        return false; // no guard installed -> delegate to previous handler
+    };
+
+    for frame_num in 0..512 {
         let current_ip = if frame_num == 0 {
             // the location of the trapping instruction.
             // we want to query debug info for this exact address
@@ -247,41 +267,28 @@ unsafe fn backtrace(
             // for the instruction after the call
             regs.rip - 1
         };
-        match unwind_gimli(unwind_data, current_ip, regs, context) {
+        let entry = match unwind_gimli(unwind_data, current_ip, regs, context) {
             Ok(mut entry) => {
-                jit_frame_c += 1;
                 entry.flags = entry.flags.set_jit_frame();
-                data.backtrace.push(entry);
-                if regs.rip == 0 {
-                    return false; // reached end of stack
-                }
-            }
-            Err(gimli::Error::NoUnwindInfoForAddress) if jit_frame_c != 0 => {
-                // transition to host code
-                data.reached_host = true;
-                return true;
+                entry
             }
             Err(gimli::Error::NoUnwindInfoForAddress) => {
-                // lookup addr in host info
                 match unwind_host(host_frames, current_ip, regs, context) {
-                    Ok(entry) => {
-                        data.backtrace.push(entry);
-                        if regs.rip == 0 {
-                            return false; // reached end of stack
-                        }
-                    }
-                    Err(err) => {
-                        return false;
-                    }
+                    Ok(entry) => entry,
+                    Err(_) => return false,
                 }
-            },
-            Err(_err) => {
-                // some other error.
-                // we can do nothing about this from this position.
-                // just give up, we did our best.
-                return false;
             }
+            Err(_) => return false,
+        };
+        if regs.rip == 0 {
+            return false; // reached end of stack
         }
+        if regs.rsp >= barrier {
+            // we are now in the guard's frame, right after the call
+            data.reached_host = true;
+            return true;
+        }
+        data.backtrace.push(entry);
     }
     false
 }
@@ -302,4 +309,20 @@ pub unsafe fn delegate_sig(
             mem::transmute::<usize, extern "C" fn(libc::c_int)>(prev.sa_sigaction)(signum);
         }
     }
+}
+
+fn redirect_to_barrier(regs: &mut Registers, barrier_sp: u64) {
+    regs.rsp = barrier_sp;
+    regs.rip = edl_jit_landing as *const () as usize as u64;
+    // rbx/rbp/r12-r15 are irrelevant: the landing pad pops them from the trampoline frame
+}
+
+unsafe fn jump_to_barrier(barrier_sp: u64) -> ! {
+    std::arch::asm!(
+        "mov rsp, {sp}",
+        "jmp {target}",
+        sp = in(reg) barrier_sp,
+        target = in(reg) edl_jit_landing as *const () as usize,
+        options(noreturn),
+    )
 }

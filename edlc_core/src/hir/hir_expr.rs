@@ -318,7 +318,9 @@ impl HirExpression {
             self.write_to_graph(&mut graph_writer, ret_value)?;
             graph_writer.current_block
         };
-        body.insert_return(current_block, ret_value, DebugSymbols { pos: self.pos() });
+        if !body.is_block_sealed(&current_block) {
+            body.insert_return(current_block, ret_value, DebugSymbols { pos: self.pos() });
+        }
         body.seal();
         Ok(body)
     }

@@ -1751,7 +1751,7 @@ impl ExecutionError {
             .collect::<Vec<_>>();
 
         // format err type
-        let err = match self.error_type {
+        let err = match &self.error_type {
             TrapInfo::DivideByZero => "divide by zero",
             TrapInfo::ArrayIndex => "array index out of bounds",
             TrapInfo::SliceIndex => "slice index out of bounds",

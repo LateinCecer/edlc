@@ -23,6 +23,8 @@ mod unix;
 mod signal_stack;
 mod cfi;
 mod range_vec;
+mod trampoline;
+mod barrier;
 
 use std::cell::{LazyCell, RefCell};
 use std::fmt::{Display, Formatter};
@@ -41,8 +43,10 @@ use edlc_core::prelude::mir_funcs::{MirFuncId, MirFuncRegistry};
 use edlc_core::prelude::mir_type::MirTypeId;
 #[cfg(any(target_os="linux", target_os="macos", target_os="freebsd", target_os="openbsd"))]
 pub use unix::{TrapHandler, jit_panic, cause_jit_async_panic, jit_sync_panic};
+pub use barrier::jit_guard;
 pub use range_vec::{RangeVec, RangeVecIter};
 use crate::compiler::{UnwindInfo, JIT};
+use crate::unwind::trampoline::edl_jit_enter;
 
 #[cfg_attr(feature="serde", derive(Serialize, Deserialize))]
 #[derive(Debug)]
@@ -206,7 +210,7 @@ impl Backtrace {
                                     TrapInfo::SliceRange => Some(PanicType::SliceRangeOutOfBounds),
                                     TrapInfo::ExplicitPanic => Some(PanicType::Explicit),
                                     TrapInfo::AssertionFailed => Some(PanicType::Assertion),
-                                    TrapInfo::Other(reason) => Some(PanicType::Other(reason)),
+                                    TrapInfo::Other(reason) => Some(PanicType::Other(reason.clone())),
                                 }
                             } else {
                                 Some(PanicType::Unknown)
@@ -360,6 +364,8 @@ impl Backtrace {
                 }
             } else if trace.func as *const u8 == jit_sync_panic as *const u8 {
                 error!("    jit_sync_panic (EDL runtime synchronous panic unwind hook)")
+            } else if trace.func as *const u8 == edl_jit_enter as *const u8 {
+                error!("    edl_jit_enter (EDL runtime unwind ASM trampoline)")
             } else {
                 error!("    <unknown> {:p}", trace.func as *const ());
                 error!("        at <unknown> {:p}", trace.loc as *const ());
@@ -461,10 +467,47 @@ impl PanicData {
             Ok(())
         })
     }
+
+    /// Fetches the local panic handling data from thread local storage.
+    /// If there was no panic since the last time this function was called, it will return `None`.
+    pub fn fetch_no_print<Runtime: 'static>(jit: &JIT<Runtime>) -> Result<(), PanicError> {
+        PANIC.with(|panic| if panic
+            .panic
+            .fetch_and(false, Ordering::Relaxed) {
+
+            let payload = panic.payload.lock().unwrap();
+            error!("encountered panic while executing JIT code in thread: {}",
+                std::thread::current().name().unwrap_or("unknown"));
+            let mut t = payload.backtrace
+                .get_panic_type(&jit.unwind_info)
+                .unwrap_or(PanicType::Unknown);
+            let recoverable = payload.reached_host && payload.backtrace.is_recoverable();
+            if recoverable {
+                error!("host function reached – attempting to recover through graceful panic protocol");
+            } else {
+                error!("host function was not reached during unwinding – graceful panic not possible");
+                // panic!("unrecoverable panic during JIT code execution");
+            }
+
+            let backtrace = payload.backtrace.printable(&jit.unwind_info);
+            let msg = PanicMessage::take().map(|msg| msg.data);
+            if t == PanicType::Unknown && msg.is_some() {
+                t = PanicType::Explicit;
+            }
+            Err(PanicError {
+                msg,
+                graceful: recoverable,
+                panic_type: t,
+                backtrace,
+            })
+        } else {
+            Ok(())
+        })
+    }
 }
 
 #[cfg_attr(feature="serde", derive(Serialize, Deserialize))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanicType {
     BadConversionToInteger,
     HeapOutOfBounds,
@@ -478,7 +521,7 @@ pub enum PanicType {
     Assertion,
     Explicit,
     Segfault,
-    Other(&'static str),
+    Other(String),
     Unknown,
 }
 

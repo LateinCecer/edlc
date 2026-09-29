@@ -58,7 +58,7 @@ use crate::executor::test_executor::UnitTest;
 pub use crate::executor::test_executor::TestExec;
 pub use crate::executor::test_setup::{TestReport, FnReport};
 use crate::prelude::{Program, JIT};
-use crate::unwind::{PanicData, PanicError, TrapHandler};
+use crate::unwind::{PanicData, PanicError, TrapHandler, jit_guard};
 
 pub trait FunctionContainer<F> {
     fn get_function(
@@ -216,12 +216,11 @@ where
     $R: MirLayout,
 {
     fn catch_unwind(&self, func: extern "C" fn($($P),*) -> $R, ($($p,)*): ($($P,)*)) -> Result<$R, PanicError> {
-        let val = {
-            let _handler = unsafe { TrapHandler::new() };
-            func($($p,)*)
-            // _handler goes out of scope here and the normal trap handler should take over
-        };
-        PanicData::fetch(&self.backend, &self.compiler.phase).map(|_| val)
+        let handler = unsafe { TrapHandler::new() };
+        let val = jit_guard(|| func($($p,)*));
+        drop(handler);
+        PanicData::fetch(&self.backend, &self.compiler.phase)
+            .and_then(|_| val.map_err(|_| unreachable!()))
     }
 }
 
@@ -1974,7 +1973,7 @@ fn test() -> i32 {
             fn panic<>(msg: FatPtr) -> () where; {
                 let msg = unsafe {
                     std::str::from_utf8_unchecked(
-                        std::slice::from_raw_parts(msg.ptr.0 as *const u8, msg.size)
+                        std::slice::from_raw_parts(msg.ptr.0, msg.size)
                     )
                 };
                 unsafe { jit_panic!(msg) }
@@ -2004,12 +2003,48 @@ fn test_other() {
 
         let prog: extern "C" fn() = compiler.get_named_function(inline_code!("test_other"))?;
         match compiler.catch_unwind(prog, ()) {
-            Ok(_) => panic!("that method should have paniced!"),
+            Ok(_) => panic!("that method should have panicked!"),
             Err(err) => {
                 assert_eq!(err.msg.as_ref(), Some(&"this is an error message".to_string()));
             }
         }
         println!("panic handling was a success!");
+        Ok(())
+    }
+
+    #[test]
+    fn test_unwind_constant() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        let panic_fs = compiler.compiler.parse_fn_signature(
+            inline_code!(r#"
+            /// panics
+            comptime fn load_resource() -> f32
+            "#),
+        )?;
+
+        jit_func!((&mut compiler), fn(panic_fs),
+            const fn panic<>() -> f32 where; {
+                jit_panic!("cannot create source in this context")
+            }
+        );
+
+        let compile_result = compiler
+            .compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::load_resource;
+
+let data: f32 = load_resource();
+
+fn test_other() {
+    print("hello, world!\n");
+}
+        "#));
+        assert!(compile_result.is_err());
         Ok(())
     }
 

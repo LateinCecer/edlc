@@ -54,6 +54,8 @@ pub use unwind_info::eh_frames;
 pub use unwind_info::host_eh_frames;
 pub use unwind_info::unwind_ctx;
 pub(crate) use crate::compiler::unwind_info::{UnwindInfo, HostUnwindInfo};
+use crate::prelude::PanicData;
+use crate::unwind::jit_guard;
 
 #[derive(Default)]
 struct NativeFunctionLookup {
@@ -646,8 +648,19 @@ impl<Runtime: 'static> Backend for JIT<Runtime> {
         let func = lock
             .for_id(func)
             .expect("intrinsic function does not exist");
-        let res = func.run(params, ret_buffer, reg);
-        res.map_err(|err| IntrinsicExecutionError::TypeError(err))
+        let res = jit_guard(|| {
+            func.run(params, ret_buffer, reg).map_err(IntrinsicExecutionError::TypeError)
+        })
+            .map_err(|_| {
+                IntrinsicExecutionError::Panic("panic triggered during code execution".to_string())
+            })
+            .flatten();
+        // we need to check for panic data, otherwise the panic data state is not reset
+        PanicData::fetch_no_print(self)
+            .map_err(|err| {
+                IntrinsicExecutionError::Panic(err.to_string())
+            })
+            .and(res)
     }
 
     fn is_call_intrinsic(&self, func: &MirFuncId) -> bool {

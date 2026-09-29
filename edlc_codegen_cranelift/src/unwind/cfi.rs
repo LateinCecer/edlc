@@ -339,7 +339,13 @@ fn eval_rule(rule: &gimli::RegisterRule<usize>, cfa: u64, regs: &Registers, this
             Some((cfa as i64 + offset) as u64)
         },
         gimli::RegisterRule::SameValue => regs.get(this_reg).cloned(),
+        gimli::RegisterRule::Register(res) => regs.get(*res).cloned(),
+        gimli::RegisterRule::Undefined => None,
         _ => None,
     }
 }
 
+enum UnwindError {
+    Gimli(gimli::Error),
+    ExpressionRule,
+}

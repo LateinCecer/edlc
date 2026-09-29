@@ -145,11 +145,11 @@ impl MirCall {
                 Err(IntrinsicExecutionError::TypeError(t)) => {
                     panic!("encountered type safety error in intrinsic function execution! {t:#?}");
                 },
-                Err(IntrinsicExecutionError::Panic) => {
+                Err(IntrinsicExecutionError::Panic(msg)) => {
                     let mut trace = VmStackTrace::default();
                     trace.push(loc.clone());
                     Err(ExecutionError {
-                        error_type: TrapInfo::Other("host code"),
+                        error_type: TrapInfo::Other(msg),
                         value: None,
                         trace,
                     })
@@ -256,11 +256,11 @@ impl MirCall {
                 Err(IntrinsicExecutionError::TypeError(t)) => {
                     panic!("encountered type safety error in intrinsic function execution! {t:#?}");
                 },
-                Err(IntrinsicExecutionError::Panic) => {
+                Err(IntrinsicExecutionError::Panic(msg)) => {
                     let mut trace = VmStackTrace::default();
                     trace.push(loc.clone());
                     Err(ExecutionError {
-                        error_type: TrapInfo::Other("host code"),
+                        error_type: TrapInfo::Other(msg),
                         value: None,
                         trace,
                     })

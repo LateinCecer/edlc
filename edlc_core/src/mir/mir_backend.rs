@@ -67,7 +67,7 @@ impl PartialEq for StaticData {
 
 pub enum IntrinsicExecutionError {
     TypeError(TypeError),
-    Panic,
+    Panic(String),
 }
 
 impl From<TypeError> for IntrinsicExecutionError {
