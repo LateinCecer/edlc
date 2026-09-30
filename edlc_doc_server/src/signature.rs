@@ -18,10 +18,14 @@
 //! Structured signature rendering for the web frontend.
 //!
 //! A parsed doc item ([`doc_repr::Item`]) is tokenized into a tree of styled spans whose
-//! concatenated text is *identical* to the stringified signature produced by `edlc_core`'s
-//! `Display` impls. The [`SignatureView`] component renders the plain signature during SSR and
-//! swaps in the highlighted, linked view once the blob has been parsed on the client after
-//! hydration (via a `<Transition/>` fallback).
+//! concatenated text matches the stringified signature produced by `edlc_core`'s `Display`
+//! impls, *except* for the vertical layout: function signatures with more than three
+//! parameters, named struct/union definitions, and enum definitions (one variant per line,
+//! with named struct-variant members laid out like named structs) are broken one
+//! parameter/member/variant per line, mirroring `cargo fmt` (with trailing commas). The
+//! [`SignatureView`] component renders the plain signature during SSR and swaps in the
+//! highlighted, linked view once the blob has been parsed on the client after hydration (via
+//! a `<Transition/>` fallback).
 
 use std::collections::BTreeSet;
 
@@ -200,6 +204,10 @@ fn const_span(d: &ConstDoc, out: &mut Span) {
 }
 
 /// `{ms}fn {name}{env}({params})[ -> async {ret}]`
+///
+/// With more than three parameters the argument list is broken vertically, mirroring
+/// `cargo fmt`'s layout: one parameter per indented line, a trailing comma, and the
+/// closing parenthesis on its own line.
 fn func_span(d: &FuncDoc, out: &mut Span) {
     let ctx = Ctx::from_env(&d.env);
     modifiers(&d.ms, out);
@@ -207,15 +215,27 @@ fn func_span(d: &FuncDoc, out: &mut Span) {
     plain(out, " ");
     ident(out, d.name.last().unwrap_or_default(), C_FN_NAME);
     env_span(&d.env, &ctx, out);
-    punct(out, "(");
     let params = &d.params.0;
-    for (i, p) in params.iter().enumerate() {
-        param_span(p, &ctx, out);
-        if i + 1 < params.len() {
-            punct(out, ", ");
+    if params.len() > 3 {
+        punct(out, "(");
+        plain(out, "\n");
+        for p in params {
+            plain(out, "    ");
+            param_span(p, &ctx, out);
+            punct(out, ",");
+            plain(out, "\n");
         }
+        punct(out, ")");
+    } else {
+        punct(out, "(");
+        for (i, p) in params.iter().enumerate() {
+            param_span(p, &ctx, out);
+            if i + 1 < params.len() {
+                punct(out, ", ");
+            }
+        }
+        punct(out, ")");
     }
-    punct(out, ")");
     if !matches!(d.ret, TypeDoc::Empty) {
         punct(out, " -> ");
         if d.async_return {
@@ -479,18 +499,55 @@ fn member_span(m: &StructMemberDoc, ctx: &Ctx, out: &mut Span) {
     type_span(&m.ty, ctx, out);
 }
 
+/// The sequence of named struct/union members, either inline (`m: T, n: U`) or vertically
+/// (one member per indented line with a trailing comma), without the surrounding braces.
+/// In the vertical layout each member line is indented by `indent + 4` spaces.
+fn named_members_span(
+    ms: &[StructMemberDoc],
+    ctx: &Ctx,
+    out: &mut Span,
+    vertical: bool,
+    indent: usize,
+) {
+    if vertical {
+        let line_indent = " ".repeat(indent + 4);
+        plain(out, "\n");
+        for m in ms {
+            plain(out, &line_indent);
+            member_span(m, ctx, out);
+            punct(out, ",");
+            plain(out, "\n");
+        }
+    } else {
+        for (i, m) in ms.iter().enumerate() {
+            member_span(m, ctx, out);
+            if i + 1 < ms.len() {
+                punct(out, ", ");
+            }
+        }
+    }
+}
+
 /// `{ m: T, n: U }`, `(T, U)`, or empty.
-fn struct_type_span(s: &StructTypeDoc, ctx: &Ctx, out: &mut Span) {
+///
+/// With `vertical`, named members are broken one per indented line (mirroring `cargo fmt`'s
+/// struct layout) with a trailing comma and the closing brace on its own line at `indent`
+/// spaces: `{\n    m: T,\n}`.
+fn struct_type_span(s: &StructTypeDoc, ctx: &Ctx, out: &mut Span, vertical: bool, indent: usize) {
     match s {
         StructTypeDoc::Named(ms) => {
-            punct(out, "{ ");
-            for (i, m) in ms.iter().enumerate() {
-                member_span(m, ctx, out);
-                if i + 1 < ms.len() {
-                    punct(out, ", ");
+            if vertical {
+                punct(out, "{");
+                named_members_span(ms, ctx, out, true, indent);
+                if indent > 0 {
+                    plain(out, &" ".repeat(indent));
                 }
+                punct(out, "}");
+            } else {
+                punct(out, "{ ");
+                named_members_span(ms, ctx, out, false, 0);
+                punct(out, " }");
             }
-            punct(out, " }");
         }
         StructTypeDoc::Tuple(ts) => {
             punct(out, "(");
@@ -510,15 +567,21 @@ fn enum_variant_span(v: &EnumVariantDoc, ctx: &Ctx, out: &mut Span) {
     ident(out, &v.name, C_TYPE_NAME);
     match &v.members {
         StructTypeDoc::ZeroSized => {}
+        // Named members get the same vertical treatment as named structs, one level deeper
+        // than the variant itself.
         StructTypeDoc::Named(_) => {
             plain(out, " ");
-            struct_type_span(&v.members, ctx, out);
+            struct_type_span(&v.members, ctx, out, true, 4);
         }
-        StructTypeDoc::Tuple(_) => struct_type_span(&v.members, ctx, out),
+        StructTypeDoc::Tuple(_) => struct_type_span(&v.members, ctx, out, false, 0),
     }
 }
 
 /// `struct { ... }`, `enum { ... }`, `union { ... }`, or an alias type.
+///
+/// Named struct and union definitions are broken vertically (one member per line), and enum
+/// definitions one variant per line; struct variants with named members use the same vertical
+/// member layout as named structs.
 fn variant_span(v: &TypeDefVariant, ctx: &Ctx, out: &mut Span) {
     match v {
         TypeDefVariant::Struct(s) => match s {
@@ -526,32 +589,27 @@ fn variant_span(v: &TypeDefVariant, ctx: &Ctx, out: &mut Span) {
             other => {
                 kw(out, "struct");
                 plain(out, " ");
-                struct_type_span(other, ctx, out);
+                struct_type_span(other, ctx, out, true, 0);
             }
         },
         TypeDefVariant::Enum(vs) => {
             kw(out, "enum");
             plain(out, " ");
-            punct(out, "{ ");
-            for (i, var) in vs.iter().enumerate() {
+            punct(out, "{");
+            for var in vs.iter() {
+                plain(out, "\n    ");
                 enum_variant_span(var, ctx, out);
-                if i + 1 < vs.len() {
-                    punct(out, ", ");
-                }
+                punct(out, ",");
             }
-            punct(out, " }");
+            plain(out, "\n");
+            punct(out, "}");
         }
         TypeDefVariant::Union(ms) => {
             kw(out, "union");
             plain(out, " ");
-            punct(out, "{ ");
-            for (i, m) in ms.iter().enumerate() {
-                member_span(m, ctx, out);
-                if i + 1 < ms.len() {
-                    punct(out, ", ");
-                }
-            }
-            punct(out, " }");
+            punct(out, "{");
+            named_members_span(ms, ctx, out, true, 0);
+            punct(out, "}");
         }
         TypeDefVariant::Alias(ty) => type_span(ty, ctx, out),
     }
@@ -772,10 +830,157 @@ mod tests {
         });
         let span = item_span(&item);
         // Mirrors core's Display, including the missing parentheses around the function-style
-        // parameters and the double space after the member modifier.
+        // parameters and the double space after the member modifier; the named struct is
+        // broken vertically with a trailing comma.
         assert_eq!(
             span_text(&span),
-            "type S<const N: u32>n: u32 = struct { shared  x: [u8; N] }"
+            "type S<const N: u32>n: u32 = struct {\n    shared  x: [u8; N],\n}"
+        );
+    }
+
+    #[test]
+    fn func_params_vertical() {
+        let item = func(
+            vec![],
+            vec![
+                param("a", base("u32"), vec![]),
+                param("b", base("str"), vec![]),
+                param("c", base("m::T"), vec![Modifier::Mut]),
+                param("d", base("u8"), vec![]),
+            ],
+            base("u32"),
+            vec![],
+            false,
+        );
+        let span = item_span(&item);
+        // More than three parameters: vertical layout, one parameter per indented line,
+        // trailing comma, closing parenthesis on its own line.
+        assert_eq!(
+            span_text(&span),
+            "fn f(\n    a: u32,\n    b: str,\n    mut c: m::T,\n    d: u8,\n) -> u32"
+        );
+    }
+
+    #[test]
+    fn func_params_inline_at_threshold() {
+        let item = func(
+            vec![],
+            vec![
+                param("a", base("u32"), vec![]),
+                param("b", base("str"), vec![]),
+                param("c", base("u8"), vec![]),
+            ],
+            base("u32"),
+            vec![],
+            false,
+        );
+        let span = item_span(&item);
+        // Exactly three parameters stay on one line.
+        assert_eq!(span_text(&span), "fn f(a: u32, b: str, c: u8) -> u32");
+    }
+
+    #[test]
+    fn union_members_vertical() {
+        let member = |name: &str, ty: TypeDoc| StructMemberDoc {
+            name: name.into(),
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
+            doc: String::new(),
+            ty,
+            modifiers: Modifiers(vec![]),
+        };
+        let item = Item::TypeDef(TypeDefDoc {
+            name: QualifierName {
+                path: vec!["m".into(), "U".into()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc(vec![]),
+            variant: TypeDefVariant::Union(vec![member("a", base("u32")), member("b", base("f32"))]),
+        });
+        let span = item_span(&item);
+        assert_eq!(span_text(&span), "type U = union {\n    a: u32,\n    b: f32,\n}");
+    }
+
+    #[test]
+    fn tuple_struct_stays_inline() {
+        let item = Item::TypeDef(TypeDefDoc {
+            name: QualifierName {
+                path: vec!["m".into(), "W".into()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc(vec![]),
+            variant: TypeDefVariant::Struct(StructTypeDoc::Tuple(vec![
+                base("f32"),
+                base("u32"),
+            ])),
+        });
+        let span = item_span(&item);
+        assert_eq!(span_text(&span), "type W = struct (f32, u32)");
+    }
+
+    #[test]
+    fn enum_variants_broken_vertically() {
+        let item = Item::TypeDef(TypeDefDoc {
+            name: QualifierName {
+                path: vec!["m".into(), "E".into()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: SrcPos {
+                line: 1,
+                col: 1,
+                size: 1,
+            },
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc(vec![]),
+            variant: TypeDefVariant::Enum(vec![
+                EnumVariantDoc {
+                    name: "Unit".into(),
+                    members: StructTypeDoc::ZeroSized,
+                },
+                EnumVariantDoc {
+                    name: "Wrapped".into(),
+                    members: StructTypeDoc::Named(vec![StructMemberDoc {
+                        name: "value".into(),
+                        pos: SrcPos {
+                            line: 1,
+                            col: 1,
+                            size: 1,
+                        },
+                        doc: String::new(),
+                        ty: base("f32"),
+                        modifiers: Modifiers(vec![]),
+                    }]),
+                },
+                EnumVariantDoc {
+                    name: "Tup".into(),
+                    members: StructTypeDoc::Tuple(vec![base("f32"), base("u32")]),
+                },
+            ]),
+        });
+        let span = item_span(&item);
+        // One variant per line with a trailing comma; the named struct-variant members use
+        // the same vertical layout as named structs, one level deeper.
+        assert_eq!(
+            span_text(&span),
+            "type E = enum {\n    Unit,\n    Wrapped {\n        value: f32,\n    },\n    Tup(f32, u32),\n}"
         );
     }
 

@@ -26,7 +26,7 @@
 
 use std::path::Path;
 
-use edlc_core::prelude::{DocGenerator, Item};
+use edlc_core::prelude::{DocGenerator, Item, TypeDoc};
 use edlc_core::resolver::QualifierName;
 use rusqlite::{params, Connection, OpenFlags};
 
@@ -75,6 +75,29 @@ fn item_fields(item: &Item) -> (Kind, &QualifierName, &str) {
     }
 }
 
+/// The path of the item's associated type, when it is a plain base type reference.
+///
+/// This is the owner of items registered without a module path (a single-segment name), such
+/// as the std intrinsics implemented for the primitive types. Generic parameters are
+/// intentionally omitted: `usize::add`, not `usize::<...>::add`.
+fn associated_type_path(item: &Item) -> Option<Vec<String>> {
+    let ty = match item {
+        Item::Func(d) => d.associated_type.as_ref(),
+        Item::GlobalConst(d) => d.associated_type.as_ref(),
+        _ => None,
+    }?;
+    match ty {
+        TypeDoc::Base(name, _) => {
+            let mut path = Vec::new();
+            for segment in name.segments() {
+                path.extend(segment.name.iter().cloned());
+            }
+            (!path.is_empty()).then_some(path)
+        }
+        _ => None,
+    }
+}
+
 /// A write handle that populates a `docs.db`. Implements [`DocGenerator`] so it can be passed
 /// directly to `Compiler::generate_docs`.
 pub struct DocDbWriter {
@@ -117,13 +140,20 @@ impl DocGenerator for DocDbWriter {
     fn insert_definition(&mut self, item: &Item) -> Result<(), Self::Error> {
         let (kind, name, doc_text) = item_fields(item);
         let simple_name = name.last().cloned().unwrap_or_default();
-        let qual_name = format!("{name}");
+        // Items registered without a module path (a single-segment name) that carry an
+        // associated type — e.g. the std intrinsics, where `add` is implemented for `usize` —
+        // are owned by that associated type, so its path prefixes the qualified name.
+        let mut full_name = name.clone();
+        if full_name.len() == 1 {
+            if let Some(prefix) = associated_type_path(item) {
+                let mut prefixed = QualifierName::from(prefix);
+                prefixed.extend(name.iter().cloned());
+                full_name = prefixed;
+            }
+        }
+        let qual_name = format!("{full_name}");
         // The owning module is the qualifier path minus the last segment, when present.
-        let module = if name.len() > 1 {
-            Some(name.trim(1).map(|m| format!("{m}")).unwrap_or_default())
-        } else {
-            None
-        };
+        let module = full_name.trim(1).map(|m| format!("{m}"));
         let signature = format!("{item}");
         let blob = serde_json::to_string(item)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
@@ -376,8 +406,8 @@ mod tests {
     use super::*;
     use edlc_core::lexer::SrcPos;
     use edlc_core::prelude::{
-        EnvDoc, FuncParamsDoc, LetDoc, Modifiers, ModuleDoc, PortableModuleSrc, TypeDefDoc,
-        TypeDefVariant, TypeDoc,
+        EnvDoc, FuncDoc, FuncParamsDoc, LetDoc, Modifiers, ModuleDoc, PortableModuleSrc,
+        TypeDefDoc, TypeDefVariant, TypeDoc, TypeNameDoc, TypeNameSegmentDoc,
     };
 
     /// Builds a small set of `Item`s covering every kind, writes them, reopens read-only, and
@@ -606,6 +636,27 @@ mod tests {
         })
     }
 
+    /// Builds a `Func` item from the segments of a qualifier path, with an optional
+    /// single-segment associated type.
+    fn assoc_fn(parts: &[&str], assoc: Option<&str>) -> Item {
+        Item::from(FuncDoc {
+            name: parts
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .into(),
+            src: PortableModuleSrc::File("test.eq".to_string()),
+            pos: SrcPos::new(0, 0, 0),
+            doc: String::new(),
+            env: EnvDoc { params: vec![] },
+            params: FuncParamsDoc::default(),
+            ret: TypeDoc::Base("usize".to_string().into(), None),
+            ms: Modifiers::default(),
+            async_return: false,
+            associated_type: assoc.map(|a| TypeDoc::Base(a.to_string().into(), None)),
+        })
+    }
+
     /// Writes `items` into an in-memory database and returns a read handle over it.
     fn db_with(items: &[Item]) -> DocDb {
         let mut writer = DocDbWriter::open_memory().expect("open memory db");
@@ -690,5 +741,72 @@ mod tests {
         let rows = db.list_module_items("my_mod").expect("list_module_items");
         let quals: Vec<&str> = rows.iter().map(|r| r.qual_name.as_str()).collect();
         assert_eq!(quals, vec!["my_mod::x"]);
+    }
+
+    /// An item registered with a single-segment name is owned by its associated type: the
+    /// associated type's path prefixes the qualified name and becomes the module.
+    #[test]
+    fn insert_definition_uses_associated_type_for_single_segment_names() {
+        let db = db_with(&[assoc_fn(&["add"], Some("usize"))]);
+        let row = db.get_item_by_name("usize::add").expect("get_item_by_name");
+        let row = row.expect("prefixed qual name should match");
+        assert_eq!(row.name, "add");
+        assert_eq!(row.qual_name, "usize::add");
+        assert_eq!(row.module.as_deref(), Some("usize"));
+        // The simple name still resolves.
+        assert!(db.get_item_by_name("add").expect("get_item_by_name").is_some());
+        // The associated type acts as a module: its items can be listed.
+        let rows = db.list_module_items("usize").expect("list_module_items");
+        let quals: Vec<&str> = rows.iter().map(|r| r.qual_name.as_str()).collect();
+        assert_eq!(quals, vec!["usize::add"]);
+    }
+
+    /// A multi-segment name already carries its owner and is not prefixed again, even when
+    /// the item also has an associated type.
+    #[test]
+    fn insert_definition_does_not_double_prefix_associated_type() {
+        let db = db_with(&[assoc_fn(&["m", "S", "norm"], Some("S"))]);
+        let rows = db.list_items(None).expect("list_items");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].qual_name, "m::S::norm");
+        assert_eq!(rows[0].module.as_deref(), Some("m::S"));
+    }
+
+    /// The full path of a qualified associated type is used as the prefix.
+    #[test]
+    fn insert_definition_prefixes_with_qualified_associated_type() {
+        let item = Item::from(FuncDoc {
+            name: vec!["add".to_string()].into(),
+            src: PortableModuleSrc::File("test.eq".to_string()),
+            pos: SrcPos::new(0, 0, 0),
+            doc: String::new(),
+            env: EnvDoc { params: vec![] },
+            params: FuncParamsDoc::default(),
+            ret: TypeDoc::Base("usize".to_string().into(), None),
+            ms: Modifiers::default(),
+            async_return: false,
+            associated_type: Some(TypeDoc::Base(
+                TypeNameDoc::from(vec![
+                    TypeNameSegmentDoc::from(QualifierName::from(vec!["core".to_string()])),
+                    TypeNameSegmentDoc::from(QualifierName::from(vec!["u8".to_string()])),
+                ]),
+                None,
+            )),
+        });
+        let db = db_with(&[item]);
+        let row = db.get_item_by_name("core::u8::add").expect("get_item_by_name");
+        let row = row.expect("prefixed qual name should match");
+        assert_eq!(row.qual_name, "core::u8::add");
+        assert_eq!(row.module.as_deref(), Some("core::u8"));
+    }
+
+    /// A single-segment name without an associated type stays module-less.
+    #[test]
+    fn insert_definition_single_segment_without_associated_type_has_no_module() {
+        let db = db_with(&[assoc_fn(&["f"], None)]);
+        let rows = db.list_items(None).expect("list_items");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].qual_name, "f");
+        assert!(rows[0].module.is_none());
     }
 }

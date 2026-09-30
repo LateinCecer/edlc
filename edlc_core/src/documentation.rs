@@ -453,6 +453,11 @@ impl Display for TypeDoc {
 pub struct TypeNameDoc(Vec<TypeNameSegmentDoc>);
 
 impl TypeNameDoc {
+    /// Returns the segments that make up the type name.
+    pub fn segments(&self) -> &[TypeNameSegmentDoc] {
+        &self.0
+    }
+
     /// Returns the last segment of the type name, if any.
     pub fn last_segment(&self) -> Option<&TypeNameSegmentDoc> {
         self.0.last()

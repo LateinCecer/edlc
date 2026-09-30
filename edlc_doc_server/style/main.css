@@ -323,6 +323,16 @@ a:hover {
     font-size: 0.9em;
 }
 
+/* The associated type's segment in a qualified name is rendered in the type color so that
+   module and type identifiers can be told apart without relying on naming conventions. */
+.item-qual .q-type {
+    color: var(--tok-type);
+}
+
+.item-qual .q-sep {
+    color: var(--tok-punct);
+}
+
 .item-signature {
     padding: 12px 16px;
     background: var(--code-bg);
@@ -350,6 +360,11 @@ a:hover {
 .item-meta {
     color: var(--muted);
     font-size: 0.9em;
+}
+
+/* The associated type of an impl item, e.g. `Defined on: SVector<f32, N>`. */
+.item-meta .assoc-type a {
+    color: var(--tok-type);
 }
 
 /* Module page */

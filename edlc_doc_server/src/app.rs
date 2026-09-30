@@ -29,6 +29,7 @@ use leptos_router::{
     NavigateOptions, ParamSegment, StaticSegment,
 };
 
+use crate::doc_repr;
 use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
 use crate::signature::SignatureView;
 
@@ -371,19 +372,69 @@ fn ItemPage() -> impl IntoView {
                             Ok(doc) => {
                                 let qual = doc.qual_name.clone();
                                 let doc_text = doc.doc_text.clone();
-                                let module = doc.module.clone();
                                 let kind = doc.kind.clone();
                                 let name = doc.name.clone();
+                                // Decompose the item's owner: the module it (or its associated
+                                // type) is defined in, plus the associated type itself for impl
+                                // items. Falls back to the plain qualifier decomposition when
+                                // the blob cannot be parsed.
+                                let owner = doc_repr::parse_item(&doc.blob)
+                                    .ok()
+                                    .map(|item| doc_repr::item_owner(&item, &qual))
+                                    .unwrap_or_else(|| doc_repr::ItemOwner::from_qual(&qual));
                                 let has_qual = qual != name;
                                 let has_doc_text = !doc_text.is_empty();
-                                let has_module = module.is_some();
-                                let module_link = module.clone().unwrap_or_default();
+                                let has_module = !owner.module.is_empty();
+                                let module_link = owner.module.join("::");
+                                let has_type = owner.has_type();
+                                let type_display = owner.type_display.clone().unwrap_or_default();
+                                let type_href = owner.type_href.clone().unwrap_or_default();
+                                // The qualified name's segments, with the associated type's
+                                // segment rendered in the type color so that module and type
+                                // identifiers can be told apart at a glance. The name is shared
+                                // through a signal because the re-runnable children closure
+                                // below may only capture `Copy` values.
+                                let qual_sig = signal(qual).0;
                                 view! {
                                     <div class="item-header">
                                         <span class="item-kind">{kind.clone()}</span>
                                         <h1>{name.clone()}</h1>
                                         <Show when=move || has_qual>
-                                            <span class="item-qual">{qual.clone()}</span>
+                                            {move || {
+                                                // Render each `::`-separated segment of the qualified
+                                                // name; the associated type's segment (second to last) is
+                                                // colored as a type so modules and types are distinguishable.
+                                                let qual_segments: Vec<String> = qual_sig
+                                                    .get()
+                                                    .split("::")
+                                                    .map(|s| s.to_string())
+                                                    .collect();
+                                                let type_index = has_type.then_some(qual_segments.len() - 2);
+                                                let views: Vec<AnyView> = qual_segments
+                                                    .iter()
+                                                    .enumerate()
+                                                    .flat_map(|(i, seg)| {
+                                                        let cls = if Some(i) == type_index {
+                                                            "q-type"
+                                                        } else {
+                                                            "q-mod"
+                                                        };
+                                                        let mut views = vec![
+                                                            view! {
+                                                                <span class=cls.to_string()>{seg.to_string()}</span>
+                                                            }
+                                                            .into_any()
+                                                        ];
+                                                        if i + 1 < qual_segments.len() {
+                                                            views.push(
+                                                                view! { <span class="q-sep">"::"</span> }.into_any()
+                                                            );
+                                                        }
+                                                        views
+                                                    })
+                                                    .collect();
+                                                view! { <span class="item-qual">{views}</span> }.into_any()
+                                            }}
                                         </Show>
                                     </div>
                                     <SignatureView
@@ -402,6 +453,14 @@ fn ItemPage() -> impl IntoView {
                                             <A href=format!("/module/{}", module_link.clone())>
                                                 {format!("Module: {}", module_link)}
                                             </A>
+                                        </Show>
+                                        <Show when=move || has_type>
+                                            <div class="item-assoc">
+                                                "Defined on: "
+                                                <span class="assoc-type">
+                                                    <a href={type_href.clone()}>{type_display.clone()}</a>
+                                                </span>
+                                            </div>
                                         </Show>
                                     </div>
                                 }.into_any()
@@ -435,6 +494,12 @@ fn ModulePage() -> impl IntoView {
             }
         },
     );
+    // All module items, used to tell a real module apart from a type that owns items
+    // (e.g. `usize` for the std intrinsics).
+    let modules = Resource::new(
+        move || (),
+        move |_| async move { list_modules().await },
+    );
     redirect_on_error(move || items.get().and_then(|res| res.err()).map(|e| e.to_string()));
 
     view! {
@@ -442,12 +507,22 @@ fn ModulePage() -> impl IntoView {
             <Suspense fallback=|| "Loading...".into_view()>
                 {move || {
                     let n = name.get();
+                    let is_module = modules.get().is_some_and(|res| {
+                        res.as_ref()
+                            .ok()
+                            .is_some_and(|mods| mods.iter().any(|m| m.qual_name == n))
+                    });
+                    let heading = if n.is_empty() || is_module {
+                        "Module: "
+                    } else {
+                        "Type: "
+                    };
                     items.get().map(|res| {
                         match res {
                             Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
                             Ok(items) if items.is_empty() && !n.is_empty() => view! {
-                                <h1>{n.clone()}</h1>
-                                <p>"No items found in this module."</p>
+                                <h1>{heading.to_string()} {n.clone()}</h1>
+                                <p>{if is_module { "No items found in this module." } else { "No items found in this type." }}</p>
                             }
                             .into_any(),
                             Ok(items) => {
@@ -467,7 +542,7 @@ fn ModulePage() -> impl IntoView {
                                     }
                                 }
                                 view! {
-                                    <h1>"Module: " {n.clone()}</h1>
+                                    <h1>{heading.to_string()} {n.clone()}</h1>
                                     {item_group_view("Modules", modules)}
                                     {item_group_view("Functions", fns)}
                                     {item_group_view("Types", types)}

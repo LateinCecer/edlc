@@ -247,6 +247,13 @@ pub enum TypeDoc {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TypeNameDoc(pub Vec<TypeNameSegmentDoc>);
 
+impl TypeNameDoc {
+    /// Returns the segments that make up the type name.
+    pub fn segments(&self) -> &[TypeNameSegmentDoc] {
+        &self.0
+    }
+}
+
 /// A single segment of a qualified type name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TypeNameSegmentDoc {
@@ -305,6 +312,195 @@ pub enum Item {
 /// structured mirror representation.
 pub fn parse_item(blob: &str) -> Result<Item, serde_json::Error> {
     serde_json::from_str(blob)
+}
+
+/// The owner of a documented item, decomposed for display.
+///
+/// Items implement two kinds of ownership: plain items (functions, variables, constants, and
+/// types defined in a module) are owned by the module path that precedes their name, while
+/// impl items (functions and constants with an `associated_type`, e.g. the std intrinsics)
+/// are owned by their associated type — the type itself is in turn defined in a module.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ItemOwner {
+    /// The module path in which the item (or its associated type) is defined.
+    pub module: Vec<String>,
+    /// The simple name of the associated type, when the item is an impl item (e.g. `SVector`
+    /// for `example::types::SVector::norm` or `usize` for `usize::add`).
+    pub type_name: Option<String>,
+    /// The associated type's name with its generic parameters, e.g. `SVector<f32, N>` or `usize`.
+    pub type_display: Option<String>,
+    /// A link target for the associated type: its documentation page when the type is defined
+    /// in the documented project, otherwise the module page listing the type's items.
+    pub type_href: Option<String>,
+}
+
+impl ItemOwner {
+    /// Whether the item is an impl item (associated with a type).
+    pub fn has_type(&self) -> bool {
+        self.type_name.is_some()
+    }
+
+    /// The plain decomposition of a qualified name: everything but the last segment is the
+    /// module, and there is no associated type.
+    pub fn from_qual(qual_name: &str) -> Self {
+        let segments: Vec<&str> = qual_name.split("::").collect();
+        let module = segments
+            .iter()
+            .take(segments.len().saturating_sub(1))
+            .map(|s| s.to_string())
+            .collect();
+        ItemOwner {
+            module,
+            type_name: None,
+            type_display: None,
+            type_href: None,
+        }
+    }
+}
+
+/// Decomposes the owner of a documented item into its module path and associated type.
+///
+/// For impl items the associated type's full path is the item's owner: `usize::add` is owned
+/// by the type `usize` (which defines no module of its own), and
+/// `example::types::SVector::norm` is the method `norm` of the type `SVector` defined in the
+/// module `example::types`. For all other items, the owner is the qualifier path minus the
+/// item's own name.
+///
+/// `qual_name` is the item's qualified name as stored in the database. When the blob's
+/// associated type is absent, not a plain base type reference, or disagrees with `qual_name`,
+/// the plain decomposition ([`ItemOwner::from_qual`]) is used.
+pub fn item_owner(item: &Item, qual_name: &str) -> ItemOwner {
+    let assoc = match item {
+        Item::Func(d) => d.associated_type.as_ref(),
+        Item::GlobalConst(d) => d.associated_type.as_ref(),
+        _ => None,
+    };
+    let ty = match assoc {
+        Some(TypeDoc::Base(ty, _)) if !ty.segments().is_empty() => ty,
+        _ => return ItemOwner::from_qual(qual_name),
+    };
+
+    // The associated type's full path, e.g. `["example", "types", "SVector"]` or `["usize"]`.
+    let mut type_path = Vec::new();
+    for segment in ty.segments() {
+        type_path.extend(segment.name.path.iter().cloned());
+    }
+    if type_path.is_empty() {
+        return ItemOwner::from_qual(qual_name);
+    }
+
+    // The qualified name must be the type path plus the item's own name; otherwise the blob
+    // and the database disagree, and the plain decomposition is the safe fallback.
+    let qual_segments: Vec<&str> = qual_name.split("::").collect();
+    let consistent = qual_segments.len() == type_path.len() + 1
+        && qual_segments[..type_path.len()]
+            .iter()
+            .zip(type_path.iter())
+            .all(|(q, t)| q == t)
+        && qual_segments.last().copied() == item_name(item).last().map(|s| s.as_str());
+    if !consistent {
+        return ItemOwner::from_qual(qual_name);
+    }
+
+    let type_name = type_path.last().cloned().unwrap();
+    let module = type_path[..type_path.len() - 1].to_vec();
+    let type_href = if type_path.len() > 1 {
+        format!("/item/{}", type_path.join("::"))
+    } else {
+        format!("/module/{}", type_path.join("::"))
+    };
+    ItemOwner {
+        module,
+        type_name: Some(type_name),
+        type_display: Some(type_display(ty)),
+        type_href: Some(type_href),
+    }
+}
+
+/// The simple name of the item (the last segment of its qualifier path).
+fn item_name(item: &Item) -> &[String] {
+    match item {
+        Item::GlobalVar(d) => &d.name.path,
+        Item::GlobalConst(d) => &d.name.path,
+        Item::Func(d) => &d.name.path,
+        Item::TypeDef(d) => &d.name.path,
+        Item::Module(d) => &d.name.path,
+    }
+}
+
+/// The associated type's own name with the generic parameters of its last segment,
+/// e.g. `SVector<f32, N>` or `usize`. Only the type's own name is used — the module it is
+/// defined in is reported separately via [`ItemOwner::module`].
+fn type_display(ty: &TypeNameDoc) -> String {
+    let mut out = String::new();
+    if let Some(last) = ty.segments().last() {
+        if let Some(own_name) = last.name.path.last() {
+            out.push_str(own_name);
+        }
+        if !last.parameters.params.is_empty() {
+            out.push('<');
+            for (i, value) in last.parameters.params.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                env_value_display(value, &mut out);
+            }
+            out.push('>');
+        }
+    }
+    out
+}
+
+/// Formats a generic parameter value the same way the core `Display` impls do.
+fn env_value_display(value: &EnvValueDoc, out: &mut String) {
+    match value {
+        EnvValueDoc::Type { ty, .. } => {
+            if let TypeDoc::Base(base, _) = ty {
+                out.push_str(&base_name_display(base));
+            }
+        }
+        EnvValueDoc::Const { val, .. } => match val {
+            DocConstValue::Const(name) => out.push_str(&base_name_display(name)),
+            DocConstValue::Literal(lit) => out.push_str(&literal_display(lit)),
+            DocConstValue::Elicit => out.push('_'),
+        },
+        EnvValueDoc::ElicitType | EnvValueDoc::ElicitConst => out.push('_'),
+    }
+}
+
+/// The plain qualified name of a type name without its parameters, e.g.
+/// `example::types::SVector` or `f32`.
+fn base_name_display(name: &TypeNameDoc) -> String {
+    let mut out = String::new();
+    for (i, segment) in name.segments().iter().enumerate() {
+        if i > 0 {
+            out.push_str("::");
+        }
+        out.push_str(&segment.name.display());
+    }
+    out
+}
+
+/// Formats a literal value the same way the core `Display` impl does.
+fn literal_display(lit: &EdlLiteralValue) -> String {
+    match lit {
+        EdlLiteralValue::Usize(val) => format!("{val}_usize"),
+        EdlLiteralValue::Isize(val) => format!("{val}_isize"),
+        EdlLiteralValue::U8(val) => format!("{val}_u8"),
+        EdlLiteralValue::U16(val) => format!("{val}_u16"),
+        EdlLiteralValue::U32(val) => format!("{val}_u32"),
+        EdlLiteralValue::U64(val) => format!("{val}_u64"),
+        EdlLiteralValue::U128(val) => format!("{val}_u128"),
+        EdlLiteralValue::I8(val) => format!("{val}_i8"),
+        EdlLiteralValue::I16(val) => format!("{val}_i16"),
+        EdlLiteralValue::I32(val) => format!("{val}_i32"),
+        EdlLiteralValue::I64(val) => format!("{val}_i64"),
+        EdlLiteralValue::I128(val) => format!("{val}_i128"),
+        EdlLiteralValue::Bool(val) => val.to_string(),
+        EdlLiteralValue::Str(val) => format!("\"{val}\""),
+        EdlLiteralValue::Char(val) => format!("'{}'", val.to_string().replace("\n", "\\n")),
+        EdlLiteralValue::Empty() => "()".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -475,5 +671,204 @@ mod tests {
         assert!(parse_item("not json").is_err());
         assert!(parse_item(r#"{"Bogus": {}}"#).is_err());
         assert!(parse_item(r#"{"Func": {}}"#).is_err());
+    }
+
+    fn src_pos() -> SrcPos {
+        SrcPos {
+            line: 1,
+            col: 1,
+            size: 1,
+        }
+    }
+
+    /// A base type reference with a single-segment name.
+    fn base_ty(name: &str) -> TypeDoc {
+        TypeDoc::Base(
+            TypeNameDoc(vec![TypeNameSegmentDoc {
+                name: QualifierName {
+                    path: vec![name.to_string()],
+                },
+                parameters: EnvInstDoc::default(),
+                pos: None,
+            }]),
+            None,
+        )
+    }
+
+    /// Round-trips an item through its blob serialization and decomposes its owner.
+    fn owner_of(item: &Item, qual_name: &str) -> ItemOwner {
+        let parsed = parse_item(&serde_json::to_string(item).unwrap()).unwrap();
+        item_owner(&parsed, qual_name)
+    }
+
+    /// An impl item of a core (single-segment) type: the type is the owner, there is no module.
+    #[test]
+    fn item_owner_impl_of_core_type() {
+        let item = Item::Func(FuncDoc {
+            name: QualifierName {
+                path: vec!["add".to_string()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc::default(),
+            ret: base_ty("usize"),
+            ms: Modifiers::default(),
+            async_return: false,
+            associated_type: Some(base_ty("usize")),
+        });
+        let owner = owner_of(&item, "usize::add");
+        assert!(owner.has_type());
+        assert!(owner.module.is_empty());
+        assert_eq!(owner.type_name.as_deref(), Some("usize"));
+        assert_eq!(owner.type_display.as_deref(), Some("usize"));
+        assert_eq!(owner.type_href.as_deref(), Some("/module/usize"));
+    }
+
+    /// An impl item of a project type: the type's module is the item's module, and the type's
+    /// generic parameters are part of its display.
+    #[test]
+    fn item_owner_impl_of_project_type() {
+        let mut seg = TypeNameSegmentDoc {
+            name: QualifierName {
+                path: vec![
+                    "example".to_string(),
+                    "types".to_string(),
+                    "SVector".to_string(),
+                ],
+            },
+            parameters: EnvInstDoc::default(),
+            pos: None,
+        };
+        seg.parameters = EnvInstDoc {
+            params: vec![
+                EnvValueDoc::Type {
+                    ty: base_ty("f32"),
+                    pos: None,
+                },
+                EnvValueDoc::Const {
+                    val: DocConstValue::Const(TypeNameDoc(vec![TypeNameSegmentDoc {
+                        name: QualifierName {
+                            path: vec!["N".to_string()],
+                        },
+                        parameters: EnvInstDoc::default(),
+                        pos: None,
+                    }])),
+                    pos: None,
+                },
+            ],
+        };
+        let item = Item::Func(FuncDoc {
+            name: QualifierName {
+                path: vec![
+                    "example".to_string(),
+                    "types".to_string(),
+                    "SVector".to_string(),
+                    "norm".to_string(),
+                ],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc::default(),
+            ret: base_ty("f32"),
+            ms: Modifiers::default(),
+            async_return: false,
+            associated_type: Some(TypeDoc::Base(TypeNameDoc(vec![seg]), None)),
+        });
+        let owner = owner_of(&item, "example::types::SVector::norm");
+        assert_eq!(owner.module, vec!["example".to_string(), "types".to_string()]);
+        assert_eq!(owner.type_name.as_deref(), Some("SVector"));
+        assert_eq!(owner.type_display.as_deref(), Some("SVector<f32, N>"));
+        assert_eq!(owner.type_href.as_deref(), Some("/item/example::types::SVector"));
+    }
+
+    /// A plain item is owned by the module path that precedes its name.
+    #[test]
+    fn item_owner_plain_item() {
+        let item = Item::TypeDef(TypeDefDoc {
+            name: QualifierName {
+                path: vec![
+                    "example".to_string(),
+                    "types".to_string(),
+                    "Point".to_string(),
+                ],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc::default(),
+            variant: TypeDefVariant::Struct(StructTypeDoc::ZeroSized),
+        });
+        let owner = owner_of(&item, "example::types::Point");
+        assert!(!owner.has_type());
+        assert_eq!(owner.module, vec!["example".to_string(), "types".to_string()]);
+        assert!(owner.type_display.is_none());
+        assert!(owner.type_href.is_none());
+    }
+
+    /// A crate-root item has no owner at all.
+    #[test]
+    fn item_owner_root_item() {
+        let item = Item::GlobalVar(LetDoc {
+            name: QualifierName {
+                path: vec!["pi".to_string()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            ty: base_ty("f32"),
+            ms: Modifiers::default(),
+        });
+        let owner = owner_of(&item, "pi");
+        assert!(!owner.has_type());
+        assert!(owner.module.is_empty());
+    }
+
+    /// A constant associated with a type decomposes like a function.
+    #[test]
+    fn item_owner_associated_const() {
+        let item = Item::GlobalConst(ConstDoc {
+            name: QualifierName {
+                path: vec!["MAX".to_string()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            ty: base_ty("u8"),
+            ms: Modifiers::default(),
+            associated_type: Some(base_ty("u8")),
+        });
+        let owner = owner_of(&item, "u8::MAX");
+        assert!(owner.module.is_empty());
+        assert_eq!(owner.type_name.as_deref(), Some("u8"));
+        assert_eq!(owner.type_display.as_deref(), Some("u8"));
+        assert_eq!(owner.type_href.as_deref(), Some("/module/u8"));
+    }
+
+    /// When the blob's associated type disagrees with the stored qualified name, the plain
+    /// decomposition is used.
+    #[test]
+    fn item_owner_falls_back_on_inconsistent_qual_name() {
+        let item = Item::Func(FuncDoc {
+            name: QualifierName {
+                path: vec!["add".to_string()],
+            },
+            src: PortableModuleSrc::File("x.edl".into()),
+            pos: src_pos(),
+            doc: String::new(),
+            env: EnvDoc::default(),
+            params: FuncParamsDoc::default(),
+            ret: base_ty("usize"),
+            ms: Modifiers::default(),
+            async_return: false,
+            associated_type: Some(base_ty("usize")),
+        });
+        let owner = owner_of(&item, "other::add");
+        assert!(!owner.has_type());
+        assert_eq!(owner.module, vec!["other".to_string()]);
     }
 }

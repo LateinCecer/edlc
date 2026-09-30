@@ -18,7 +18,9 @@
 //! Equivalence tests: for a core `Item`, serialize it to a blob, parse the blob with the
 //! `doc_repr` mirrors, tokenize it, and assert that the concatenated token text is exactly the
 //! compiler's `Display` output. This guarantees the highlighted view never changes the visible
-//! signature text.
+//! signature text, *except* for the vertical layout: functions with more than three parameters
+//! and named struct/union definitions are broken one parameter/member per line (with trailing
+//! commas), which those cases pin down with explicit expected text instead.
 
 use edlc_core::prelude as core;
 use edlc_core::resolver::QualifierName;
@@ -97,6 +99,14 @@ fn check(item: &core::Item) {
     );
 }
 
+/// For items whose layout is vertically wrapped, where the token text intentionally differs
+/// from the compiler's `Display` output.
+fn check_text(item: &core::Item, expected: &str) {
+    let json = serde_json::to_string(item).unwrap();
+    let parsed = parse_item(&json).unwrap();
+    assert_eq!(span_text(&item_span(&parsed)), expected, "mismatch for blob {json}");
+}
+
 #[test]
 fn lets() {
     for ms in [
@@ -160,6 +170,23 @@ fn fns() {
         Vec::new(),
         false,
     ));
+
+    // More than three parameters: vertical layout with a trailing comma.
+    check_text(
+        &func(
+            core::EnvDoc { params: Vec::new() },
+            core::FuncParamsDoc::from(vec![
+                param("a", base("u32"), Vec::new()),
+                param("b", base("str"), Vec::new()),
+                param("c", base("u32"), Vec::new()),
+                param("d", base("str"), Vec::new()),
+            ]),
+            base("u32"),
+            Vec::new(),
+            false,
+        ),
+        "fn f(\n    a: u32,\n    b: str,\n    c: u32,\n    d: str,\n) -> u32",
+    );
 
     // Generic environment with type and const parameters.
     check(&func(
@@ -337,15 +364,18 @@ fn type_defs() {
         core::TypeDefVariant::Struct(core::StructTypeDoc::ZeroSized),
     ));
 
-    // Named struct, including a modified member.
-    check(&tdef(
-        core::EnvDoc { params: Vec::new() },
-        core::FuncParamsDoc::default(),
-        core::TypeDefVariant::Struct(core::StructTypeDoc::Named(vec![
-            member("x", base("u32"), Vec::new()),
-            member("y", base("str"), vec![core::Modifier::Shared]),
-        ])),
-    ));
+    // Named struct, including a modified member; broken vertically with a trailing comma.
+    check_text(
+        &tdef(
+            core::EnvDoc { params: Vec::new() },
+            core::FuncParamsDoc::default(),
+            core::TypeDefVariant::Struct(core::StructTypeDoc::Named(vec![
+                member("x", base("u32"), Vec::new()),
+                member("y", base("str"), vec![core::Modifier::Shared]),
+            ])),
+        ),
+        "type S = struct {\n    x: u32,\n    shared  y: str,\n}",
+    );
 
     // Tuple struct.
     check(&tdef(
@@ -354,35 +384,42 @@ fn type_defs() {
         core::TypeDefVariant::Struct(core::StructTypeDoc::Tuple(vec![base("u32"), base("str")])),
     ));
 
-    // Enum with all three variant shapes.
-    check(&tdef(
-        core::EnvDoc { params: Vec::new() },
-        core::FuncParamsDoc::default(),
-        core::TypeDefVariant::Enum(vec![
-            core::EnumVariantDoc {
-                name: "A".into(),
-                members: core::StructTypeDoc::ZeroSized,
-            },
-            core::EnumVariantDoc {
-                name: "B".into(),
-                members: core::StructTypeDoc::Named(vec![member("x", base("u32"), Vec::new())]),
-            },
-            core::EnumVariantDoc {
-                name: "C".into(),
-                members: core::StructTypeDoc::Tuple(vec![base("u32"), base("str")]),
-            },
-        ]),
-    ));
+    // Enum with all three variant shapes; broken vertically, one variant per line, with the
+    // named struct-variant members laid out like named structs one level deeper.
+    check_text(
+        &tdef(
+            core::EnvDoc { params: Vec::new() },
+            core::FuncParamsDoc::default(),
+            core::TypeDefVariant::Enum(vec![
+                core::EnumVariantDoc {
+                    name: "A".into(),
+                    members: core::StructTypeDoc::ZeroSized,
+                },
+                core::EnumVariantDoc {
+                    name: "B".into(),
+                    members: core::StructTypeDoc::Named(vec![member("x", base("u32"), Vec::new())]),
+                },
+                core::EnumVariantDoc {
+                    name: "C".into(),
+                    members: core::StructTypeDoc::Tuple(vec![base("u32"), base("str")]),
+                },
+            ]),
+        ),
+        "type S = enum {\n    A,\n    B {\n        x: u32,\n    },\n    C(u32, str),\n}",
+    );
 
-    // Union, including a modified member.
-    check(&tdef(
-        core::EnvDoc { params: Vec::new() },
-        core::FuncParamsDoc::default(),
-        core::TypeDefVariant::Union(vec![
-            member("a", base("u32"), Vec::new()),
-            member("b", base("str"), vec![core::Modifier::Async]),
-        ]),
-    ));
+    // Union, including a modified member; broken vertically with a trailing comma.
+    check_text(
+        &tdef(
+            core::EnvDoc { params: Vec::new() },
+            core::FuncParamsDoc::default(),
+            core::TypeDefVariant::Union(vec![
+                member("a", base("u32"), Vec::new()),
+                member("b", base("str"), vec![core::Modifier::Async]),
+            ]),
+        ),
+        "type S = union {\n    a: u32,\n    async  b: str,\n}",
+    );
 
     // Generic environment.
     check(&tdef(

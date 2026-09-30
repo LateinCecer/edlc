@@ -37,3 +37,9 @@ let pi: f32 = 3.1415;
 
 /// The number of entries in the example dataset.
 const DATASET_SIZE: usize = 10;
+
+/// This is a bigger function.
+/// The documentation renderer should break the signature apart into separate lines for each parameter.
+fn big_function(a: f32, b: f32, c: f32, d: f64) -> f32 {
+    a
+}
