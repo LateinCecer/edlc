@@ -7,6 +7,13 @@ mod types;
 mod child;
 
 /// Adds two 32-bit floating-point numbers.
+/// The arithmetic for this is $a + b$.
+///
+/// # Example
+///
+/// ```
+/// core::assert(add(1, 2), 3);
+/// ```
 fn add(a: f32, b: f32) -> f32 {
     a + b
 }
@@ -40,6 +47,9 @@ const DATASET_SIZE: usize = 10;
 
 /// This is a bigger function.
 /// The documentation renderer should break the signature apart into separate lines for each parameter.
+///
+/// $ F(x) = sin(alpha x frac(1, 2 pi)) $
+///
 fn big_function(a: f32, b: f32, c: f32, d: f64) -> f32 {
     a
 }

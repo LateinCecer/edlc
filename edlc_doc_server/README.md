@@ -82,7 +82,7 @@ without watch, see [Running](#running).
 | `/module/:name` | All items in a module, grouped by kind (Functions, Types, Variables, etc.) |
 
 The layout features a left sidebar with module navigation, a top search bar, and a main content
-area — inspired by docs.rs. The theme supports light and dark mode via `prefers-color-scheme`.
+area — inspired by docs.rs. The site uses a dark midnight-blue theme with a strong green accent.
 
 ### Build
 

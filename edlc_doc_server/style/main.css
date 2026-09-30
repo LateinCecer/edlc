@@ -16,70 +16,37 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* EDL Docs — docs.rs-inspired theme */
+/* EDL Docs — dark midnight-blue theme with a strong green accent */
 
 :root {
-    --bg: #ffffff;
-    --fg: #1a1a1a;
-    --sidebar-bg: #f5f5f5;
-    --border: #d0d0d0;
-    --link: #296faa;
-    --link-hover: #1a5180;
-    --code-bg: #f5f5f5;
-    --code-fg: #1a1a1a;
-    --kind-fn: #296faa;
-    --kind-type: #0c9935;
-    --kind-let: #e8e8e6;
-    --kind-const: #bd8113;
-    --kind-module: #5d88a1;
-    --muted: #6a6a6a;
-    --error: #c0392b;
+    color-scheme: dark;
 
-    /* Syntax highlighting tokens (light theme) */
-    --tok-keyword: #a81b72;
-    --tok-type: #0c7a35;
-    --tok-fn: #296faa;
-    --tok-var: #1a1a1a;
-    --tok-const: #9a6200;
-    --tok-path: #6a6a6a;
-    --tok-operator: #b35309;
-    --tok-punct: #6a6a6a;
-    --tok-num: #9a6700;
-    --tok-str: #a15c17;
-    --tok-bool: #96033c;
-}
+    --bg: #0d1526;
+    --fg: #dbe4f0;
+    --sidebar-bg: #131f36;
+    --border: #263652;
+    --link: #22c55e;
+    --link-hover: #4ade80;
+    --code-bg: #0a111f;
+    --code-fg: #dbe4f0;
+    --muted: #8fa0bb;
+    --error: #f87171;
 
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #272829;
-        --fg: #e8e8e6;
-        --sidebar-bg: #302d33;
-        --border: #5b5c5e;
-        --link: #5d88a1;
-        --link-hover: #7aa6c0;
-        --code-bg: #302d33;
-        --code-fg: #e8e8e6;
-        --kind-fn: #5d88a1;
-        --kind-type: #0c9935;
-        --kind-let: #e8e8e6;
-        --kind-const: #bd8113;
-        --kind-module: #abb0ab;
-        --muted: #9a9a9a;
-        --error: #f2705f;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code",
+        "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
 
-        /* Syntax highlighting tokens (dark theme, ported from edlc_docs) */
-        --tok-keyword: #a81b72;
-        --tok-type: #0c9935;
-        --tok-fn: #5d88a1;
-        --tok-var: #e8e8e6;
-        --tok-const: #bd8113;
-        --tok-path: #abb0ab;
-        --tok-operator: #de6b0d;
-        --tok-punct: #9a9a9a;
-        --tok-num: #d69c13;
-        --tok-str: #d17f13;
-        --tok-bool: #96033c;
-    }
+    /* Syntax highlighting tokens (dark theme, green-accented) */
+    --tok-keyword: #4ade80;
+    --tok-type: #22d3ee;
+    --tok-fn: #c084fc;
+    --tok-var: #dbe4f0;
+    --tok-const: #fbbf24;
+    --tok-path: #7d8fae;
+    --tok-operator: #f472b6;
+    --tok-punct: #5c6f8f;
+    --tok-num: #fbbf24;
+    --tok-str: #86efac;
+    --tok-bool: #f87171;
 }
 
 /* Syntax highlighting for rendered signatures */
@@ -149,6 +116,11 @@
     box-sizing: border-box;
 }
 
+::selection {
+    background: rgba(34, 197, 94, 0.35);
+    color: #f0f6ff;
+}
+
 body {
     font-family: system-ui, -apple-system, sans-serif;
     background: var(--bg);
@@ -157,7 +129,7 @@ body {
 }
 
 a {
-    color: var(--link);
+    color: var(--fg);
     text-decoration: none;
 }
 
@@ -195,6 +167,7 @@ a:hover {
 
 .module-list li {
     padding: 4px 10px;
+    border-radius: 6px;
 }
 
 .content-wrapper {
@@ -218,14 +191,41 @@ a:hover {
     padding: 8px 12px;
     font-size: 1em;
     border: 1px solid var(--border);
-    border-radius: 5px;
-    background: var(--bg);
+    border-radius: 10px;
+    background: var(--code-bg);
     color: var(--fg);
+}
+
+.search-bar input::placeholder {
+    color: var(--muted);
+}
+
+.search-bar input:focus {
+    outline: none;
+    border-color: var(--link);
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
 }
 
 .main {
     padding: 20px 30px;
     max-width: 900px;
+}
+
+/* Shared code block treatment: every signature and doc-text block gets the
+   monospace stack, background, and rounded border here; each block adds its
+   own sizing, padding, and layout below. */
+
+.item-signature,
+.result-signature,
+.group-signature,
+.doc-text {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-family: var(--mono);
+    line-height: 1.6;
+    tab-size: 4;
 }
 
 /* Home page */
@@ -249,8 +249,13 @@ a:hover {
 .module-grid li {
     padding: 10px 15px;
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: 10px;
     min-width: 200px;
+    transition: border-color 0.15s ease;
+}
+
+.module-grid li:hover {
+    border-color: rgba(34, 197, 94, 0.45);
 }
 
 .module-desc {
@@ -274,8 +279,9 @@ a:hover {
     display: inline-block;
     font-size: 0.75em;
     padding: 2px 6px;
-    border-radius: 3px;
-    background: var(--sidebar-bg);
+    border-radius: 6px;
+    background: rgba(34, 197, 94, 0.12);
+    color: var(--link-hover);
     margin-right: 8px;
     text-transform: uppercase;
 }
@@ -286,12 +292,8 @@ a:hover {
 
 .result-signature {
     margin-top: 6px;
-    padding: 8px 12px;
-    background: var(--code-bg);
-    color: var(--code-fg);
-    border-radius: 5px;
-    font-family: monospace;
-    font-size: 0.9em;
+    padding: 10px 14px;
+    font-size: 1em;
     overflow-x: auto;
 }
 
@@ -313,8 +315,9 @@ a:hover {
 .item-kind {
     font-size: 0.8em;
     padding: 2px 8px;
-    border-radius: 3px;
-    background: var(--sidebar-bg);
+    border-radius: 6px;
+    background: rgba(34, 197, 94, 0.12);
+    color: var(--link-hover);
     text-transform: uppercase;
 }
 
@@ -334,12 +337,8 @@ a:hover {
 }
 
 .item-signature {
-    padding: 12px 16px;
-    background: var(--code-bg);
-    color: var(--code-fg);
-    border-radius: 5px;
-    font-family: monospace;
-    font-size: 0.95em;
+    padding: 14px 18px;
+    font-size: 1.05em;
     overflow-x: auto;
     margin-bottom: 20px;
 }
@@ -349,17 +348,19 @@ a:hover {
 }
 
 .doc-text {
-    padding: 12px 16px;
-    background: var(--code-bg);
-    border-radius: 5px;
+    padding: 14px 18px;
+    font-size: 1em;
     white-space: pre-wrap;
-    font-family: monospace;
-    font-size: 0.9em;
 }
 
 .item-meta {
     color: var(--muted);
     font-size: 0.9em;
+}
+
+/* The "Module: ..." cross-reference stays green, unlike the rest of the site's links. */
+.item-meta a {
+    color: var(--link);
 }
 
 /* The associated type of an impl item, e.g. `Defined on: SVector<f32, N>`. */
@@ -390,12 +391,8 @@ a:hover {
 
 .group-signature {
     margin-top: 4px;
-    padding: 6px 10px;
-    background: var(--code-bg);
-    color: var(--code-fg);
-    border-radius: 4px;
-    font-family: monospace;
-    font-size: 0.85em;
+    padding: 8px 12px;
+    font-size: 0.95em;
     overflow-x: auto;
 }
 
@@ -405,7 +402,7 @@ a:hover {
     padding: 20px 25px;
     margin-bottom: 20px;
     border: 1px solid var(--error);
-    border-radius: 5px;
+    border-radius: 10px;
     background: var(--code-bg);
 }
 
