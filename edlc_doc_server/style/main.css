@@ -264,18 +264,23 @@ a:hover {
     margin-top: 4px;
 }
 
-/* Search results */
+/* Item rows: shared by the search results list and the module page's item
+   groups. Each row is a kind badge + bold name title bar, a signature block,
+   and (optionally) a doc block — a typeset iframe or the raw doc text. */
 
-.result-list {
+.result-list,
+.item-group ul {
     list-style: none;
 }
 
-.result-item {
+.result-item,
+.group-item {
     padding: 12px 0;
     border-bottom: 1px solid var(--border);
 }
 
-.result-kind {
+.result-kind,
+.group-kind {
     display: inline-block;
     font-size: 0.75em;
     padding: 2px 6px;
@@ -286,25 +291,29 @@ a:hover {
     text-transform: uppercase;
 }
 
-.result-name {
+.result-name,
+.group-name {
     font-weight: bold;
 }
 
-.result-signature {
+.result-signature,
+.group-signature {
     margin-top: 6px;
     padding: 10px 14px;
     font-size: 1em;
     overflow-x: auto;
 }
 
-.result-doc {
+.result-doc,
+.group-doc {
     margin-top: 6px;
     color: var(--muted);
     font-size: 0.9em;
 }
 
-/* The typeset doc iframe in a search result sits where the raw `.result-doc` text did. */
-.result-item .doc-html {
+/* The typeset doc iframe sits where the raw doc text did. */
+.result-item .doc-html,
+.group-item .doc-html {
     margin-top: 6px;
 }
 
@@ -385,7 +394,8 @@ a:hover {
     color: var(--tok-type);
 }
 
-/* Module page */
+/* Module page. The item rows themselves are styled by the shared
+   `.group-item` rules above (with their search-result counterparts). */
 
 .item-group {
     margin-bottom: 25px;
@@ -395,22 +405,6 @@ a:hover {
     border-bottom: 1px solid var(--border);
     padding-bottom: 5px;
     margin-bottom: 10px;
-}
-
-.item-group ul {
-    list-style: none;
-}
-
-.item-group li {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-}
-
-.group-signature {
-    margin-top: 4px;
-    padding: 8px 12px;
-    font-size: 0.95em;
-    overflow-x: auto;
 }
 
 /* Error page */

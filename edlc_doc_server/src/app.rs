@@ -20,6 +20,7 @@
 //! Layout inspired by docs.rs: a top search bar, a left sidebar with module navigation, and a
 //! main content area showing item signatures and doc text.
 
+use leptos::attr::custom::custom_attribute;
 use leptos::hydration::{AutoReload, HydrationScripts};
 use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
@@ -40,6 +41,11 @@ use crate::signature::SignatureView;
 /// user pauses for this long (see `SearchPage`).
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// Extra height (px) added to a doc iframe on top of its content's measured `scrollHeight`.
+/// The content ends up a few px taller than the iframe's viewport (body margins, sub-pixel
+/// rounding), which otherwise shows a sliver of inner scrollbar; this padding keeps it clear.
+const DOC_IFRAME_HEIGHT_PAD: i32 = 10;
+
 /// Sizes the rendered-doc `<iframe>` to the height of its content, so the typeset
 /// doc shows without an inner scrollbar. The iframe is same-origin (it loads
 /// `/doc-html/<name>` from this server), so its `contentDocument` is reachable.
@@ -54,7 +60,7 @@ fn set_doc_iframe_height(iframe: &web_sys::HtmlIFrameElement) {
     let Some(body) = doc.body() else {
         return;
     };
-    let height = body.scroll_height();
+    let height = body.scroll_height() + DOC_IFRAME_HEIGHT_PAD;
     iframe.set_height(&format!("{height}px"));
 }
 
@@ -735,16 +741,56 @@ fn item_group_view(title: &str, items: Vec<DocSummary>) -> impl IntoView {
                         } else {
                             format!("/item/{}", item.qual_name)
                         };
+                        let doc = item.doc_text.clone();
+                        let has_doc = !doc.is_empty();
+                        let has_doc_html = item.has_doc_html;
+                        let qual = item.qual_name.clone();
+                        // Row styled like a search result: kind badge + bold name,
+                        // signature, and the doc comment (rendered iframe or raw text).
                         view! {
-                            <li>
+                            <li class="group-item">
                                 <A href={href}>
-                                    {item.name.clone()}
+                                    <span class="group-kind">{item.kind.clone()}</span>
+                                    <span class="group-name">{item.name.clone()}</span>
                                 </A>
                                 <SignatureView
                                     blob=item.blob.clone()
                                     plain=item.signature.clone()
                                     class="group-signature"
                                 />
+                                <Show when=move || has_doc>
+                                    {if has_doc_html {
+                                        // `loading="lazy"` defers each iframe until it scrolls near
+                                        // the viewport — a module page can list many items, so we
+                                        // don't want every doc loaded up front.
+                                        view! {
+                                            <iframe
+                                                class="doc-html"
+                                                // `loading` isn't in Leptos's typed `Iframe` attribute set,
+                                                // so it's added as a custom attribute.
+                                                {custom_attribute("loading", "lazy")}
+                                                src=format!("/doc-html/{}", qual)
+                                                on:load=move |ev| {
+                                                    if let Some(target) = ev.target() {
+                                                        if let Ok(iframe) =
+                                                            target
+                                                                .dyn_into::<web_sys::HtmlIFrameElement>()
+                                                        {
+                                                            set_doc_iframe_height(&iframe);
+                                                        }
+                                                    }
+                                                }
+                                                title="Rendered documentation"
+                                            />
+                                        }
+                                        .into_any()
+                                    } else {
+                                        // No rendered HTML (DB built without rendering): fall
+                                        // back to the raw doc text. Cloned, not moved, because
+                                        // the `<Show>` children closure is re-runnable.
+                                        view! { <p class="group-doc">{doc.clone()}</p> }.into_any()
+                                    }}
+                                </Show>
                             </li>
                         }
                     }).collect::<Vec<_>>()}
