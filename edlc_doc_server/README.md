@@ -78,11 +78,27 @@ without watch, see [Running](#running).
 |---|---|
 | `/` | Home page with search bar and module listing |
 | `/search?q=...` | Full-text search results (FTS5), live-filtered |
-| `/item/:name` | Single item page: kind, signature, doc text, module link |
+| `/item/:name` | Single item page: kind, signature, rendered documentation (or raw doc text), module link |
 | `/module/:name` | All items in a module, grouped by kind (Functions, Types, Variables, etc.) |
+| `/doc-html/:name` | The typeset HTML of an item's doc comment (same-origin iframe source); 404 if absent |
+| `/fonts/:file` | A bundled doc font (OTF); 404 on unknown name |
 
 The layout features a left sidebar with module navigation, a top search bar, and a main content
 area — inspired by docs.rs. The site uses a dark midnight-blue theme with a strong green accent.
+
+### Rendered documentation
+
+When the `docs.db` was built with the `render` feature of [`edlc_doc_db`](../edlc_doc_db), each
+item's doc comment is typeset from Typst to HTML at build time and stored in the row's `doc_html`
+column. On an item page that HTML is shown in a same-origin `<iframe>` loading
+`/doc-html/<qual_name>`, themed to match the site (via an injected `<style>` block, including
+`@font-face` rules backed by `/fonts/...`). The iframe is auto-sized to its content so there is
+no inner scrollbar (re-measured on window resize). If an item has no rendered HTML (rendering was
+skipped or the DB predates `render`), the raw `doc_text` is shown in a `<pre>` instead. The MCP
+endpoints are unchanged and always return the raw `doc_text`.
+
+> **Rebuild note:** `doc_html` is produced at write time. If a database predates `render` (or the
+> doc comments changed), rebuild it with `cargo run -p build_doc_db` before serving.
 
 ### Build
 
@@ -124,6 +140,10 @@ For a release build, run `cargo leptos build --release` and then
 > **Note:** The serve step must run the binary that `cargo-leptos` built. Do not substitute
 > `cargo run -p edlc_doc_server serve` here — plain `cargo run` produces a server binary whose
 > SSR output does not match the wasm bundle, which breaks client-side hydration.
+>
+> **Note:** If `EDL_DOC_SITE` is set (e.g. by a local install, see below) it takes precedence over
+> the in-tree `target/site`. When serving a freshly built in-tree bundle while such an env var is
+> set, pass `--site target/site` explicitly.
 
 ### Locating the site bundle
 

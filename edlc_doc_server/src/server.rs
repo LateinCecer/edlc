@@ -39,6 +39,10 @@ pub struct DocSummary {
     pub signature: String,
     pub doc_text: String,
     pub blob: String,
+    /// Whether a rendered (typeset) HTML form of the doc comment exists for this
+    /// item. The HTML itself never crosses the wire; it is served separately at
+    /// `/doc-html/<name>` for the item page's `<iframe>`.
+    pub has_doc_html: bool,
 }
 
 /// Error type returned by the documentation server functions. Serializable to both builds
@@ -128,6 +132,7 @@ impl From<DocRow> for DocSummary {
             signature: row.signature,
             doc_text: row.doc_text,
             blob: row.blob,
+            has_doc_html: !row.doc_html.is_empty(),
         }
     }
 }

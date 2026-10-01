@@ -9,7 +9,7 @@ mod child;
 /// Adds two 32-bit floating-point numbers.
 /// The arithmetic for this is $a + b$.
 ///
-/// # Example
+/// **Example**
 ///
 /// ```
 /// core::assert(add(1, 2), 3);
@@ -22,6 +22,8 @@ fn add(a: f32, b: f32) -> f32 {
 ///
 /// The `shared` modifier on `field` marks it as read-only shared data; `async dst` marks the
 /// destination as an asynchronously-written handle.
+///
+/// #quote[The gradient is written back when all reads of `field` are complete.]
 async fn gradient(shared field: f32, async dst: f32) {
     let _ = field + dst;
 }

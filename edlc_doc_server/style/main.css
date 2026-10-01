@@ -353,6 +353,18 @@ a:hover {
     white-space: pre-wrap;
 }
 
+/* The typeset doc comment, served at /doc-html/<name> and shown in a same-origin
+   iframe. Styled like the other code blocks so it reads as part of the page; its
+   height is set inline by the client to fit the content (no inner scrollbar). */
+.doc-html {
+    display: block;
+    width: 100%;
+    min-height: 2em;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--code-bg);
+}
+
 .item-meta {
     color: var(--muted);
     font-size: 0.9em;

@@ -15,3 +15,13 @@ edlc_core = { workspace = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Typst rendering of doc comments (build time only; off by default so that
+# consumers that only read a `docs.db` — like the doc server — don't compile
+# it in). Pinned exactly: HTML export is experimental upstream and may change
+# between releases.
+typst = { version = "=0.15.1", optional = true }
+typst-html = { version = "=0.15.1", optional = true }
+
+[features]
+default = []
+render = ["dep:typst", "dep:typst-html"]

@@ -36,8 +36,19 @@ leptos_router = { version = "0.8", features = ["nightly"] }
 leptos_axum = { version = "0.8", optional = true }
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"], optional = true }
-wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen = "0.2"
 console_error_panic_hook = { version = "0.1", optional = true }
+# DOM bindings for sizing the rendered-doc `<iframe>` to its content (client only at
+# runtime, but the crate compiles for both targets so it is a plain dependency).
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "Event",
+    "EventTarget",
+    "HtmlElement",
+    "HtmlIFrameElement",
+    "Window",
+] }
 
 # getrandom needs the wasm_js feature for WASM targets
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -51,7 +62,7 @@ edlc_core = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [features]
-hydrate = ["leptos/hydrate", "dep:wasm-bindgen", "dep:console_error_panic_hook"]
+hydrate = ["leptos/hydrate", "dep:console_error_panic_hook"]
 ssr = [
     "dep:axum",
     "dep:leptos_axum",

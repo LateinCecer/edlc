@@ -24,6 +24,11 @@
 //! This crate contains no compile logic — an implementor links `edlc_core`, drives a compile, and
 //! calls `compiler.generate_docs(&mut DocDbWriter::open(path)?)`.
 
+pub mod fonts;
+
+#[cfg(feature = "render")]
+pub mod typst;
+
 use std::path::Path;
 
 use edlc_core::prelude::{DocGenerator, Item, TypeDoc};
@@ -102,18 +107,48 @@ fn associated_type_path(item: &Item) -> Option<Vec<String>> {
 /// directly to `Compiler::generate_docs`.
 pub struct DocDbWriter {
     conn: Connection,
+    /// An optional Typst renderer for doc comments. When present, the rendered HTML is
+    /// stored in the `doc_html` column; when absent (or when a doc comment fails to render),
+    /// `doc_html` stays empty and the raw `doc_text` is the fallback.
+    #[cfg(feature = "render")]
+    renderer: Option<crate::typst::DocRenderer>,
 }
 
 impl DocDbWriter {
     /// Opens (or creates) a database file and initializes the schema. Any existing rows are
-    /// deleted first, so each build produces a fresh database.
+    /// deleted first, so each build produces a fresh database. Doc comments are stored as raw
+    /// text only (`doc_html` stays empty).
     pub fn open<P: AsRef<Path>>(path: P) -> rusqlite::Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
         init_schema(&conn)?;
+        #[cfg(feature = "render")]
+        return Ok(DocDbWriter {
+            conn,
+            renderer: None,
+        });
+        #[cfg(not(feature = "render"))]
         Ok(DocDbWriter { conn })
+    }
+
+    /// Like [`DocDbWriter::open`], but with a Typst renderer attached so that doc comments
+    /// are rendered to HTML (stored in the `doc_html` column) as items are inserted.
+    #[cfg(feature = "render")]
+    pub fn open_with_renderer<P: AsRef<Path>>(
+        path: P,
+        renderer: crate::typst::DocRenderer,
+    ) -> rusqlite::Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+        init_schema(&conn)?;
+        Ok(DocDbWriter {
+            conn,
+            renderer: Some(renderer),
+        })
     }
 
     /// Opens an in-memory database (useful for tests).
@@ -122,7 +157,27 @@ impl DocDbWriter {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
         init_schema(&conn)?;
+        #[cfg(feature = "render")]
+        return Ok(DocDbWriter {
+            conn,
+            renderer: None,
+        });
+        #[cfg(not(feature = "render"))]
         Ok(DocDbWriter { conn })
+    }
+
+    /// Like [`DocDbWriter::open_memory`], but with a Typst renderer attached so that doc
+    /// comments are rendered to HTML as items are inserted.
+    #[cfg(feature = "render")]
+    pub fn open_memory_with_renderer(renderer: crate::typst::DocRenderer) -> rusqlite::Result<Self> {
+        let conn = Connection::open_in_memory_with_flags(
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )?;
+        init_schema(&conn)?;
+        Ok(DocDbWriter {
+            conn,
+            renderer: Some(renderer),
+        })
     }
 
     /// Finalizes the database (builds the FTS index, vacuums). Consumes the writer.
@@ -131,6 +186,30 @@ impl DocDbWriter {
         // Vacuum reclaims space from the pre-build DELETE.
         self.conn.execute("VACUUM", [])?;
         Ok(())
+    }
+
+    /// Renders a doc comment with the attached renderer, when there is one.
+    ///
+    /// A doc comment that fails to render is a warning, not an error: an empty
+    /// string is returned so the raw `doc_text` remains the fallback.
+    fn render_doc_text(&self, doc_text: &str) -> String {
+        #[cfg(not(feature = "render"))]
+        let _ = doc_text;
+        #[cfg(feature = "render")]
+        {
+            if !doc_text.is_empty() {
+                if let Some(renderer) = &self.renderer {
+                    return match renderer.render(doc_text) {
+                        Ok(html) => html,
+                        Err(e) => {
+                            eprintln!("warning: {e}; keeping the raw doc text as fallback");
+                            String::new()
+                        }
+                    };
+                }
+            }
+        }
+        String::new()
     }
 }
 
@@ -155,12 +234,13 @@ impl DocGenerator for DocDbWriter {
         // The owning module is the qualifier path minus the last segment, when present.
         let module = full_name.trim(1).map(|m| format!("{m}"));
         let signature = format!("{item}");
+        let doc_html = self.render_doc_text(doc_text);
         let blob = serde_json::to_string(item)
             .map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
 
         self.conn.execute(
-            "INSERT INTO items (kind, name, qual_name, module, signature, doc_text, blob) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO items (kind, name, qual_name, module, signature, doc_text, doc_html, blob) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 kind.as_str(),
                 simple_name,
@@ -168,6 +248,7 @@ impl DocGenerator for DocDbWriter {
                 module,
                 signature,
                 doc_text,
+                doc_html,
                 blob,
             ],
         )?;
@@ -191,13 +272,36 @@ pub struct DocRow {
     pub module: Option<String>,
     pub signature: String,
     pub doc_text: String,
+    /// The Typst-rendered HTML of `doc_text` (a standalone HTML document), or empty when the
+    /// item has no doc comment, the database was built without a renderer, or the markup
+    /// failed to render. Deliberately not part of the FTS index.
+    pub doc_html: String,
     pub blob: String,
 }
 
+/// The schema version of the `items` table.
+const SCHEMA_VERSION: i32 = 2;
+
 impl DocDb {
     /// Opens an existing database read-only.
+    ///
+    /// Rejects databases built with an older schema (e.g. missing the `doc_html`
+    /// column) with a hint to rebuild.
     pub fn open_readonly<P: AsRef<Path>>(path: P) -> rusqlite::Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < SCHEMA_VERSION {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "this documentation database has an outdated schema (user_version = \
+                         {version}, expected >= {SCHEMA_VERSION}); rebuild it with \
+                         `cargo run -p build_doc_db`"
+                    ),
+                ),
+            )));
+        }
         Ok(DocDb { conn })
     }
 
@@ -225,7 +329,7 @@ impl DocDb {
         };
         let kind_name = kind.map(|k| k.as_str().to_string());
         let sql =
-            "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.blob \
+            "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.doc_html, i.blob \
                     FROM search_index s JOIN items i ON s.rowid = i.id \
                     WHERE search_index MATCH ?1 AND (?3 IS NULL OR i.kind = ?3) \
                     ORDER BY bm25(search_index, 10.0, 1.0, 2.0, 3.0) LIMIT ?2";
@@ -239,7 +343,7 @@ impl DocDb {
 
     /// Fetches a single item by id.
     pub fn get_item(&self, id: i64) -> rusqlite::Result<Option<DocRow>> {
-        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                    FROM items WHERE id = ?1";
         let mut stmt = self.conn.prepare(sql)?;
         let mut rows = stmt.query_map(params![id], row_mapper())?;
@@ -250,7 +354,7 @@ impl DocDb {
     /// `name` match; on a simple-name match the first row in `(kind, name)` order is returned.
     /// Returns `Ok(None)` when no item matches.
     pub fn get_item_by_name(&self, name: &str) -> rusqlite::Result<Option<DocRow>> {
-        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                     FROM items WHERE qual_name = ?1 OR name = ?1 \
                     ORDER BY (qual_name != ?1), kind, name LIMIT 1";
         let mut stmt = self.conn.prepare(sql)?;
@@ -263,7 +367,7 @@ impl DocDb {
     /// `(kind, name)`). Use this to detect and report ambiguous simple names instead of
     /// silently picking the first match.
     pub fn get_item_by_name_candidates(&self, name: &str) -> rusqlite::Result<Vec<DocRow>> {
-        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                     FROM items WHERE qual_name = ?1 OR name = ?1 \
                     ORDER BY (qual_name != ?1), kind, name";
         let mut stmt = self.conn.prepare(sql)?;
@@ -279,7 +383,7 @@ impl DocDb {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let prefix = format!("{escaped}::%");
-        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+        let sql = "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                    FROM items WHERE module = ?1 OR qual_name LIKE ?2 ESCAPE '\\' \
                    ORDER BY kind, name";
         let mut stmt = self.conn.prepare(sql)?;
@@ -292,7 +396,7 @@ impl DocDb {
         match kind {
             Some(k) => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+                    "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                      FROM items WHERE kind = ?1 ORDER BY kind, name",
                 )?;
                 let rows = stmt.query_map(params![k.as_str()], row_mapper())?;
@@ -300,7 +404,7 @@ impl DocDb {
             }
             None => {
                 let mut stmt = self.conn.prepare(
-                    "SELECT id, kind, name, qual_name, module, signature, doc_text, blob \
+                    "SELECT id, kind, name, qual_name, module, signature, doc_text, doc_html, blob \
                      FROM items ORDER BY kind, name",
                 )?;
                 let rows = stmt.query_map([], row_mapper())?;
@@ -336,7 +440,8 @@ fn row_mapper() -> impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<DocRow> {
             module: row.get(4)?,
             signature: row.get(5)?,
             doc_text: row.get(6)?,
-            blob: row.get(7)?,
+            doc_html: row.get(7)?,
+            blob: row.get(8)?,
         })
     }
 }
@@ -365,16 +470,17 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
          DROP TRIGGER IF EXISTS items_ad;
          DROP TRIGGER IF EXISTS items_au;
 
-         CREATE TABLE items (
-             id        INTEGER PRIMARY KEY AUTOINCREMENT,
-             kind      TEXT NOT NULL,
-             name      TEXT NOT NULL,
-             qual_name TEXT NOT NULL,
-             module    TEXT,
-             signature TEXT NOT NULL,
-             doc_text  TEXT NOT NULL DEFAULT '',
-             blob      TEXT NOT NULL
-         );
+          CREATE TABLE items (
+              id        INTEGER PRIMARY KEY AUTOINCREMENT,
+              kind      TEXT NOT NULL,
+              name      TEXT NOT NULL,
+              qual_name TEXT NOT NULL,
+              module    TEXT,
+              signature TEXT NOT NULL,
+              doc_text  TEXT NOT NULL DEFAULT '',
+              doc_html  TEXT NOT NULL DEFAULT '',
+              blob      TEXT NOT NULL
+          );
 
          CREATE VIRTUAL TABLE search_index USING fts5(
              name, module, doc_text, signature,
@@ -396,7 +502,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
              VALUES (new.id, new.name, new.module, new.doc_text, new.signature);
          END;
 
-         PRAGMA user_version = 1;",
+          PRAGMA user_version = 2;",
     )?;
     Ok(())
 }
@@ -808,5 +914,103 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].qual_name, "f");
         assert!(rows[0].module.is_none());
+    }
+
+    /// Without a renderer, `doc_html` is empty for every item (raw text is the
+    /// content).
+    #[test]
+    fn doc_html_is_empty_without_a_renderer() {
+        let db = db_with(&[let_item(&["example", "pi"])]);
+        let rows = db.list_items(None).expect("list_items");
+        assert!(rows.iter().all(|r| r.doc_html.is_empty()));
+    }
+
+    /// With a renderer, a doc comment is stored both as raw text and as a
+    /// standalone HTML document; empty doc comments stay empty in both.
+    #[cfg(feature = "render")]
+    #[test]
+    fn doc_html_is_stored_with_a_renderer() {
+        let mut writer =
+            DocDbWriter::open_memory_with_renderer(crate::typst::DocRenderer::new())
+                .expect("open memory db");
+        writer
+            .insert_definition(&let_item_with_doc(&["example", "pi"], "The value of *pi*."))
+            .expect("insert item");
+        writer.insert_definition(&let_item(&["example", "e"])).expect("insert item");
+        let db = DocDb::from_connection(writer.conn);
+
+        let row = db.get_item_by_name("example::pi").expect("get").expect("row");
+        assert_eq!(row.doc_text, "The value of *pi*.");
+        assert!(row.doc_html.starts_with("<!DOCTYPE html>"));
+        assert!(row.doc_html.contains("pi"));
+
+        // An item without a doc comment stays empty in both columns.
+        let row = db.get_item_by_name("example::e").expect("get").expect("row");
+        assert!(row.doc_text.is_empty());
+        assert!(row.doc_html.is_empty());
+    }
+
+    /// A doc comment that fails to render warns but keeps the build going:
+    /// `doc_html` is empty, `doc_text` keeps the raw markup.
+    #[cfg(feature = "render")]
+    #[test]
+    fn broken_doc_comment_falls_back_to_raw_text() {
+        let mut writer =
+            DocDbWriter::open_memory_with_renderer(crate::typst::DocRenderer::new())
+                .expect("open memory db");
+        writer
+            .insert_definition(&let_item_with_doc(&["example", "bad"], "#let x = "))
+            .expect("insert must not fail");
+        let db = DocDb::from_connection(writer.conn);
+        let row = db.get_item_by_name("example::bad").expect("get").expect("row");
+        assert_eq!(row.doc_text, "#let x = ");
+        assert!(row.doc_html.is_empty());
+    }
+
+    /// A database built with the v1 schema (no `doc_html` column) is rejected
+    /// by `open_readonly` with a rebuild hint.
+    #[test]
+    fn open_readonly_rejects_v1_schema() {
+        let dir = std::env::temp_dir().join(format!("edlc_doc_db_v1_test_{}", std::process::id()));
+        let path = dir.join("v1.db");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        {
+            let conn = Connection::open(&path).expect("open v1 db");
+            conn.execute_batch(
+                "CREATE TABLE items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL, name TEXT NOT NULL, qual_name TEXT NOT NULL,
+                    module TEXT, signature TEXT NOT NULL,
+                    doc_text TEXT NOT NULL DEFAULT '', blob TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;",
+            )
+            .expect("create v1 schema");
+        }
+        let err = match DocDb::open_readonly(&path) {
+            Ok(_) => panic!("v1 db must be rejected"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("rebuild"), "error should hint at rebuilding: {msg}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Builds a `Let` item with the given doc text.
+    #[cfg(feature = "render")]
+    fn let_item_with_doc(parts: &[&str], doc: &str) -> Item {
+        Item::from(LetDoc {
+            name: parts
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .into(),
+            src: PortableModuleSrc::File("test.eq".to_string()),
+            pos: SrcPos::new(0, 0, 0),
+            doc: doc.to_string(),
+            ty: TypeDoc::Base("f32".to_string().into(), None),
+            ms: Modifiers::default(),
+        })
     }
 }

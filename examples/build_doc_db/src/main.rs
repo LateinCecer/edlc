@@ -64,7 +64,10 @@ fn run(project_dir: &Path, out_path: &Path) -> Result<(), Box<dyn std::error::Er
         .ok_or_else(|| format!("project directory not found: {}", project_dir.display()))?;
     jit.compile_lib("example", &supplier)?;
 
-    let mut writer = DocDbWriter::open(out_path)?;
+    // Render doc comments (Typst markup) to HTML as items are inserted. Doc
+    // comments that fail to render fall back to the raw text with a warning.
+    let renderer = edlc_doc_db::typst::DocRenderer::new();
+    let mut writer = DocDbWriter::open_with_renderer(out_path, renderer)?;
     jit.compiler.generate_docs(&mut writer);
     writer.finish()?;
     Ok(())

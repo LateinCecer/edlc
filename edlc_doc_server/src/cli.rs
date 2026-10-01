@@ -239,6 +239,64 @@ fn site_candidates(
     candidates
 }
 
+/// The theme for rendered doc pages, injected into each `/doc-html/<name>` response.
+const DOC_THEME_CSS: &str = include_str!("doc_html.css");
+
+/// Injects [`DOC_THEME_CSS`] into the standalone HTML document the Typst renderer
+/// emitted, right before `</head>`. The document carries no theme or font
+/// references of its own, so the browser would otherwise lay it out with a white
+/// background and default fonts.
+fn inject_doc_theme(html: &str) -> String {
+    let tag = format!("<style id=\"edlc-doc-theme\">{DOC_THEME_CSS}</style>");
+    match html.find("</head>") {
+        Some(idx) => {
+            let mut out = String::with_capacity(html.len() + tag.len() + 16);
+            out.push_str(&html[..idx]);
+            out.push_str(&tag);
+            out.push_str(&html[idx..]);
+            out
+        }
+        None => format!("{tag}{html}"),
+    }
+}
+
+/// Looks up an item by name and returns its rendered (themed) doc HTML, if any.
+///
+/// Returns `None` (→ 404) when the item does not exist or has no rendered doc
+/// (e.g. the database was built without the `render` feature).
+fn lookup_doc_html(
+    db: &DbHandle,
+    name: &str,
+) -> Result<Option<String>, axum::http::StatusCode> {
+    let internal = axum::http::StatusCode::INTERNAL_SERVER_ERROR;
+    let guard = db.lock().map_err(|_| internal)?;
+    let row = guard.get_item_by_name(name).map_err(|_| internal)?;
+    Ok(row
+        .filter(|r| !r.doc_html.is_empty())
+        .map(|r| inject_doc_theme(&r.doc_html)))
+}
+
+/// Serves a vendored font file (from `edlc_doc_db::fonts::FONTS`) by filename,
+/// or 404s on an unknown name. The fonts are immutable, so they are cached
+/// aggressively by browsers.
+fn serve_font(file: &str) -> Result<axum::response::Response, axum::http::StatusCode> {
+    use axum::http::{header, HeaderValue};
+    for (name, bytes) in edlc_doc_db::fonts::FONTS {
+        if *name == file {
+            let mut resp =
+                axum::response::Response::new(axum::body::Body::from(bytes.to_vec()));
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("font/otf"));
+            resp.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
+            );
+            return Ok(resp);
+        }
+    }
+    Err(axum::http::StatusCode::NOT_FOUND)
+}
+
 fn run_serve(
     db_path: Option<String>,
     config_path: Option<String>,
@@ -303,6 +361,8 @@ fn run_serve(
 
     runtime
         .block_on(async {
+            use axum::extract::Path;
+            use axum::routing::get;
             use axum::Router;
             use edlc_doc_server::app::*;
             use leptos::prelude::*;
@@ -316,6 +376,12 @@ fn run_serve(
                 .build();
 
             let routes = generate_route_list(App);
+
+            // The doc HTML and the fonts it references are served directly (not
+            // through a Leptos route): the HTML is shown in a same-origin
+            // `<iframe>` on item pages and the fonts are pulled in by the
+            // `@font-face` rules the theme injects into that page.
+            let doc_db = db_handle.clone();
 
             let app = Router::new()
                 .leptos_routes_with_context(
@@ -331,6 +397,27 @@ fn run_serve(
                         let leptos_opts = leptos_opts.clone();
                         move || shell(leptos_opts.clone())
                     },
+                )
+                .route(
+                    "/doc-html/{name}",
+                    get(move |Path(name): Path<String>| {
+                        let db = doc_db.clone();
+                        async move {
+                            let html = tokio::task::spawn_blocking(move || {
+                                lookup_doc_html(&db, &name)
+                            })
+                            .await
+                            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)??;
+                            match html {
+                                Some(html) => Ok(axum::response::Html(html)),
+                                None => Err(axum::http::StatusCode::NOT_FOUND),
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/fonts/{file}",
+                    get(|Path(file): Path<String>| async move { serve_font(&file) }),
                 )
                 .fallback(leptos_axum::file_and_error_handler(shell))
                 .with_state(leptos_opts);

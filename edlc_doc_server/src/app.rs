@@ -29,9 +29,47 @@ use leptos_router::{
     NavigateOptions, ParamSegment, StaticSegment,
 };
 
+use wasm_bindgen::JsCast;
+
 use crate::doc_repr;
 use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
 use crate::signature::SignatureView;
+
+/// Sizes the rendered-doc `<iframe>` to the height of its content, so the typeset
+/// doc shows without an inner scrollbar. The iframe is same-origin (it loads
+/// `/doc-html/<name>` from this server), so its `contentDocument` is reachable.
+fn set_doc_iframe_height(iframe: &web_sys::HtmlIFrameElement) {
+    let Some(doc) = iframe.content_document() else {
+        return;
+    };
+    // `ready_state` is a string getter in web-sys ("loading" | "interactive" | "complete").
+    if doc.ready_state() != "complete" {
+        return;
+    }
+    let Some(body) = doc.body() else {
+        return;
+    };
+    let height = body.scroll_height();
+    iframe.set_height(&format!("{height}px"));
+}
+
+/// Sizes the current rendered-doc iframe (if any) to its content. Used on window
+/// resize, where the iframe's width — and therefore its content's height — changes.
+fn sync_current_doc_iframe() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(doc) = window.document() else {
+        return;
+    };
+    let Ok(Some(element)) = doc.query_selector("iframe.doc-html") else {
+        return;
+    };
+    let Ok(iframe) = element.dyn_into::<web_sys::HtmlIFrameElement>() else {
+        return;
+    };
+    set_doc_iframe_height(&iframe);
+}
 
 /// The HTML shell. Called from the server to produce the initial HTML document.
 #[cfg(feature = "ssr")]
@@ -57,6 +95,24 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
+
+    // Client-only: keep the rendered-doc `<iframe>` sized to its content when the window
+    // is resized (its width — and so its content's height — changes with it). The effect
+    // reads no reactive values, so it runs exactly once on mount.
+    Effect::new(move || {
+        sync_current_doc_iframe();
+        if let Some(window) = web_sys::window() {
+            let handler =
+                wasm_bindgen::prelude::Closure::<dyn FnMut(web_sys::Event)>::new(
+                    move |_ev: web_sys::Event| {
+                        sync_current_doc_iframe();
+                    },
+                );
+            let _ = window
+                .add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+            handler.forget();
+        }
+    });
 
     view! {
         <Stylesheet id="leptos" href="/pkg/edlc_doc_server.css"/>
@@ -371,7 +427,10 @@ fn ItemPage() -> impl IntoView {
                             Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
                             Ok(doc) => {
                                 let qual = doc.qual_name.clone();
-                                let doc_text = doc.doc_text.clone();
+                                // `doc_text` is a `Copy` signal so the re-runnable children closure
+                                // below can read it without moving a non-`Copy` value out of this
+                                // (re-runnable) closure's environment.
+                                let doc_text = signal(doc.doc_text.clone()).0;
                                 let kind = doc.kind.clone();
                                 let name = doc.name.clone();
                                 // Decompose the item's owner: the module it (or its associated
@@ -383,7 +442,14 @@ fn ItemPage() -> impl IntoView {
                                     .map(|item| doc_repr::item_owner(&item, &qual))
                                     .unwrap_or_else(|| doc_repr::ItemOwner::from_qual(&qual));
                                 let has_qual = qual != name;
-                                let has_doc_text = !doc_text.is_empty();
+                                let has_doc_text = !doc_text.get().is_empty();
+                                let has_doc_html = doc.has_doc_html;
+                                // The typeset doc is served at `/doc-html/<qual_name>` and shown in a
+                                // same-origin `<iframe>`; the raw text stays as the fallback. `doc_src`
+                                // is a `Copy` signal so the re-runnable children closure can read it
+                                // for the iframe's `src` without moving a non-`Copy` value out of its
+                                // environment.
+                                let doc_src = signal(format!("/doc-html/{}", qual)).0;
                                 let has_module = !owner.module.is_empty();
                                 let module_link = owner.module.join("::");
                                 let has_type = owner.has_type();
@@ -445,7 +511,40 @@ fn ItemPage() -> impl IntoView {
                                     <Show when=move || has_doc_text>
                                         <div class="item-doc">
                                             <h2>"Documentation"</h2>
-                                            <pre class="doc-text">{doc_text.clone()}</pre>
+                                            {move || {
+                                                // The typeset doc (when the database was built with
+                                                // rendering) is shown in a same-origin `<iframe>`;
+                                                // otherwise the raw doc text is shown as before.
+                                                // Fresh locals (`src`, `text`) are moved into the
+                                                // children; the captured `doc_src`/`doc_text` are only
+                                                // borrowed, keeping this re-runnable closure `Fn`.
+                                                let src = doc_src.get();
+                                                let text = doc_text.get();
+                                                if has_doc_html {
+                                                    view! {
+                                                        <iframe
+                                                            class="doc-html"
+                                                            src=src
+                                                            on:load=move |ev| {
+                                                                if let Some(target) = ev.target() {
+                                                                    if let Ok(iframe) =
+                                                                        target.dyn_into::<web_sys::HtmlIFrameElement>()
+                                                                    {
+                                                                        set_doc_iframe_height(&iframe);
+                                                                    }
+                                                                }
+                                                            }
+                                                            title="Rendered documentation"
+                                                        />
+                                                    }
+                                                    .into_any()
+                                                } else {
+                                                    view! {
+                                                        <pre class="doc-text">{text}</pre>
+                                                    }
+                                                    .into_any()
+                                                }
+                                            }}
                                         </div>
                                     </Show>
                                     <div class="item-meta">

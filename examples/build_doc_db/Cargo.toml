@@ -15,5 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 edlc_core = { workspace = true }
-edlc_doc_db = { workspace = true }
+# `render` enables build-time Typst rendering of doc comments (see the
+# `doc_html` column in the emitted `docs.db`).
+edlc_doc_db = { workspace = true, features = ["render"] }
 edlc_codegen_cranelift = { workspace = true }
