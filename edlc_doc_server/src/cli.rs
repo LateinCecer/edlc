@@ -409,7 +409,25 @@ fn run_serve(
                             .await
                             .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)??;
                             match html {
-                                Some(html) => Ok(axum::response::Html(html)),
+                                Some(html) => {
+                                    // The rendered doc is static for the life of this database, so
+                                    // let the browser cache it: a search results page shows many of
+                                    // these iframes and live search re-renders them on every
+                                    // keystroke. A DB rebuild needs a hard refresh to show new
+                                    // rendered docs.
+                                    use axum::http::{header, HeaderValue};
+                                    let mut resp =
+                                        axum::response::Response::new(axum::body::Body::from(html));
+                                    resp.headers_mut().insert(
+                                        header::CONTENT_TYPE,
+                                        HeaderValue::from_static("text/html; charset=utf-8"),
+                                    );
+                                    resp.headers_mut().insert(
+                                        header::CACHE_CONTROL,
+                                        HeaderValue::from_static("public, max-age=300"),
+                                    );
+                                    Ok(resp)
+                                }
                                 None => Err(axum::http::StatusCode::NOT_FOUND),
                             }
                         }

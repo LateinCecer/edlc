@@ -90,12 +90,18 @@ area — inspired by docs.rs. The site uses a dark midnight-blue theme with a st
 
 When the `docs.db` was built with the `render` feature of [`edlc_doc_db`](../edlc_doc_db), each
 item's doc comment is typeset from Typst to HTML at build time and stored in the row's `doc_html`
-column. On an item page that HTML is shown in a same-origin `<iframe>` loading
-`/doc-html/<qual_name>`, themed to match the site (via an injected `<style>` block, including
-`@font-face` rules backed by `/fonts/...`). The iframe is auto-sized to its content so there is
-no inner scrollbar (re-measured on window resize). If an item has no rendered HTML (rendering was
-skipped or the DB predates `render`), the raw `doc_text` is shown in a `<pre>` instead. The MCP
-endpoints are unchanged and always return the raw `doc_text`.
+column. On an item page — and in the list of [search results](#pages) — that HTML is shown in a
+same-origin `<iframe>` loading `/doc-html/<qual_name>`, themed to match the site (via an injected
+`<style>` block, including `@font-face` rules backed by `/fonts/...`). Each iframe is auto-sized to
+its content so there is no inner scrollbar (re-measured on window resize). If an item has no
+rendered HTML (rendering was skipped or the DB predates `render`), the raw `doc_text` is shown
+instead (in a `<pre>` on the item page, in a `<p>` in search results). The MCP endpoints are
+unchanged and always return the raw `doc_text`.
+
+> **Caching:** `/doc-html/...` responses are served with `Cache-Control: public, max-age=300`.
+> The rendered docs are static for the life of the database, and the search page re-loads many of
+> them while you type, so the browser cache keeps that cheap. After rebuilding the database, do a
+> hard refresh (or wait for the cache to expire) to see updated rendered documentation.
 
 > **Rebuild note:** `doc_html` is produced at write time. If a database predates `render` (or the
 > doc comments changed), rebuild it with `cargo run -p build_doc_db` before serving.

@@ -35,6 +35,11 @@ use crate::doc_repr;
 use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
 use crate::signature::SignatureView;
 
+/// How long to wait after the last keystroke before (re)running a search. Rendering the
+/// result iframes is not free, so live search is debounced: the fetch only fires once the
+/// user pauses for this long (see `SearchPage`).
+const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Sizes the rendered-doc `<iframe>` to the height of its content, so the typeset
 /// doc shows without an inner scrollbar. The iframe is same-origin (it loads
 /// `/doc-html/<name>` from this server), so its `contentDocument` is reachable.
@@ -53,22 +58,29 @@ fn set_doc_iframe_height(iframe: &web_sys::HtmlIFrameElement) {
     iframe.set_height(&format!("{height}px"));
 }
 
-/// Sizes the current rendered-doc iframe (if any) to its content. Used on window
-/// resize, where the iframe's width — and therefore its content's height — changes.
-fn sync_current_doc_iframe() {
+/// Sizes every rendered-doc `<iframe>` on the page to its content. Used on window resize,
+/// where each iframe's width — and therefore its content's height — changes. There can be
+/// several at once (one per search result), so this iterates all of them.
+fn sync_current_doc_iframes() {
     let Some(window) = web_sys::window() else {
         return;
     };
     let Some(doc) = window.document() else {
         return;
     };
-    let Ok(Some(element)) = doc.query_selector("iframe.doc-html") else {
+    let Ok(iframes) = doc.query_selector_all("iframe.doc-html") else {
         return;
     };
-    let Ok(iframe) = element.dyn_into::<web_sys::HtmlIFrameElement>() else {
-        return;
-    };
-    set_doc_iframe_height(&iframe);
+    let count = iframes.length();
+    for i in 0..count {
+        let Some(node) = iframes.item(i) else {
+            continue;
+        };
+        let Ok(iframe) = node.dyn_into::<web_sys::HtmlIFrameElement>() else {
+            continue;
+        };
+        set_doc_iframe_height(&iframe);
+    }
 }
 
 /// The HTML shell. Called from the server to produce the initial HTML document.
@@ -100,12 +112,12 @@ pub fn App() -> impl IntoView {
     // is resized (its width — and so its content's height — changes with it). The effect
     // reads no reactive values, so it runs exactly once on mount.
     Effect::new(move || {
-        sync_current_doc_iframe();
+        sync_current_doc_iframes();
         if let Some(window) = web_sys::window() {
             let handler =
                 wasm_bindgen::prelude::Closure::<dyn FnMut(web_sys::Event)>::new(
                     move |_ev: web_sys::Event| {
-                        sync_current_doc_iframe();
+                        sync_current_doc_iframes();
                     },
                 );
             let _ = window
@@ -328,8 +340,28 @@ fn SearchPage() -> impl IntoView {
             .map(|s| s.clone())
             .unwrap_or_default()
     });
+    // The query that actually drives the fetch. It lags the live `query` by
+    // `SEARCH_DEBOUNCE`: the expensive `search_docs` call (and the re-render of the
+    // result iframes) only fires once the user pauses. Starting from the current query
+    // means a direct load of `/search?q=...` still resolves immediately. `committed` is a
+    // single `RwSignal` (read by the resource, written by the debounce) so there is no
+    // unused-binding warning in the SSR build, where the client-only debounce below is
+    // compiled out.
+    let committed = create_rw_signal(query.get());
+    #[cfg(feature = "hydrate")]
+    {
+        // Client-only: `debounce` schedules a browser `setTimeout`, which must not be
+        // created (let alone fired) during SSR. Each keystroke changes `query`, which
+        // re-runs this effect and resets the timer; after `SEARCH_DEBOUNCE` of silence
+        // the latest query is committed, re-triggering the resource below.
+        let mut commit = debounce(SEARCH_DEBOUNCE, move |q: String| committed.set(q));
+        Effect::new(move || {
+            let q = query.get();
+            commit(q);
+        });
+    }
     let results = Resource::new(
-        move || query.get(),
+        move || committed.get(),
         move |q| async move {
             if q.is_empty() {
                 Ok(Vec::new())
@@ -368,6 +400,8 @@ fn SearchPage() -> impl IntoView {
                                 {res.into_iter().map(|item| {
                                     let doc = item.doc_text.clone();
                                     let has_doc = !doc.is_empty();
+                                    let has_doc_html = item.has_doc_html;
+                                    let qual = item.qual_name.clone();
                                     view! {
                                         <li class="result-item">
                                             <A href=format!("/item/{}", item.qual_name)>
@@ -380,7 +414,35 @@ fn SearchPage() -> impl IntoView {
                                                 class="result-signature"
                                             />
                                             <Show when=move || has_doc>
-                                                <p class="result-doc">{doc.clone()}</p>
+                                                {if has_doc_html {
+                                                    // The typeset doc comment, shown in a same-origin iframe
+                                                    // just like the item page; sized to its content on load
+                                                    // and re-measured on window resize.
+                                                    view! {
+                                                        <iframe
+                                                            class="doc-html"
+                                                            src=format!("/doc-html/{}", qual)
+                                                            on:load=move |ev| {
+                                                                if let Some(target) = ev.target() {
+                                                                    if let Ok(iframe) =
+                                                                        target
+                                                                            .dyn_into::<web_sys::HtmlIFrameElement>()
+                                                                    {
+                                                                        set_doc_iframe_height(&iframe);
+                                                                    }
+                                                                }
+                                                            }
+                                                            title="Rendered documentation"
+                                                        />
+                                                    }
+                                                    .into_any()
+                                                } else {
+                                                    // No rendered HTML (DB built without rendering): fall back
+                                                    // to the raw doc text, exactly as before. `doc` is cloned
+                                                    // (not moved) because the `<Show>` children closure is
+                                                    // re-runnable and may only borrow its captured values.
+                                                    view! { <p class="result-doc">{doc.clone()}</p> }.into_any()
+                                                }}
                                             </Show>
                                         </li>
                                     }

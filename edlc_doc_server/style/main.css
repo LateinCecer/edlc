@@ -303,6 +303,11 @@ a:hover {
     font-size: 0.9em;
 }
 
+/* The typeset doc iframe in a search result sits where the raw `.result-doc` text did. */
+.result-item .doc-html {
+    margin-top: 6px;
+}
+
 /* Item page */
 
 .item-header {

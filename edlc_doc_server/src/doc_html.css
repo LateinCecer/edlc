@@ -1,0 +1,198 @@
+/*
+ * EDLc, a compiler for the EDL programming language.
+ * Copyright (C) 2026  Adrian Paskert
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * Theme for the rendered doc-comment pages served at `/doc-html/<name>` and
+ * shown in an `<iframe>` on item pages. It is injected before `</head>` of the
+ * standalone HTML document the Typst renderer emits (which carries no theme and
+ * no font references of its own).
+ *
+ * The palette mirrors `style/main.css` so the typeset doc reads as part of the
+ * site. The `@font-face` rules below give the browser the exact faces the
+ * renderer laid out with (New Computer Modern text, New CMMath math) — served
+ * from `/fonts/<file>` — so the on-screen result matches the build-time layout.
+ */
+
+:root {
+    color-scheme: dark;
+    --doc-bg: #0a111f;
+    --doc-fg: #dbe4f0;
+    --doc-border: #263652;
+    --doc-mut: #8fa0bb;
+    --doc-link: #22c55e;
+    --doc-link-hover: #4ade80;
+    --doc-code-bg: #131f36;
+}
+
+@font-face {
+    font-family: "New Computer Modern";
+    src: url("/fonts/NewCM10-Regular.otf") format("opentype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "New Computer Modern";
+    src: url("/fonts/NewCM10-Bold.otf") format("opentype");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "New Computer Modern";
+    src: url("/fonts/NewCM10-Italic.otf") format("opentype");
+    font-weight: 400;
+    font-style: italic;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "New Computer Modern";
+    src: url("/fonts/NewCM10-BoldItalic.otf") format("opentype");
+    font-weight: 700;
+    font-style: italic;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "New Computer Modern Math";
+    src: url("/fonts/NewCMMath-Regular.otf") format("opentype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "New Computer Modern Math";
+    src: url("/fonts/NewCMMath-Bold.otf") format("opentype");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    background: var(--doc-bg);
+}
+
+body {
+    margin: 0;
+    padding: 1.25em 1.5em 1.5em;
+    background: var(--doc-bg);
+    color: var(--doc-fg);
+    font-family: "New Computer Modern", "Times New Roman", Georgia, serif;
+    font-size: 16px;
+    line-height: 1.65;
+}
+
+/* Math (Typst emits native MathML); give it the CMMath face. */
+math {
+    font-family: "New Computer Modern Math", "New Computer Modern", serif;
+}
+
+p {
+    margin: 0.6em 0;
+}
+
+p:first-child {
+    margin-top: 0;
+}
+
+p:last-child {
+    margin-bottom: 0;
+}
+
+a {
+    color: var(--doc-link);
+    text-decoration: none;
+}
+
+a:hover {
+    color: var(--doc-link-hover);
+    text-decoration: underline;
+}
+
+strong {
+    font-weight: 700;
+}
+
+/* Inline code spans (not inside a pre block). */
+code {
+    font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code",
+        "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    font-size: 0.88em;
+}
+
+:not(pre) > code {
+    background: var(--doc-code-bg);
+    border: 1px solid var(--doc-border);
+    border-radius: 4px;
+    padding: 0.05em 0.35em;
+}
+
+/* Fenced code blocks (Typst emits <pre><code>…). */
+pre {
+    margin: 0.8em 0;
+    padding: 0.8em 1em;
+    background: var(--doc-code-bg);
+    border: 1px solid var(--doc-border);
+    border-radius: 8px;
+    overflow-x: auto;
+    line-height: 1.55;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.92em;
+}
+
+/* Tables (e.g. #table in a doc comment). */
+table {
+    border-collapse: collapse;
+    margin: 0.8em 0;
+    display: block;
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+th,
+td {
+    border: 1px solid var(--doc-border);
+    padding: 0.4em 0.85em;
+    text-align: left;
+    vertical-align: top;
+}
+
+thead th {
+    background: var(--doc-code-bg);
+    font-weight: 700;
+}
+
+/* Images / figures, if a doc comment ever embeds one. */
+img,
+figure {
+    max-width: 100%;
+    height: auto;
+}
