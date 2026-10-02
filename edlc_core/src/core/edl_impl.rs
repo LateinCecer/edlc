@@ -215,7 +215,23 @@ impl EdlImpl {
         let con = roll_back_err!(EnvConstraint::new(self.env, &mut inferer.at(node)), inferer, snapshot, fn_id);
         let mut stack = EnvConstraintStack::default();
         stack.insert(con);
-        roll_back_err!(<InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(&mut inferer.at_env(node, &stack), &base, &self.base), inferer, snapshot, fn_id);
+
+        // if the specified base is a reference, we resolve the method for the inner type.
+        // de-referencing will be handled automatically by the machinery downstream.
+        let effective_base = match inferer.find_type(base) {
+            EdlMaybeType::Fixed(ty) if ty.is_ref() => {
+                let base_inner: TypeUid = inferer
+                    .get_generic_type(base, 0)
+                    .unwrap()
+                    .into();
+                roll_back_err!(<InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(&mut inferer.at_env(node, &stack), &base_inner, &self.base), inferer, snapshot, fn_id);
+                base_inner
+            }
+            _ => {
+                roll_back_err!(<InferAt as InferEq<TypeUid, EdlTypeInstance>>::eq(&mut inferer.at_env(node, &stack), &base, &self.base), inferer, snapshot, fn_id);
+                base
+            },
+        };
 
         // adapt base signature
         let sig_constraint = roll_back_err!(SigConstraint::from_signature(node, fn_id, sig, &mut inferer, &mut stack), inferer, snapshot, fn_id);
@@ -236,7 +252,7 @@ impl EdlImpl {
             id: fn_id,
             sig: sig_constraint,
             auto_ref,
-            base: Some(base),
+            base: Some(effective_base),
             snapshot,
         })
     }

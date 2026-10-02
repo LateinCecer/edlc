@@ -77,10 +77,10 @@ impl_plain!(float
 );
 
 #[cfg(feature = "algebra")]
-use nalgebra::SVector;
+use nalgebra::SMatrix;
 
 #[cfg(feature = "algebra")]
-impl<T: 'static, const N: usize> MirLayout for SVector<T, N> {
+impl<T: MirLayout + 'static, const R: usize, const C: usize> MirLayout for SMatrix<T, R, C> {
     fn layout(types: &MirTypeRegistry) -> Layout {
         let element_id = types.get_type_from_rust::<T>()
             .expect("cannot get MIR type from rust type");
@@ -90,9 +90,15 @@ impl<T: 'static, const N: usize> MirLayout for SVector<T, N> {
         assert_eq!(element_size, mem::size_of::<T>());
         assert_eq!(element_align, mem::size_of::<T>());
 
+        let mut row_builder = StructLayoutBuilder::default();
+        for i in 0..R {
+            row_builder.add(format!("idx_{i}"), element_id, types);
+        }
+        let row_layout = row_builder.make::<[T; R]>();
+
         let mut builder = StructLayoutBuilder::default();
-        for i in 0..N {
-            builder.add(format!("idx_{i}"), element_id, types);
+        for i in 0..C {
+            builder.add_layout(format!("idx_{i}"), row_layout.clone(), types);
         }
         builder.make::<Self>()
     }

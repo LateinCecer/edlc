@@ -89,6 +89,21 @@ fn sync_current_doc_iframes() {
     }
 }
 
+/// The display name of an item in a list (search results, module page). For impl items
+/// (methods and associated consts) this is `Type::name` — the associated type shown with
+/// its generic parameters — so it's obvious which type the item belongs to; for everything
+/// else it's just the item's name. Mirrors the ownership decomposition the item page uses
+/// for its "Defined on" line.
+fn list_display_name(item: &DocSummary) -> String {
+    let owner = doc_repr::parse_item(&item.blob)
+        .map(|it| doc_repr::item_owner(&it, &item.qual_name))
+        .unwrap_or_else(|_| doc_repr::ItemOwner::from_qual(&item.qual_name));
+    match &owner.type_display {
+        Some(ty) => format!("{ty}::{}", item.name),
+        None => item.name.clone(),
+    }
+}
+
 /// The HTML shell. Called from the server to produce the initial HTML document.
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -408,11 +423,14 @@ fn SearchPage() -> impl IntoView {
                                     let has_doc = !doc.is_empty();
                                     let has_doc_html = item.has_doc_html;
                                     let qual = item.qual_name.clone();
+                                    // For methods, the title includes the associated type
+                                    // (e.g. `SVector<f32, N>::norm`) so the owner is obvious.
+                                    let display = list_display_name(&item);
                                     view! {
                                         <li class="result-item">
                                             <A href=format!("/item/{}", item.qual_name)>
                                                 <span class="result-kind">{item.kind.clone()}</span>
-                                                <span class="result-name">{item.name.clone()}</span>
+                                                <span class="result-name">{display.clone()}</span>
                                             </A>
                                             <SignatureView
                                                 blob=item.blob.clone()
@@ -745,13 +763,16 @@ fn item_group_view(title: &str, items: Vec<DocSummary>) -> impl IntoView {
                         let has_doc = !doc.is_empty();
                         let has_doc_html = item.has_doc_html;
                         let qual = item.qual_name.clone();
+                        // For methods, the title includes the associated type
+                        // (e.g. `SVector<f32, N>::norm`) so the owner is obvious.
+                        let display = list_display_name(&item);
                         // Row styled like a search result: kind badge + bold name,
                         // signature, and the doc comment (rendered iframe or raw text).
                         view! {
                             <li class="group-item">
                                 <A href={href}>
                                     <span class="group-kind">{item.kind.clone()}</span>
-                                    <span class="group-name">{item.name.clone()}</span>
+                                    <span class="group-name">{display.clone()}</span>
                                 </A>
                                 <SignatureView
                                     blob=item.blob.clone()

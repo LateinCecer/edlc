@@ -2509,4 +2509,94 @@ fn test() {
         assert_eq!(rt.allocations, 1);
         Ok(())
     }
+
+    /// Test that calling methods on data behind a reference works.
+    #[test]
+    fn test_method_on_reference() -> Result<(), anyhow::Error> {
+        let _ = setup_logger();
+        let mut compiler = CraneliftJIT::<()>::default();
+        compiler.init()?;
+        setup_print(&mut compiler)?;
+
+        #[derive(MirLayout, Clone, Debug)]
+        struct Data {
+            buffer: f64,
+        }
+
+        compiler.compiler.prepare_module(&vec!["std"].into())?;
+        compiler.compiler.define_type(inline_code!(r#"
+type Data = struct {};
+        "#), LayoutOptions {
+            repr: EdlRepresentation::Rust,
+            can_init: false,
+        })?;
+        compiler.compiler.insert_type_instance::<Data>(inline_code!("Data"))?;
+
+        let [new, buffer, buffer_mut] = compiler.compiler.parse_impl(
+            inline_code!("<>"),
+            inline_code!("Data"),
+            [
+                inline_code!(r#"
+                fn new() -> Self"#),
+                inline_code!(r#"
+                fn buffer(&self) -> &f64"#),
+                inline_code!(r#"
+                fn buffer_mut(&mut self) -> &mut f64"#),
+            ],
+            None,
+        )?;
+
+        jit_func!(for ("Data") impl (&mut compiler), fn(new),
+            fn new_data<>() -> Data where; {
+                Data { buffer: 0.0 }
+            }
+        );
+        jit_func!(for ("Data") impl (&mut compiler), fn(buffer),
+            fn get_buffer<>(data: *const Data) -> *const f64 where; {
+                &(unsafe { &*data }).buffer as *const f64
+            }
+        );
+        jit_func!(for ("Data") impl (&mut compiler), fn(buffer_mut),
+            fn get_buffer_mut<>(data: *mut Data) -> *mut f64 where; {
+                &mut (unsafe { &mut *data }).buffer as *mut f64
+            }
+        );
+
+        let compile_result = compiler
+            .compile_module(vec!["test"].into(), inline_code!(r#"
+use std::io::print;
+use std::Data;
+
+#[test]
+fn test_other() {
+    print("starting test...\n");
+    let mut data = Data::new();
+
+    data.buffer_mut() = 42.0_f64;
+
+    let buffer_value = data.buffer();
+    print("buffer value: ");
+    print(buffer_value);
+    print("\n");
+
+    print("x: ");
+    let x = data.buffer().add(0.4_f64);
+    print(x);
+    print(", ");
+    core::assert(x == 42.4);
+    let x = f64::add(data.buffer(), 0.4_f64);
+    print(x);
+    print(", ");
+    core::assert(x == 42.4);
+    let x = data.buffer() + 0.4_f64;
+    print(x);
+    core::assert(x == 42.4);
+    print("\n");
+}
+        "#))?;
+
+        let report = compiler.test_module(&compile_result, &Regex::new(".*").unwrap(), None)?;
+        report.print(&compiler.compiler.phase.types, &compiler.compiler.phase.vars);
+        Ok(())
+    }
 }

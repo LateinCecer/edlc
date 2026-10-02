@@ -121,7 +121,8 @@ impl HirImpl {
                     //       the descriptor here.
                 }
             } else {
-                panic!("implementation does not have a trait name, or a base type. That's not possible");
+                panic!("implementation at {} does not have a trait name, or a base type. \
+                That's not possible", self.src.format_pos(self.pos));
             }
             let edl_impl = self.create_edl_impl()?;
             phase.insert_impl(EdlModuleId::default(), edl_impl);
