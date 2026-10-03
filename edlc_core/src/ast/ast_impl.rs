@@ -244,10 +244,13 @@ impl AstImpl {
         // find type scope
         if let AstType::Base(_, _, name) = &self.base_name {
             let name: QualifierName = name.clone().into();
-            phase.res.find_top_level_type_scope(&name)
+            if let Some(scope) = phase.res.find_top_level_type_scope(&name) {
+                return Some(scope);
+            }
+            phase.res.find_top_level_alias_scope(&name)
         } else {
             panic!("currently, implementations are only possible for composed types. However, \
-            type {:?} was introduced as a base type.", &self.base_name);
+            type {:?} was introduced as a base type.", self.base_name);
         }
     }
 

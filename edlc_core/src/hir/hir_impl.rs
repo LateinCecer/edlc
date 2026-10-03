@@ -108,21 +108,17 @@ impl HirImpl {
             phase.insert_trait(EdlModuleId::default(), edl_trait_impl);
         } else {
             debug!("registering impl functions...");
-            if let Some(scope) = &self.ty_scope {
-                debug!("  - scope: {scope:?}");
-                // register in global name resolve pool
-                for func in self.funcs.iter_mut() {
-                    debug!("   .. `{}`", func.signature.name);
-                    phase.res.revert_to_scope(scope);
-                    func.signature.register_anonymous(phase)?;
-                    // register anonymously such that two functions with identical names can be
-                    // implemented for the same type but with different generic types.
-                    // todo: check that there is not an equivalent implementation that would match
-                    //       the descriptor here.
-                }
-            } else {
-                panic!("implementation at {} does not have a trait name, or a base type. \
-                That's not possible", self.src.format_pos(self.pos));
+            let scope = self.ty_scope.unwrap_or(self.scope);
+            debug!("  - scope: {scope:?}");
+            // register in global name resolve pool
+            for func in self.funcs.iter_mut() {
+                debug!("   .. `{}`", func.signature.name);
+                phase.res.revert_to_scope(&scope); // <- does not really matter that much anymore
+                func.signature.register_anonymous(phase)?;
+                // register anonymously such that two functions with identical names can be
+                // implemented for the same type but with different generic types.
+                // todo: check that there is not an equivalent implementation that would match
+                //       the descriptor here.
             }
             let edl_impl = self.create_edl_impl()?;
             phase.insert_impl(EdlModuleId::default(), edl_impl);

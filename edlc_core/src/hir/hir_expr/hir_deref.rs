@@ -341,7 +341,7 @@ impl EdlFnArgument for HirDeref {
 
 impl HirDeref {
     pub fn write_deref_to_graph<B: Backend>(
-        value: &HirExpression,
+        value: &impl MakeGraph,
         graph: &mut MirGraph<B>,
         target: MirValue,
         pos: SrcPos,
@@ -385,7 +385,7 @@ impl MakeGraph for HirDeref {
         if target_ty != self.mir_type(graph)? {
             assert_eq!(target_ty, self.mir_deref_type(graph)?);
         }
-        Self::write_deref_to_graph(&self.value, graph, target, self.pos)
+        Self::write_deref_to_graph(self.value.as_ref(), graph, target, self.pos)
     }
 
     fn mir_type<B: Backend>(&self, graph: &mut MirGraph<B>) -> Result<MirTypeId, HirTranslationError> {

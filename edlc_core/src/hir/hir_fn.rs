@@ -30,6 +30,8 @@ use crate::file::ModuleSrc;
 use crate::hir::hir_expr::hir_block::HirBlock;
 use crate::hir::{HirError, HirErrorType, HirPhase, IntoEdl, ReportResult, ResolveFn, ResolveNames, ResolveTypes, WithInferer};
 use crate::hir::hir_expr::{HirExpression, HirTreeWalker, LoopMapper, MakeGraph, MirGraph};
+use crate::hir::hir_expr::hir_deref::HirDeref;
+use crate::hir::hir_expr::hir_ref::HirRef;
 use crate::hir::translation::{HirTranslationError};
 use crate::issue;
 use crate::issue::{format_type_args, SrcError, TypeArgument, TypeArguments};
@@ -83,6 +85,7 @@ struct InferInfo {
     node: NodeId,
     type_uid: TypeUid,
     mutable: ExtConstUid,
+    deref_return: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -267,39 +270,6 @@ impl ResolveTypes for HirFn {
             }
         }
 
-        // enforce never type
-        // if self.signature.ret.ty == edl_type::EDL_NEVER {
-            // if !self.body.terminates(phase)? {
-            //     phase.report_error(
-            //         issue::format_type_args!(
-            //             format_args!("function with 'never' return type `!` can yield thread execution")
-            //         ),
-            //         &[
-            //             SrcError::Double {
-            //                 first: self.signature.pos.into(),
-            //                 second: self.body.pos.into(),
-            //                 src: self.signature.src.clone(),
-            //                 error_first: issue::format_type_args!(
-            //                     format_args!("function is defined to never return, which means \
-            //                     that the function must end program execution, or halt indefinitely.")
-            //                 ),
-            //                 error_second: issue::format_type_args!(
-            //                     format_args!("the function body does not terminate execution before \
-            //                     the end of the function is reached.")
-            //                 )
-            //             }
-            //
-            //         ],
-            //         None,
-            //     );
-            //
-            //     return Err(HirError {
-            //         pos: self.signature.pos,
-            //         ty: Box::new(HirErrorType::IllegalFunctionReturnType),
-            //     });
-            // }
-        // }
-
         // adapt return types for all early return statements in the function
         let mut infer = phase.infer_from(infer_state);
         let _ = self.body.walk_mut(
@@ -334,6 +304,7 @@ impl ResolveTypes for HirFn {
                 node,
                 type_uid,
                 mutable,
+                deref_return: false,
             });
             type_uid
         }
@@ -908,7 +879,12 @@ impl HirFn {
                 var_mapper: &mut var_mapper,
                 loop_mapper: &mut loop_mapper,
             };
-            self.body.write_to_graph(&mut graph_writer, ret_value)?;
+
+            if self.info.as_ref().unwrap().deref_return {
+                HirDeref::write_deref_to_graph(&self.body, &mut graph_writer, ret_value, self.signature.pos)?;
+            } else {
+                self.body.write_to_graph(&mut graph_writer, ret_value)?;
+            }
             graph_writer.current_block
         };
         if !body.is_block_sealed(&current_block) {

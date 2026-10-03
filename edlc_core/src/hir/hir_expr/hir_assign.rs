@@ -666,7 +666,7 @@ impl HirAssign {
                     let tmp_ty = graph.mir_phase.types
                         .get_ref_type(&rhs_value_ty).unwrap();
                     assert_eq!(tmp_ty, transfer_type);
-                    HirDeref::write_deref_to_graph(&self.rhs, graph, rhs_value, self.pos)?;
+                    HirDeref::write_deref_to_graph(self.rhs.as_ref(), graph, rhs_value, self.pos)?;
                 } else {
                     assert_eq!(rhs_value_ty, transfer_type);
                     self.rhs.write_to_graph(graph, rhs_value)?;
@@ -739,7 +739,7 @@ impl MakeGraph for HirAssign {
                 let tmp_ty = graph.mir_phase.types
                     .get_ref_type(&lhs_value_ty).unwrap();
                 assert_eq!(tmp_ty, target_ty);
-                HirDeref::write_deref_to_graph(&self.lhs, graph, lhs_value, self.pos)?;
+                HirDeref::write_deref_to_graph(self.lhs.as_ref(), graph, lhs_value, self.pos)?;
             }
         } else {
             if self.try_write_to_variable(graph, target, transfer_type)? {
@@ -759,7 +759,7 @@ impl MakeGraph for HirAssign {
             let tmp_ty = graph.mir_phase.types
                 .get_ref_type(&rhs_value_ty).unwrap();
             assert_eq!(tmp_ty, transfer_type);
-            HirDeref::write_deref_to_graph(&self.rhs, graph, rhs_value, self.pos)?;
+            HirDeref::write_deref_to_graph(self.rhs.as_ref(), graph, rhs_value, self.pos)?;
         } else {
             assert_eq!(rhs_value_ty, transfer_type);
             self.rhs.write_to_graph(graph, rhs_value)?;

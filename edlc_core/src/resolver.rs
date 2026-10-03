@@ -1223,6 +1223,13 @@ impl TopLevelNameResolver {
         None
     }
 
+    pub fn find_top_level_alias_scope(&self, name: &QualifierName) -> Option<ScopeId> {
+        if let Some(Item { variant: ItemVariant::Alias(_), scope }) = self.find_item(name) {
+            return Some(*scope);
+        }
+        None
+    }
+
     pub fn find_top_level_function(&self, name: &QualifierName, edl_type_registry: &EdlTypeRegistry) -> Option<EdlTypeId> {
         // go through levels from top to bottom and try to resolve the reference to the item
         if let Some(Item { variant: ItemVariant::Fn(type_id), .. }) = self.find_item(name) {

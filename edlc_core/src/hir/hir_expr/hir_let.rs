@@ -519,11 +519,11 @@ impl MakeGraph for HirLet {
         let target_value = graph.var_mapper.get_or_create(
             self.info.as_ref().unwrap().var_id,
             var_ty,
-            &mut graph.graph,
+            graph.graph,
         );
         if self.infer_info.as_ref().unwrap().dereference {
             HirDeref::write_deref_to_graph(
-                &self.value,
+                self.value.as_ref(),
                 graph,
                 target_value,
                 self.pos,

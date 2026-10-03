@@ -256,7 +256,7 @@ impl HirRef {
         expr.resolve_types(phase, state)?;
 
         let mut inferer = phase.infer_from(state);
-        let node = inferer.state.node_gen.gen_info(&expr.pos(), &expr.src());
+        let node = inferer.state.node_gen.gen_info(&expr.pos(), expr.src());
 
         let snapshot = inferer.snapshot();
         if let Err(_err) = inferer

@@ -77,8 +77,8 @@ pub mod hir_continue;
 pub mod hir_return;
 mod hir_type_def;
 pub mod hir_type_init;
-mod hir_ref;
-mod hir_deref;
+pub mod hir_ref;
+pub mod hir_deref;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirExpression {
