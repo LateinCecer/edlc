@@ -460,8 +460,9 @@ impl HirRef {
         if value_type != value.mir_deref_type(graph)? {
             // LHS compiles to an internal reference.
             // In this case, we just need to check for a downcast
-            if graph.mir_phase.types.is_ref_mutable(&value_type)
-                && !graph.mir_phase.types.is_ref_mutable(&target_ty) {
+            let value_type_mutable = graph.mir_phase.types.is_ref_mutable(&value_type);
+            let target_type_mutable = graph.mir_phase.types.is_ref_mutable(&target_ty);
+            if value_type_mutable && !target_type_mutable {
                 // insert downcast from original
                 let ori_ref_value = graph.graph.create_temp_variable(value_type);
                 value.write_to_graph(graph, ori_ref_value)?;

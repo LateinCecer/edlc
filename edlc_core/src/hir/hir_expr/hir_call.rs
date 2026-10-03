@@ -674,6 +674,9 @@ impl HirFunctionCall {
                 }
             }
         }
+
+        self.verify_parameter_mutability(phase, infer_state)?;
+
         // self.fit_param_types(phase)?;
         if ctx.get_comptime().is_some() {
             self.call_comptime_if_possible = true;
@@ -685,6 +688,61 @@ impl HirFunctionCall {
             }
         }
         res
+    }
+
+    fn verify_parameter_mutability(
+        &mut self,
+        phase: &mut HirPhase,
+        infer_state: &mut InferState,
+    ) -> Result<(), HirError> {
+        let info = self.info.as_ref().unwrap();
+        let resolver_data = info.resolver.res.as_ref()
+            .expect("failed to get resolver success data after successful function call resolution");
+
+        let sig = resolver_data.sig.fn_id;
+
+        for (exp, auto_ref) in self.params
+            .iter_mut()
+            .zip(resolver_data.auto_ref.iter()) {
+
+            let AutoReference::Reference { mutability } = auto_ref else {
+                continue;
+            };
+            if !infer_state.find_ext_const(*mutability).unwrap().unwrap_literal().unwrap_bool() {
+                continue;
+            }
+            let mut infer = phase.infer_from(infer_state);
+            let param_mutability = exp.mutability(&mut infer);
+            if !infer_state.find_ext_const(param_mutability).unwrap().unwrap_literal().unwrap_bool() {
+                let pos = exp.pos();
+                phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"parameter immutable in call to function `"),
+                        TypeArgument::new_edl(&sig),
+                        TypeArgument::new_display(&"`"),
+                    ]),
+                    &[
+                        SrcError::Double {
+                            first: self.pos.into(),
+                            second: pos.into(),
+                            src: self.src.clone(),
+                            error_first: TypeArguments::new(&[
+                                TypeArgument::new_display(&"function call expects mutable reference as parameter value"),
+                            ]),
+                            error_second: TypeArguments::new(&[
+                                TypeArgument::new_display(&"parameter cannot be auto-referenced into a mutable reference because it is immutable"),
+                            ])
+                        }
+                    ],
+                    None,
+                );
+                return Err(HirError {
+                    pos,
+                    ty: Box::new(HirErrorType::NotMutable("cannot create mutable reference from immutable parameter".to_string())),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Creates a compiler report for missing function definitions.
