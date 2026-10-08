@@ -15,9 +15,10 @@
  *     You should have received a copy of the GNU Affero General Public License
  *     along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
-use std::cell::{Cell, RefCell};
+use std::cell::UnsafeCell;
 use std::mem;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Mutex;
 use gimli::UnwindContext;
 use log::error;
 use crate::compiler::{eh_frames, host_eh_frames, unwind_ctx};
@@ -62,14 +63,72 @@ pub unsafe fn cause_jit_async_panic() -> ! {
     panic!() // <-- is never reached, just there to make the type checker happy
 }
 
-thread_local! {
-    /// Counts the number of active try handlers.
-    static TRAP_HANDLER_COUNT: AtomicUsize = const { AtomicUsize::new(0) };
-    static PREV_SIGSEGV: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
-    static PREV_SIGBUS: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
-    static PREV_SIGILL: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
-    static PREV_SIGFPE: Cell<libc::sigaction> = const { Cell::new(unsafe { mem::zeroed() }) };
+/// Counts the number of active trap handlers across the **whole process**.
+///
+/// Signal handlers are installed process-wide (`sigaction`), so this refcount must be global:
+/// the handler is only (un)installed when the count crosses 0<->1, and no thread may ever
+/// remove a handler that another thread still relies on.
+static TRAP_HANDLER_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Serializes the rare 0->1 (install) and 1->0 (uninstall) transitions so that an install
+/// always precedes its matching uninstall, even when several threads cross the boundary.
+static TRANSITION_LOCK: Mutex<()> = Mutex::new(());
+
+/// A lock-free, double-buffered slot holding the "original" signal handler captured when our
+/// trap handler was installed. The currently-published buffer is never written while a
+/// (lock-free) reader in a signal handler may be reading it, so reads are async-signal-safe
+/// and never observe a torn value.
+struct SignalSlot {
+    buf: [UnsafeCell<libc::sigaction>; 2],
+    cur: AtomicPtr<libc::sigaction>,
 }
+
+impl SignalSlot {
+    const fn new() -> Self {
+        Self {
+            buf: [
+                UnsafeCell::new(unsafe { mem::zeroed() }),
+                UnsafeCell::new(unsafe { mem::zeroed() }),
+            ],
+            cur: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    /// Publish a newly captured original handler. Only ever called under [TRANSITION_LOCK].
+    fn publish(&self, val: libc::sigaction) {
+        let base = self.buf[0].get();
+        let next = if self.cur.load(Ordering::Relaxed) == base {
+            self.buf[1].get()
+        } else {
+            self.buf[0].get()
+        };
+        unsafe { std::ptr::write(next, val); }
+        self.cur.store(next, Ordering::Release);
+    }
+
+    /// Lock-free read of the published original handler; safe to call from a signal handler.
+    /// Returns a zeroed handler if nothing has been published yet (a signal we never install
+    /// on, e.g. SIGBUS on Linux).
+    fn load(&self) -> libc::sigaction {
+        let p = self.cur.load(Ordering::Acquire);
+        if p.is_null() {
+            unsafe { mem::zeroed() }
+        } else {
+            unsafe { std::ptr::read(p) }
+        }
+    }
+}
+
+// Safety: the `buf` UnsafeCells are only ever written to the *non-published* buffer, and only
+// while holding [TRANSITION_LOCK] (so writes are serialized). Reads always go through the
+// atomic `cur` (Acquire) to the published buffer, which is never written while published. The
+// atomic `cur` therefore provides the cross-thread publish/subscribe synchronization.
+unsafe impl Sync for SignalSlot {}
+
+static PREV_SIGSEGV: SignalSlot = SignalSlot::new();
+static PREV_SIGBUS: SignalSlot = SignalSlot::new();
+static PREV_SIGILL: SignalSlot = SignalSlot::new();
+static PREV_SIGFPE: SignalSlot = SignalSlot::new();
 
 struct TrapHandlerInfo {
     sp: usize,
@@ -86,20 +145,23 @@ impl TrapHandler {
     /// Since trap handlers are attached to a **process** this also applies to handlers installed
     /// in another thread.
     pub unsafe fn new() -> TrapHandler {
-        if TRAP_HANDLER_COUNT.with(|s| s
-            .update(Ordering::SeqCst, Ordering::SeqCst, |s| s + 1)) == 0 {
-            // the previous count of active trap handlers for this thread is exactly 0:
-            // so, we actually register the trap handler with the kernel
+        let prev = TRAP_HANDLER_COUNT.fetch_add(1, Ordering::SeqCst);
+        if prev == 0 {
+            // the previous count of active trap handlers for the whole process is exactly 0:
+            // so, we actually register the trap handler with the kernel.
+            let _lock = TRANSITION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
             sigalt_stack_init(); // lazy init sigalt stack
-            for_each_handler(|slot, sig| {
+            for_each_signal(|slot, sig| {
                 let mut handler: libc::sigaction = unsafe { mem::zeroed() };
                 handler.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER | libc::SA_ONSTACK;
                 handler.sa_sigaction = (trap_handler as *const ()).addr();
                 unsafe {
                     libc::sigemptyset(&mut handler.sa_mask);
-                    if libc::sigaction(sig, &handler, slot) != 0 {
+                    let mut original: libc::sigaction = mem::zeroed();
+                    if libc::sigaction(sig, &handler, &mut original) != 0 {
                         panic!("unable to install signal handler. Cause: {}", std::io::Error::last_os_error());
                     }
+                    slot.publish(original);
                 }
             });
         }
@@ -107,42 +169,44 @@ impl TrapHandler {
     }
 }
 
-unsafe fn for_each_handler(mut f: impl FnMut(*mut libc::sigaction, i32)) {
-    PREV_SIGSEGV.with(|action| f(action.as_ptr(), libc::SIGSEGV));
+fn for_each_signal(mut f: impl FnMut(&SignalSlot, i32)) {
+    f(&PREV_SIGSEGV, libc::SIGSEGV);
     #[cfg(target_vendor="apple")]
-    PREV_SIGBUG.with(|action| f(action.as_ptr(), libc::SIGBUG));
+    f(&PREV_SIGBUG, libc::SIGBUG);
     #[cfg(target_arch="x86_64")]
-    PREV_SIGFPE.with(|action| f(action.as_ptr(), libc::SIGFPE));
-    PREV_SIGILL.with(|action| f(action.as_ptr(), libc::SIGILL));
+    f(&PREV_SIGFPE, libc::SIGFPE);
+    f(&PREV_SIGILL, libc::SIGILL);
 }
 
 impl Drop for TrapHandler {
     fn drop(&mut self) {
-        let prev_count = TRAP_HANDLER_COUNT.with(|c| c
-            .update(Ordering::SeqCst, Ordering::SeqCst, |s| usize::max(1, s) - 1));
+        let prev_count = TRAP_HANDLER_COUNT.fetch_sub(1, Ordering::SeqCst);
         if prev_count == 0 {
             error!("tried to drop trap handler, but the count of trap handlers is already zero");
             std::process::exit(-1);
         }
         if prev_count > 1 {
-            return; // there is more than 1 trap handler active, so don't drop this just yet.
+            return; // more than 1 trap handler active, so keep the handler installed.
         }
 
-        // there is only one trap handler left: drop it
-        unsafe {
-            for_each_handler(|slot, sig| {
-                let mut prev: libc::sigaction = mem::zeroed();
-                if libc::sigaction(sig, slot, &mut prev) != 0 {
+        // prev_count == 1: the 1 -> 0 transition, so actually remove the handler.
+        let _lock = TRANSITION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for_each_signal(|slot, sig| {
+            let original = slot.load();
+            let mut prev: libc::sigaction;
+            unsafe {
+                prev = mem::zeroed();
+                if libc::sigaction(sig, &original, &mut prev) != 0 {
                     error!("unable to reinstall signal handler. Cause: {}", std::io::Error::last_os_error());
                     std::process::exit(-1);
                 }
+            }
 
-                if prev.sa_sigaction != (trap_handler as *const ()).addr() {
-                    error!("wrong signal handler detected. All hope is lost, abandon your posts!");
-                    std::process::exit(-1);
-                }
-            })
-        }
+            if prev.sa_sigaction != (trap_handler as *const ()).addr() {
+                error!("wrong signal handler detected. All hope is lost, abandon your posts!");
+                std::process::exit(-1);
+            }
+        })
     }
 }
 
@@ -152,10 +216,10 @@ unsafe extern "C" fn trap_handler(
     context: *mut libc::c_void,
 ) {
     let prev = match signum {
-        libc::SIGSEGV => PREV_SIGSEGV.get(),
-        libc::SIGBUS => PREV_SIGBUS.get(),
-        libc::SIGFPE => PREV_SIGFPE.get(),
-        libc::SIGILL => PREV_SIGILL.get(),
+        libc::SIGSEGV => PREV_SIGSEGV.load(),
+        libc::SIGBUS => PREV_SIGBUS.load(),
+        libc::SIGFPE => PREV_SIGFPE.load(),
+        libc::SIGILL => PREV_SIGILL.load(),
         _ => {
             // printout by logging is not async-signal save, but since we're terminating the process
             // in any case, this does not matter that much.

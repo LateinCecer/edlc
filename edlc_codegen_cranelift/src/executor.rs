@@ -2048,6 +2048,31 @@ fn test_other() {
         Ok(())
     }
 
+    /// Regression test for the trap-handler refcount. Signal handlers are installed process-wide,
+    /// so it must be safe to install/uninstall them concurrently from many threads. A per-thread
+    /// refcount (the old bug) let one thread remove a handler that another thread still needed,
+    /// which then aborted the process on the "wrong signal handler" check in `TrapHandler::drop`.
+    /// This hammers the 0<->1 transitions across threads; with a process-wide refcount it must
+    /// never abort.
+    #[test]
+    fn test_trap_handler_multithreaded() {
+        const THREADS: usize = 4;
+        const ITERS: usize = 500;
+        let handles = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..ITERS {
+                        let handler = unsafe { TrapHandler::new() };
+                        drop(handler);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
     /// Test for non-trivial drop and copy implementations.
     #[test]
     fn test_drop_copy() -> Result<(), anyhow::Error> {
