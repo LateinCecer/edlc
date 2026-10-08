@@ -388,8 +388,10 @@ impl EdlCompiler {
     pub fn define_type(&mut self, src: ModuleSrc, options: LayoutOptions) -> Result<(), CompilerError> {
         let src_code = src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
-        let mut parser = self.create_parser(&src_code, src.clone());
-        let ast_def = report_ast!(AstTypeDef::parse(&mut parser).in_file(src), self);
+        let mut parser = self.create_parser(src_code, src.clone());
+        let doc = report_ast!(ItemDoc::try_parse(&mut parser).in_file(src.clone()), self);
+        let mut ast_def = report_ast!(AstTypeDef::parse(&mut parser).in_file(src), self);
+        ast_def.doc = doc;
         let state = report_translation!(ast_def.push_to_resolver(&mut self.phase), self);
         let _ = report_translation!(state.update_layout(&mut self.phase, options), self);
         Ok(())
