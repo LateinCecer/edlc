@@ -24,17 +24,27 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Literal};
 use quote::{quote, quote_spanned};
-use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, GenericParam};
 
 
 #[proc_macro_derive(MirLayout)]
 pub fn derive_mir_layout(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+    let mut input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     // let name_str = Literal::string(&name.to_string());
 
+    // Add a `MirLayout + 'static` bound to every type parameter so that the
+    // generated `add_type::<T>` and `make::<Self>` calls compile without the
+    // user having to write the where clause by hand.
+    for generic in input.generics.params.iter_mut() {
+        if let GenericParam::Type(ty) = generic {
+            ty.bounds.push(syn::parse_quote!(::edlc_core::prelude::mir_type::layout::MirLayout));
+            ty.bounds.push(syn::parse_quote!('static));
+        }
+    }
+
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let layout = layout_from_type(&name, &input.data);
+    let layout = layout_from_type(&input.data);
 
     let expanded = quote! {
         impl #impl_generics ::edlc_core::prelude::mir_type::layout::MirLayout for #name #ty_generics #where_clause {
@@ -47,10 +57,10 @@ pub fn derive_mir_layout(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn layout_from_type(struct_name: &Ident, data: &Data) -> proc_macro2::TokenStream {
+fn layout_from_type(data: &Data) -> proc_macro2::TokenStream {
     match data {
         Data::Struct(data) => {
-            let layout = process_struct_fields(&data.fields, struct_name);
+            let layout = process_struct_fields(&data.fields);
             quote! {
                 #[allow(unused_mut)]
                 let mut builder = ::edlc_core::prelude::mir_type::layout::OffsetStructLayoutBuilder::default();
@@ -63,7 +73,7 @@ fn layout_from_type(struct_name: &Ident, data: &Data) -> proc_macro2::TokenStrea
                 let variant_name = &variant.ident;
                 let variant_name_str = Literal::string(&variant_name.to_string());
 
-                let v = process_enum_fields(&variant.fields, struct_name, variant_name);
+                let v = process_enum_fields(&variant.fields, variant_name);
                 quote_spanned! { variant.span() => ::edlc_core::prelude::mir_type
                     ::layout::EnumLayoutBuilder::add_variant(&mut enum_builder, #variant_name_str.to_string(), {
                         #[allow(unused_mut)]
@@ -87,7 +97,7 @@ fn layout_from_type(struct_name: &Ident, data: &Data) -> proc_macro2::TokenStrea
     }
 }
 
-fn process_struct_fields(fields: &Fields, data_ty: &Ident) -> proc_macro2::TokenStream {
+fn process_struct_fields(fields: &Fields) -> proc_macro2::TokenStream {
     match fields {
         Fields::Named(fields) => {
             let values = fields.named
@@ -98,57 +108,7 @@ fn process_struct_fields(fields: &Fields, data_ty: &Ident) -> proc_macro2::Token
                     let field_ty = &field.ty;
 
                     quote_spanned! { field.span() => {
-                        let offset = std::mem::offset_of!(#data_ty, #field_name);
-
-                        ::edlc_core::prelude::mir_type
-                            ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
-                            &mut builder, #field_name_str.to_string(), types, offset);
-                    }}
-            });
-
-            quote! {
-                #(#values)*
-            }
-        }
-        Fields::Unit => quote! {},
-        Fields::Unnamed(fields) => {
-            let values = fields.unnamed
-                .iter()
-                .enumerate()
-                .map(|(name, field)| {
-                    let field_name = name.to_string();
-                    let field_name_ident = Literal::usize_unsuffixed(name);
-                    let field_name_str = Literal::string(&field_name);
-                    let field_ty = &field.ty;
-
-                    quote_spanned! { field.span() => {
-                        let offset = std::mem::offset_of!(#data_ty, #field_name_ident);
-
-                        ::edlc_core::prelude::mir_type
-                            ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
-                            &mut builder, #field_name_str.to_string(), types, offset);
-                    }}
-            });
-
-            quote! {
-                #(#values)*
-            }
-        }
-    }
-}
-
-fn process_enum_fields(fields: &Fields, data_ty: &Ident, variant: &Ident) -> proc_macro2::TokenStream {
-    match fields {
-        Fields::Named(fields) => {
-            let values = fields.named
-                .iter()
-                .map(|field| {
-                    let field_name = field.ident.as_ref().unwrap();
-                    let field_name_str = Literal::string(&field_name.to_string());
-                    let field_ty = &field.ty;
-
-                    quote_spanned! { field.span() => {
-                        let offset = std::mem::offset_of!(#data_ty, #variant.#field_name);
+                        let offset = std::mem::offset_of!(Self, #field_name);
 
                         ::edlc_core::prelude::mir_type
                             ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
@@ -172,7 +132,57 @@ fn process_enum_fields(fields: &Fields, data_ty: &Ident, variant: &Ident) -> pro
                     let field_ty = &field.ty;
 
                     quote_spanned! { field.span() => {
-                        let offset = std::mem::offset_of!(#data_ty, #variant.#field_name_ident);
+                        let offset = std::mem::offset_of!(Self, #field_name_ident);
+
+                        ::edlc_core::prelude::mir_type
+                            ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
+                            &mut builder, #field_name_str.to_string(), types, offset);
+                    }}
+                });
+
+            quote! {
+                #(#values)*
+            }
+        }
+    }
+}
+
+fn process_enum_fields(fields: &Fields, variant: &Ident) -> proc_macro2::TokenStream {
+    match fields {
+        Fields::Named(fields) => {
+            let values = fields.named
+                .iter()
+                .map(|field| {
+                    let field_name = field.ident.as_ref().unwrap();
+                    let field_name_str = Literal::string(&field_name.to_string());
+                    let field_ty = &field.ty;
+
+                    quote_spanned! { field.span() => {
+                        let offset = std::mem::offset_of!(Self, #variant.#field_name);
+
+                        ::edlc_core::prelude::mir_type
+                            ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
+                            &mut builder, #field_name_str.to_string(), types, offset);
+                    }}
+                });
+
+            quote! {
+                #(#values)*
+            }
+        }
+        Fields::Unit => quote! {},
+        Fields::Unnamed(fields) => {
+            let values = fields.unnamed
+                .iter()
+                .enumerate()
+                .map(|(name, field)| {
+                    let field_name = name.to_string();
+                    let field_name_ident = Literal::usize_unsuffixed(name);
+                    let field_name_str = Literal::string(&field_name);
+                    let field_ty = &field.ty;
+
+                    quote_spanned! { field.span() => {
+                        let offset = std::mem::offset_of!(Self, #variant.#field_name_ident);
 
                         ::edlc_core::prelude::mir_type
                             ::layout::OffsetStructLayoutBuilder::add_type::<#field_ty>(
