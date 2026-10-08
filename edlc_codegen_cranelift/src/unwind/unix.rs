@@ -210,6 +210,39 @@ impl Drop for TrapHandler {
     }
 }
 
+/// Formats a signal number into `out` (no allocation) and returns the written prefix.
+/// Safe to call from a signal handler.
+fn signal_number(n: libc::c_int, out: &mut [u8; 16]) -> &[u8] {
+    let mut v = n.unsigned_abs();
+    let mut start = out.len();
+    if v == 0 {
+        start -= 1;
+        out[start] = b'0';
+    } else {
+        while v > 0 {
+            start -= 1;
+            out[start] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+    }
+    if n < 0 {
+        start -= 1;
+        out[start] = b'-';
+    }
+    &out[start..]
+}
+
+/// Writes `msg` to stderr with a single `write(2)` call (no allocation, no locking), so it is
+/// async-signal safe and may be used from a signal handler. Partial writes are not retried: the
+/// caller terminates the process immediately afterwards.
+unsafe fn write_stderr(msg: &[u8]) {
+    let _ = libc::write(
+        libc::STDERR_FILENO,
+        msg.as_ptr().cast::<libc::c_void>(),
+        msg.len(),
+    );
+}
+
 unsafe extern "C" fn trap_handler(
     signum: libc::c_int,
     siginfo: *mut libc::siginfo_t,
@@ -221,11 +254,26 @@ unsafe extern "C" fn trap_handler(
         libc::SIGFPE => PREV_SIGFPE.load(),
         libc::SIGILL => PREV_SIGILL.load(),
         _ => {
-            // printout by logging is not async-signal save, but since we're terminating the process
-            // in any case, this does not matter that much.
-            // it's probably more important to get some kind of error indication out.
-            error!("unknown signal!");
-            std::process::exit(-1);
+            // We are inside a signal handler: the logger is not async-signal safe (it may
+            // allocate or acquire a lock), so emit the message with a single write(2) and
+            // terminate with _exit(2), which skips atexit handlers and destructors.
+            let mut num_buf = [0u8; 16];
+            let num = signal_number(signum, &mut num_buf);
+            let mut msg = [0u8; 80];
+            let mut pos = 0;
+            for chunk in [
+                b"[EDL-JIT] trap handler received an unknown signal, aborting (sig=".as_slice(),
+                num,
+                b")\n".as_slice(),
+            ] {
+                let n = chunk.len().min(msg.len() - pos);
+                msg[pos..pos + n].copy_from_slice(&chunk[..n]);
+                pos += n;
+            }
+            unsafe {
+                write_stderr(&msg[..pos]);
+                libc::_exit(-1);
+            }
         },
     };
 
