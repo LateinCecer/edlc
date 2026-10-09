@@ -104,23 +104,6 @@ impl<T: MirLayout + 'static, const R: usize, const C: usize> MirLayout for SMatr
     }
 }
 
-#[cfg(feature = "cuda")]
-use cust::memory::DeviceCopy;
-#[cfg(feature = "cuda")]
-use cust::prelude::*;
-#[cfg(feature = "cuda")]
-use cust::sys::CUdeviceptr;
-
-#[cfg(feature = "cuda")]
-impl<T: ?Sized + DeviceCopy + 'static> MirLayout for DevicePointer<T> {
-    fn layout(types: &MirTypeRegistry) -> Layout {
-        let mut builder = StructLayoutBuilder::default();
-        builder.add_type::<CUdeviceptr>("ptr".to_string(), types);
-        builder.add_type::<PhantomData<*mut T>>("marker".to_string(), types);
-        builder.make::<Self>()
-    }
-}
-
 #[cfg(feature = "cudarc")]
 use clow::prelude::{ClowPtr, ClowView, ClowViewMut};
 
