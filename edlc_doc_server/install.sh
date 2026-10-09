@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 EDL_HOME="${HOME}/.edl"
 if [ -d "$EDL_HOME" ]; then
   echo "found edl installation at $EDL_HOME. Reinstalling..."
