@@ -2120,13 +2120,37 @@ impl MakeGraph for HirFunctionCall {
         assert_eq!(comptime_params.len(), comptime_parameter_values.len());
 
         // get MIR function id from the registry
-        let func = graph.mir_funcs.mir_id(
+        let func = match graph.mir_funcs.mir_id(
             &edl_func_instance,
             graph.hir_phase,
             graph.mir_phase,
             comptime_params,
             comptime_call && edl_sig.is_hybrid(),
-        )?;
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                graph.hir_phase.report_error(
+                    TypeArguments::new(&[
+                        TypeArgument::new_display(&"monomorphization error"),
+                    ]),
+                    &[
+                        SrcError::Single {
+                            src: self.src.clone(),
+                            pos: self.pos.into(),
+                            error: TypeArguments::new(&[
+                                TypeArgument::new_display(&"function instance `"),
+                                TypeArgument::new_edl(&edl_func_instance),
+                                TypeArgument::new_display(&"` cannot be instantiated. This \
+                                function is likely externally defined and the callback is not \
+                                registered for this specific combination of generic parameters."),
+                            ]),
+                        }
+                    ],
+                    None,
+                );
+                return Err(err);
+            },
+        };
 
         // println!("function call to `{}` compiled to {func:?}", format_type_args!(&edl_func_instance as &dyn FmtType)
         //     .printable(&graph.hir_phase.types, &graph.hir_phase.vars));
