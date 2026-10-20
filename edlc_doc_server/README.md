@@ -81,7 +81,7 @@ without watch, see [Running](#running).
 | Route | Description |
 |---|---|
 | `/` | Home page with search bar and module listing |
-| `/search?q=...` | Full-text search results (FTS5), live-filtered |
+| `/search?q=...&p=N` | Full-text search results (FTS5), live-filtered; `p` selects the result page (default 1) |
 | `/item/:name` | Single item page: kind, signature, rendered documentation (or raw doc text), module link |
 | `/module/:name` | All items in a module, grouped by kind (Functions, Types, Variables, etc.) |
 | `/doc-html/:name` | The typeset HTML of an item's doc comment (same-origin iframe source); 404 if absent |

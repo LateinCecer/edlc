@@ -353,7 +353,18 @@ fn HomePage() -> impl IntoView {
     }
 }
 
-/// Search page: shows FTS5 search results for `?q=...`.
+/// The URL of page `target` (1-based) of the search results for query `q`. Page 1 is the
+/// canonical form without a `p` parameter, so typing in the search bar (which navigates to
+/// this form) always returns to the first page.
+fn search_page_url(q: &str, target: usize) -> String {
+    if target <= 1 {
+        format!("/search?q={}", urlencoding::encode(q))
+    } else {
+        format!("/search?q={}&p={}", urlencoding::encode(q), target)
+    }
+}
+
+/// Search page: shows FTS5 search results for `?q=...`, one page at a time (`?p=N`, 1-based).
 #[component]
 fn SearchPage() -> impl IntoView {
     let query_map = use_query_map();
@@ -364,13 +375,24 @@ fn SearchPage() -> impl IntoView {
             .map(|s| s.clone())
             .unwrap_or_default()
     });
+    // The 1-based page from `?p=N`; a missing or invalid value falls back to the first page.
+    let page = Signal::derive(move || {
+        query_map
+            .get()
+            .get("p")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|p| *p >= 1)
+            .unwrap_or(1)
+    });
     // The query that actually drives the fetch. It lags the live `query` by
     // `SEARCH_DEBOUNCE`: the expensive `search_docs` call (and the re-render of the
     // result iframes) only fires once the user pauses. Starting from the current query
     // means a direct load of `/search?q=...` still resolves immediately. `committed` is a
     // single `RwSignal` (read by the resource, written by the debounce) so there is no
     // unused-binding warning in the SSR build, where the client-only debounce below is
-    // compiled out.
+    // compiled out. Page changes commit immediately instead: the resource's key also reads
+    // `page` straight from the URL, so navigating `?p=N` (link click, browser back/forward)
+    // re-fetches without going through the typing debounce.
     let committed = create_rw_signal(query.get());
     #[cfg(feature = "hydrate")]
     {
@@ -385,15 +407,16 @@ fn SearchPage() -> impl IntoView {
         });
     }
     let results = Resource::new(
-        move || committed.get(),
-        move |q| async move {
+        move || (committed.get(), page.get()),
+        move |(q, page)| async move {
             if q.is_empty() {
                 Ok(SearchResults {
                     results: Vec::new(),
                     truncated: false,
                 })
             } else {
-                search_docs(q, DEFAULT_SEARCH_LIMIT).await
+                let offset = (page - 1) * DEFAULT_SEARCH_LIMIT;
+                search_docs(q, offset, DEFAULT_SEARCH_LIMIT).await
             }
         },
     );
@@ -420,17 +443,34 @@ fn SearchPage() -> impl IntoView {
                     results.get().map(|res| match res {
                         Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
                         Ok(res) if res.results.is_empty() => {
-                            view! { <p>"No results found."</p> }.into_any()
+                            // An out-of-range page (e.g. a direct load of too large a `p`)
+                            // is not a dead end: offer the way back to the first page.
+                            if page.get() > 1 {
+                                view! {
+                                    <p>"No results on this page."</p>
+                                    <A
+                                        href=search_page_url(&query.get(), 1)
+                                        {..}
+                                        class="page-link"
+                                    >
+                                        "← Back to first page"
+                                    </A>
+                                }
+                                .into_any()
+                            } else {
+                                view! { <p>"No results found."</p> }.into_any()
+                            }
                         }
                         Ok(res) => {
                             let truncated = res.truncated;
                             let items = res.results;
+                            let p = page.get();
                             view! {
                                 <Show when=move || truncated>
                                     <p class="search-truncated">
                                         "Showing top "
                                         {DEFAULT_SEARCH_LIMIT.to_string()}
-                                        " matches — there are more. Refine your query to narrow the results."
+                                        " matches — there are more. Refine your query to narrow the results, or continue to the next page."
                                     </p>
                                 </Show>
                                 <ul class="result-list">
@@ -488,6 +528,39 @@ fn SearchPage() -> impl IntoView {
                                         }
                                     }).collect::<Vec<_>>()}
                                 </ul>
+                                {if p > 1 || truncated {
+                                    // Plain router links: the URL change alone re-keys the
+                                    // resource above, so no click handler is needed and
+                                    // back/forward (and no-JS loads) work as well.
+                                    view! {
+                                        <nav class="search-pagination">
+                                            <Show when={move || p > 1}>
+                                                <A
+                                                    href=search_page_url(&query.get(), p - 1)
+                                                    {..}
+                                                    class="page-link"
+                                                >
+                                                    "← Previous"
+                                                </A>
+                                            </Show>
+                                            <Show when={move || p > 1}>
+                                                <span class="page-label">"Page " {p.to_string()}</span>
+                                            </Show>
+                                            <Show when=move || truncated>
+                                                <A
+                                                    href=search_page_url(&query.get(), p + 1)
+                                                    {..}
+                                                    class="page-link"
+                                                >
+                                                    "Next page →"
+                                                </A>
+                                            </Show>
+                                        </nav>
+                                    }
+                                    .into_any()
+                                } else {
+                                    view! { <div/> }.into_any()
+                                }}
                             }
                             .into_any()
                         },

@@ -270,6 +270,28 @@ a:hover {
     margin-bottom: 8px;
 }
 
+.search-pagination {
+    display: flex;
+    gap: 15px;
+    align-items: baseline;
+    margin-top: 16px;
+}
+
+.page-link {
+    color: var(--link);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.page-link:hover {
+    text-decoration: underline;
+}
+
+.page-label {
+    font-size: 0.9em;
+    color: var(--muted);
+}
+
 /* Item rows: shared by the search results list and the module page's item
    groups. Each row is a kind badge + bold name title bar, a signature block,
    and (optionally) a doc block — a typeset iframe or the raw doc text. */

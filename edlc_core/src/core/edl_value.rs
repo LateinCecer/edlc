@@ -188,7 +188,7 @@ impl EdlConstValue {
         if let Self::Literal(val) = self {
             val
         } else {
-            panic!("attempted to unwrap a non-literal value");
+            panic!("attempted to unwrap a non-literal value {:?}", self);
         }
     }
 

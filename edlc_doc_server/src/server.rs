@@ -154,18 +154,22 @@ pub struct SearchResults {
     pub truncated: bool,
 }
 
-/// Search documentation items by full-text query.
+/// Search documentation items by full-text query, starting at `offset`.
 ///
 /// An empty query or a query with no matches is not an error: an empty result set is returned.
 #[server]
-pub async fn search_docs(query: String, limit: usize) -> Result<SearchResults, DocError> {
+pub async fn search_docs(
+    query: String,
+    offset: usize,
+    limit: usize,
+) -> Result<SearchResults, DocError> {
     let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
         message: "database not available in server context".into(),
     })?;
     let (rows, truncated) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<DocRow>, bool), DocError> {
             let guard = db.lock()?;
-            Ok(guard.search(&query, 0, limit, None)?)
+            Ok(guard.search(&query, offset, limit, None)?)
         },
     )
     .await
