@@ -256,16 +256,22 @@ fn mcp_http_end_to_end() {
             .expect("search_docs body");
         let msgs = extract_json(&body);
         let call = response_with_id(&msgs, 3);
-        let results = tool_result_json(call);
-        let hits = results.as_array().expect("search results array");
+        let search = tool_result_json(call);
+        let hits = search["results"].as_array().expect("search results array");
         assert!(
             hits.iter().any(|h| h["name"] == "add_overflow"),
-            "search_docs should find add_overflow: {results}"
+            "search_docs should find add_overflow: {search}"
+        );
+        assert_eq!(search["offset"], 0, "offset should be echoed: {search}");
+        assert_eq!(search["limit"], 5, "limit should be echoed: {search}");
+        assert_eq!(
+            search["truncated"], false,
+            "all matches fit in one page: {search}"
         );
         // By default the heavy blob is omitted from results.
         assert!(
-            !results.to_string().contains("\"blob\""),
-            "search_docs should omit blobs by default: {results}"
+            !search.to_string().contains("\"blob\""),
+            "search_docs should omit blobs by default: {search}"
         );
 
         // 5) search_docs with a kind filter.
@@ -279,11 +285,48 @@ fn mcp_http_end_to_end() {
         )
         .await;
         let fns = tool_result_json(&call);
-        let fns = fns.as_array().expect("fn search results array");
+        let fns = fns["results"].as_array().expect("fn search results array");
         assert_eq!(fns.len(), 2, "both add_overflow fns should match: {fns:?}");
         assert!(
             fns.iter().all(|h| h["kind"] == "fn"),
             "kind filter should return only fns: {fns:?}"
+        );
+
+        // 5b) Paging: the two add_overflow fns rank identically, so the id tie-break must
+        // keep the pages disjoint.
+        let call = call_tool(
+            &client,
+            &url,
+            &session_id,
+            11,
+            "search_docs",
+            serde_json::json!({ "query": "add ov", "limit": 1, "offset": 0 }),
+        )
+        .await;
+        let page1 = tool_result_json(&call);
+        assert_eq!(page1["offset"], 0, "offset should be echoed: {page1}");
+        assert_eq!(page1["limit"], 1, "limit should be echoed: {page1}");
+        assert_eq!(page1["truncated"], true, "a second match exists: {page1}");
+        let first = &page1["results"][0];
+
+        let call = call_tool(
+            &client,
+            &url,
+            &session_id,
+            12,
+            "search_docs",
+            serde_json::json!({ "query": "add ov", "limit": 1, "offset": 1 }),
+        )
+        .await;
+        let page2 = tool_result_json(&call);
+        assert_eq!(
+            page2["truncated"], false,
+            "the final page must not be truncated: {page2}"
+        );
+        let second = &page2["results"][0];
+        assert_ne!(
+            first["qual_name"], second["qual_name"],
+            "pages must be disjoint: {page1} vs {page2}"
         );
 
         // 6) list_items covers all items, including both modules.

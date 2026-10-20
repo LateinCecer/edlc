@@ -314,31 +314,45 @@ impl DocDb {
     ///
     /// Each whitespace-separated token of `query` must match a token prefix in at least one
     /// indexed column (implicit AND). Results are ranked with bm25, weighting name matches
-    /// highest, then signatures, doc text, and module paths. When `kind` is `Some`, only items
-    /// of that kind are returned. An empty or whitespace-only query matches nothing and returns
-    /// an empty list.
+    /// highest, then signatures, doc text, and module paths; ties are broken by item id, which
+    /// makes the ordering a total order so `offset`-based paging never duplicates or skips rows
+    /// (the database is opened read-only, so the ranking is stable across calls).
+    ///
+    /// Returns at most `limit` rows starting at `offset`, plus a `truncated` flag that is
+    /// `true` when at least one further match exists beyond the returned page. When `kind` is
+    /// `Some`, only items of that kind are returned. An empty or whitespace-only query matches
+    /// nothing and returns an empty list with `truncated` `false`.
     pub fn search(
         &self,
         query: &str,
+        offset: usize,
         limit: usize,
         kind: Option<Kind>,
-    ) -> rusqlite::Result<Vec<DocRow>> {
+    ) -> rusqlite::Result<(Vec<DocRow>, bool)> {
         let fts_query = match build_fts_query(query) {
             Some(q) => q,
-            None => return Ok(Vec::new()),
+            None => return Ok((Vec::new(), false)),
         };
         let kind_name = kind.map(|k| k.as_str().to_string());
+        // Probe one row past `limit` to detect a following page. Clamp to the largest value
+        // SQLite accepts so a caller-supplied huge `offset`/`limit` cannot overflow `i64`.
+        let probe = limit.saturating_add(1).min(i64::MAX as usize) as i64;
+        let offset_i64 = offset.min(i64::MAX as usize) as i64;
         let sql =
             "SELECT i.id, i.kind, i.name, i.qual_name, i.module, i.signature, i.doc_text, i.doc_html, i.blob \
                     FROM search_index s JOIN items i ON s.rowid = i.id \
                     WHERE search_index MATCH ?1 AND (?3 IS NULL OR i.kind = ?3) \
-                    ORDER BY bm25(search_index, 10.0, 1.0, 2.0, 3.0) LIMIT ?2";
+                    ORDER BY bm25(search_index, 10.0, 1.0, 2.0, 3.0), i.id \
+                    LIMIT ?2 OFFSET ?4";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![fts_query, limit as i64, kind_name],
+            params![fts_query, probe, kind_name, offset_i64],
             row_mapper(),
         )?;
-        rows.collect()
+        let mut rows: Vec<DocRow> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let truncated = rows.len() > limit;
+        rows.truncate(limit);
+        Ok((rows, truncated))
     }
 
     /// Fetches a single item by id.
@@ -562,7 +576,7 @@ mod tests {
         let db = DocDb::from_connection(conn);
 
         // search for "pi" hits the let
-        let hits = db.search("pi", 10, None).expect("search");
+        let hits = db.search("pi", 0, 10, None).expect("search").0;
         assert!(
             hits.iter().any(|r| r.kind == Kind::Let && r.name == "pi"),
             "search for 'pi' should find the let: {hits:?}"
@@ -638,13 +652,13 @@ mod tests {
     #[test]
     fn search_matches_token_prefixes() {
         let db = db_with(&[let_item(&["example", "vector"]), let_item(&["example", "pi"])]);
-        let hits = db.search("vect", 10, None).expect("search");
+        let hits = db.search("vect", 0, 10, None).expect("search").0;
         let names: Vec<&str> = hits.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["vector"]);
-        assert!(db.search("pi", 10, None).expect("search").len() == 1);
-        assert!(db.search("p", 10, None).expect("search").len() == 1);
+        assert!(db.search("pi", 0, 10, None).expect("search").0.len() == 1);
+        assert!(db.search("p", 0, 10, None).expect("search").0.len() == 1);
         // no token starts with "q"
-        assert!(db.search("q", 10, None).expect("search").is_empty());
+        assert!(db.search("q", 0, 10, None).expect("search").0.is_empty());
     }
 
     /// Multi-token queries implicitly AND: all token prefixes must occur.
@@ -656,22 +670,22 @@ mod tests {
         let db = DocDb::from_connection(writer.conn);
 
         // Both prefixes occur in the name's tokens ("add", "overflow").
-        let hits = db.search("add ov", 10, None).expect("search");
+        let hits = db.search("add ov", 0, 10, None).expect("search").0;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].name, "add_overflow");
 
         // One prefix occurs, the other does not.
-        assert!(db.search("add xyz", 10, None).expect("search").is_empty());
+        assert!(db.search("add xyz", 0, 10, None).expect("search").0.is_empty());
         // Tokens in reverse order also match (AND is order-insensitive).
-        assert_eq!(db.search("ov add", 10, None).expect("search").len(), 1);
+        assert_eq!(db.search("ov add", 0, 10, None).expect("search").0.len(), 1);
     }
 
     /// An empty or whitespace-only query is not an error: an empty list is returned.
     #[test]
     fn search_empty_query_returns_empty() {
         let db = db_with(&[let_item(&["a", "f"])]);
-        assert!(db.search("", 10, None).expect("search").is_empty());
-        assert!(db.search("   ", 10, None).expect("search").is_empty());
+        assert!(db.search("", 0, 10, None).expect("search").0.is_empty());
+        assert!(db.search("   ", 0, 10, None).expect("search").0.is_empty());
     }
 
     /// The `kind` filter restricts results to one item kind.
@@ -682,15 +696,52 @@ mod tests {
             let_item(&["m", "vec_push"]),
             let_item(&["m", "vec_pop"]),
         ]);
-        let all = db.search("vec", 10, None).expect("search");
+        let all = db.search("vec", 0, 10, None).expect("search").0;
         assert_eq!(all.len(), 2);
-        let lets = db.search("vec", 10, Some(Kind::Let)).expect("search");
+        let lets = db.search("vec", 0, 10, Some(Kind::Let)).expect("search").0;
         assert_eq!(lets.len(), 2);
-        let fns = db.search("vec", 10, Some(Kind::Fn)).expect("search");
+        let fns = db.search("vec", 0, 10, Some(Kind::Fn)).expect("search").0;
         assert!(fns.is_empty());
         // A kind the query text does not match in yields no rows.
-        assert_eq!(db.search("m", 10, Some(Kind::Module)).expect("search").len(), 1);
-        assert_eq!(db.search("m", 10, Some(Kind::Fn)).expect("search").len(), 0);
+        assert_eq!(db.search("m", 0, 10, Some(Kind::Module)).expect("search").0.len(), 1);
+        assert_eq!(db.search("m", 0, 10, Some(Kind::Fn)).expect("search").0.len(), 0);
+    }
+
+    /// Paging: `offset` walks the ranked results without duplicates or gaps, and `truncated`
+    /// is true exactly when a following page exists.
+    #[test]
+    fn search_paging_is_stable_and_complete() {
+        let items: Vec<Item> =
+            (0..5).map(|i| let_item(&["example", &format!("vec_{i}")])).collect();
+        let db = db_with(&items);
+
+        let (page1, t1) = db.search("vec", 0, 2, None).expect("search");
+        let (page2, t2) = db.search("vec", 2, 2, None).expect("search");
+        let (page3, t3) = db.search("vec", 4, 2, None).expect("search");
+        assert_eq!(page1.len(), 2);
+        assert!(t1, "a page with a following page must be flagged truncated");
+        assert_eq!(page2.len(), 2);
+        assert!(t2, "a page with a following page must be flagged truncated");
+        assert_eq!(page3.len(), 1);
+        assert!(!t3, "the final page must not be flagged truncated");
+
+        // The pages are disjoint and, concatenated, equal the single-page result.
+        let mut paged: Vec<&str> = [&page1, &page2, &page3]
+            .iter()
+            .flat_map(|page| page.iter().map(|r| r.name.as_str()))
+            .collect();
+        let (all, truncated) = db.search("vec", 0, 10, None).expect("search");
+        assert!(!truncated);
+        assert_eq!(paged.len(), all.len());
+        paged.sort_unstable();
+        let mut whole: Vec<&str> = all.iter().map(|r| r.name.as_str()).collect();
+        whole.sort_unstable();
+        assert_eq!(paged, whole);
+
+        // An offset past the last match yields an empty, untruncated result.
+        let (past, t_past) = db.search("vec", 100, 10, None).expect("search");
+        assert!(past.is_empty());
+        assert!(!t_past);
     }
 
     /// `get_item_by_name_candidates` returns every match, exact qual names first.

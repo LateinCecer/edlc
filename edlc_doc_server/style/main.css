@@ -264,6 +264,12 @@ a:hover {
     margin-top: 4px;
 }
 
+.search-truncated {
+    font-size: 0.9em;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
 /* Item rows: shared by the search results list and the module page's item
    groups. Each row is a kind badge + bold name title bar, a signature block,
    and (optionally) a doc block — a typeset iframe or the raw doc text. */

@@ -42,7 +42,7 @@ server binary with plain cargo, so if you afterwards want to serve the HTTP fron
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `search_docs` | `query` (string), `limit` (int, optional, default 20), `kind` (string, optional), `details` (bool, optional, default false) | Full-text search across item names, modules, signatures, and doc text via FTS5 (prefix matching, names ranked highest). |
+| `search_docs` | `query` (string), `limit` (int, optional, default 20), `offset` (int, optional, default 0), `kind` (string, optional), `details` (bool, optional, default false) | Full-text search across item names, modules, signatures, and doc text via FTS5 (prefix matching, names ranked highest). |
 | `get_doc` | `name` (string), `details` (bool, optional, default false) | Fetch a single item by its qualified name. If a simple name is ambiguous, an error lists the candidate qualified names. |
 | `list_modules` | `details` (bool, optional, default false) | List all modules in the database. |
 | `get_module` | `name` (string), `details` (bool, optional, default false) | List all items belonging to a module (including nested submodules). |
@@ -52,6 +52,10 @@ server binary with plain cargo, so if you afterwards want to serve the HTTP fron
 `id`, `kind`, `name`, `qual_name`, `module`, `signature`, and `doc_text`; the full serde-JSON
 `blob` of the original `Item` (async info, modifiers, params, fields, variants, ...) is only
 included when `details: true`, to keep listing and search responses small.
+
+`search_docs` returns an object `{ "results": [...], "offset": ..., "limit": ..., "truncated": ... }`.
+When `truncated` is `true`, further matches exist beyond the returned page; request the next page
+by passing `offset = <offset> + <limit>` (or refine the query to narrow the results).
 
 ## HTTP mode
 

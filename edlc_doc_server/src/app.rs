@@ -33,7 +33,10 @@ use leptos_router::{
 use wasm_bindgen::JsCast;
 
 use crate::doc_repr;
-use crate::server::{get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary};
+use crate::server::{
+    get_doc, get_module_items, list_modules, search_docs, DocError, DocSummary,
+    DEFAULT_SEARCH_LIMIT, SearchResults,
+};
 use crate::signature::SignatureView;
 
 /// How long to wait after the last keystroke before (re)running a search. Rendering the
@@ -385,9 +388,12 @@ fn SearchPage() -> impl IntoView {
         move || committed.get(),
         move |q| async move {
             if q.is_empty() {
-                Ok(Vec::new())
+                Ok(SearchResults {
+                    results: Vec::new(),
+                    truncated: false,
+                })
             } else {
-                search_docs(q, 20).await
+                search_docs(q, DEFAULT_SEARCH_LIMIT).await
             }
         },
     );
@@ -413,67 +419,78 @@ fn SearchPage() -> impl IntoView {
                 {move || {
                     results.get().map(|res| match res {
                         Err(e) => view! { <ErrorView message={e.to_string()}/> }.into_any(),
-                        Ok(res) if res.is_empty() => {
+                        Ok(res) if res.results.is_empty() => {
                             view! { <p>"No results found."</p> }.into_any()
                         }
-                        Ok(res) => view! {
-                            <ul class="result-list">
-                                {res.into_iter().map(|item| {
-                                    let doc = item.doc_text.clone();
-                                    let has_doc = !doc.is_empty();
-                                    let has_doc_html = item.has_doc_html;
-                                    let qual = item.qual_name.clone();
-                                    // For methods, the title includes the associated type
-                                    // (e.g. `SVector<f32, N>::norm`) so the owner is obvious.
-                                    let display = list_display_name(&item);
-                                    view! {
-                                        <li class="result-item">
-                                            <A href=format!("/item/{}", item.qual_name)>
-                                                <span class="result-kind">{item.kind.clone()}</span>
-                                                <span class="result-name">{display.clone()}</span>
-                                            </A>
-                                            <SignatureView
-                                                blob=item.blob.clone()
-                                                plain=item.signature.clone()
-                                                class="result-signature"
-                                            />
-                                            <Show when=move || has_doc>
-                                                {if has_doc_html {
-                                                    // The typeset doc comment, shown in a same-origin iframe
-                                                    // just like the item page; sized to its content on load
-                                                    // and re-measured on window resize.
-                                                    view! {
-                                                        <iframe
-                                                            class="doc-html"
-                                                            src=format!("/doc-html/{}", qual)
-                                                            on:load=move |ev| {
-                                                                if let Some(target) = ev.target() {
-                                                                    if let Ok(iframe) =
-                                                                        target
-                                                                            .dyn_into::<web_sys::HtmlIFrameElement>()
-                                                                    {
-                                                                        set_doc_iframe_height(&iframe);
+                        Ok(res) => {
+                            let truncated = res.truncated;
+                            let items = res.results;
+                            view! {
+                                <Show when=move || truncated>
+                                    <p class="search-truncated">
+                                        "Showing top "
+                                        {DEFAULT_SEARCH_LIMIT.to_string()}
+                                        " matches — there are more. Refine your query to narrow the results."
+                                    </p>
+                                </Show>
+                                <ul class="result-list">
+                                    {items.into_iter().map(|item| {
+                                        let doc = item.doc_text.clone();
+                                        let has_doc = !doc.is_empty();
+                                        let has_doc_html = item.has_doc_html;
+                                        let qual = item.qual_name.clone();
+                                        // For methods, the title includes the associated type
+                                        // (e.g. `SVector<f32, N>::norm`) so the owner is obvious.
+                                        let display = list_display_name(&item);
+                                        view! {
+                                            <li class="result-item">
+                                                <A href=format!("/item/{}", item.qual_name)>
+                                                    <span class="result-kind">{item.kind.clone()}</span>
+                                                    <span class="result-name">{display.clone()}</span>
+                                                </A>
+                                                <SignatureView
+                                                    blob=item.blob.clone()
+                                                    plain=item.signature.clone()
+                                                    class="result-signature"
+                                                />
+                                                <Show when=move || has_doc>
+                                                    {if has_doc_html {
+                                                        // The typeset doc comment, shown in a same-origin iframe
+                                                        // just like the item page; sized to its content on load
+                                                        // and re-measured on window resize.
+                                                        view! {
+                                                            <iframe
+                                                                class="doc-html"
+                                                                src=format!("/doc-html/{}", qual)
+                                                                on:load=move |ev| {
+                                                                    if let Some(target) = ev.target() {
+                                                                        if let Ok(iframe) =
+                                                                            target
+                                                                                .dyn_into::<web_sys::HtmlIFrameElement>()
+                                                                        {
+                                                                            set_doc_iframe_height(&iframe);
+                                                                        }
                                                                     }
                                                                 }
-                                                            }
-                                                            title="Rendered documentation"
-                                                        />
-                                                    }
-                                                    .into_any()
-                                                } else {
-                                                    // No rendered HTML (DB built without rendering): fall back
-                                                    // to the raw doc text, exactly as before. `doc` is cloned
-                                                    // (not moved) because the `<Show>` children closure is
-                                                    // re-runnable and may only borrow its captured values.
-                                                    view! { <p class="result-doc">{doc.clone()}</p> }.into_any()
-                                                }}
-                                            </Show>
-                                        </li>
-                                    }
-                                }).collect::<Vec<_>>()}
-                            </ul>
-                        }
-                        .into_any(),
+                                                                title="Rendered documentation"
+                                                            />
+                                                        }
+                                                        .into_any()
+                                                    } else {
+                                                        // No rendered HTML (DB built without rendering): fall back
+                                                        // to the raw doc text, exactly as before. `doc` is cloned
+                                                        // (not moved) because the `<Show>` children closure is
+                                                        // re-runnable and may only borrow its captured values.
+                                                        view! { <p class="result-doc">{doc.clone()}</p> }.into_any()
+                                                    }}
+                                                </Show>
+                                            </li>
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </ul>
+                            }
+                            .into_any()
+                        },
                     })
                 }}
             </Suspense>

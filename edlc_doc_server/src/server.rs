@@ -141,23 +141,41 @@ impl From<DocRow> for DocSummary {
 #[cfg(feature = "ssr")]
 pub type DbHandle = Arc<Mutex<DocDb>>;
 
+/// Default number of results returned by a full-text search when the caller does not specify a
+/// limit.
+pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+
+/// The outcome of a full-text search: the matched items for one page, and whether more matches
+/// exist beyond it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchResults {
+    pub results: Vec<DocSummary>,
+    /// True when at least one further match exists beyond `results`.
+    pub truncated: bool,
+}
+
 /// Search documentation items by full-text query.
 ///
-/// An empty query or a query with no matches is not an error: an empty list is returned.
+/// An empty query or a query with no matches is not an error: an empty result set is returned.
 #[server]
-pub async fn search_docs(query: String, limit: usize) -> Result<Vec<DocSummary>, DocError> {
+pub async fn search_docs(query: String, limit: usize) -> Result<SearchResults, DocError> {
     let db = use_context::<DbHandle>().ok_or_else(|| DocError::Internal {
         message: "database not available in server context".into(),
     })?;
-    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<DocRow>, DocError> {
-        let guard = db.lock()?;
-        Ok(guard.search(&query, limit, None)?)
-    })
+    let (rows, truncated) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<DocRow>, bool), DocError> {
+            let guard = db.lock()?;
+            Ok(guard.search(&query, 0, limit, None)?)
+        },
+    )
     .await
     .map_err(|e| DocError::Internal {
         message: e.to_string(),
     })??;
-    Ok(rows.into_iter().map(Into::into).collect())
+    Ok(SearchResults {
+        results: rows.into_iter().map(Into::into).collect(),
+        truncated,
+    })
 }
 
 /// Fetch a single documentation item by its name (simple or qualified).
