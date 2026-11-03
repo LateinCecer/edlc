@@ -40,7 +40,7 @@ use crate::hir::{HirError, HirErrorType, HirFmt, HirModule, HirPhase, IntoEdl};
 use crate::hir::hir_fn::HirFn;
 use crate::hir::translation::HirTranslationError;
 use crate::{inline_code, issue};
-use crate::ast::ast_type_def::{AstTypeDef, LayoutOptions};
+use crate::ast::ast_type_def::{AstTypeDef, LayoutOptions, TypeState};
 use crate::core::edl_value::EdlConstValue;
 use crate::core::type_analysis::InferState;
 use crate::documentation::{DocCompilerState, DocElement, DocGenerator};
@@ -393,7 +393,13 @@ impl EdlCompiler {
         let mut ast_def = report_ast!(AstTypeDef::parse(&mut parser).in_file(src), self);
         ast_def.doc = doc;
         let state = report_translation!(ast_def.push_to_resolver(&mut self.phase), self);
-        let _ = report_translation!(state.update_layout(&mut self.phase, options), self);
+        let TypeState::Done(def) = report_translation!(state.update_layout(&mut self.phase, options), self) else {
+            panic!("member types in type definition are not fully resolved!");
+        };
+        self.phase.code.insert_doc(def.doc(&DocCompilerState {
+            types: &self.phase.types,
+            vars: &self.phase.vars,
+        }));
         Ok(())
     }
 
