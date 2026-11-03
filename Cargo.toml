@@ -20,13 +20,13 @@ authors = ["Adrian Paskert"]
 license = "AGPL-3"
 
 [workspace.dependencies]
-edlc_analysis = { version = "0.2.22", path = "edlc_analysis" }
-edlc_core = { version = "0.2.22", path = "edlc_core" }
-edlc_layout = { version = "0.2.22", path = "edlc_layout" }
-edlc_codegen_cranelift = { version = "0.2.22", path = "edlc_codegen_cranelift" }
-edlc_lsp = { version = "0.2.22", path = "edlc_lsp" }
-edlc_docs = { version = "0.2.22", path = "edlc_docs" }
-edlc_doc_db = { version = "0.2.22", path = "edlc_doc_db" }
+edlc_analysis = { path = "edlc_analysis" }
+edlc_core = { path = "edlc_core" }
+edlc_layout = { path = "edlc_layout" }
+edlc_codegen_cranelift = { path = "edlc_codegen_cranelift" }
+edlc_lsp = { path = "edlc_lsp" }
+edlc_docs = { path = "edlc_docs" }
+edlc_doc_db = { path = "edlc_doc_db" }
 
 # Profile for the Leptos WASM client bundle (used by cargo-leptos).
 [profile.wasm-release]
