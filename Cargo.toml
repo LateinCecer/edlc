@@ -17,7 +17,7 @@ members = [
 version = "0.2.22"
 repository = "https://github.com/LateinCecer/edlc"
 authors = ["Adrian Paskert"]
-license = "AGPL-3"
+license = "AGPL-3.0"
 
 [workspace.dependencies]
 edlc_analysis = { version = "^0.2", path = "edlc_analysis" }
