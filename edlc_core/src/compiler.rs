@@ -362,6 +362,11 @@ impl EdlCompiler {
         Ok(hir_fn)
     }
 
+    /// Inserts a new type definition.
+    /// This was the old way of inserting intrinsic types before integrated type definitions where
+    /// a part of EDL.
+    /// [Self::define_type] should be used instead of this function in virtually all cases.
+    /// At some point, this method will likely be deprecated.
     pub fn parse_and_insert_type_def(&mut self, name_src: ModuleSrc, env_src: ModuleSrc) -> Result<EdlTypeId, CompilerError> {
         let name = name_src.get_src()
             .map_err(|err| CompilerError::IoError(Arc::new(err)))?;
@@ -396,10 +401,19 @@ impl EdlCompiler {
         let TypeState::Done(def) = report_translation!(state.update_layout(&mut self.phase, options), self) else {
             panic!("member types in type definition are not fully resolved!");
         };
-        self.phase.code.insert_doc(def.doc(&DocCompilerState {
+
+        let mut doc = def.doc(&DocCompilerState {
             types: &self.phase.types,
             vars: &self.phase.vars,
-        }));
+        });
+        // `HirTypeDef::doc` only carries the simple name of the type, so prefix the
+        // qualified name of the module the type was defined in.
+        let mut name = self.phase.res
+            .get_scope_name(&def.scope)
+            .map_err(CompilerError::ResolveError)?;
+        name.push(def.name.clone());
+        doc.name = name;
+        self.phase.code.insert_doc(doc);
         Ok(())
     }
 
