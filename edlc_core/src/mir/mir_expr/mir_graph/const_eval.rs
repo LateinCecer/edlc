@@ -909,9 +909,19 @@ impl ConstEval {
         cfg: &MirFlowGraph,
         phase: &mut HirPhase,
     ) -> Report<ConstError, ()> {
+        // only visit non-stale blocks
+        let mut visited = HashSet::new();
+        let mut worklist = VecDeque::from([cfg.root()]);
+
         let mut report = Report::default();
-        for (block_ref, block) in cfg.blocks.iter().enumerate() {
-            if self.state.map.get(block_ref).map_or(true, |s| s.computation_counter == 0) {
+        while let Some(block_ref) = worklist.pop_front() {
+            visited.insert(block_ref);
+            let block = cfg.get_block(&block_ref).unwrap();
+            block.down_link().iter().for_each(|child| if !visited.contains(child) {
+                worklist.push_back(*child);
+            });
+
+            if self.state.map.get(block_ref.0).map_or(true, |s| s.computation_counter == 0) {
                 continue; // block was never reached by the const-eval worklist -> not validated
             }
             for statement in block.statements.iter() {
@@ -920,14 +930,14 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             self.check_hybrid_call(value, block, debug, cfg, phase, &mut report);
                         } else {
-                            self.check_comptime_call(value, MirBlockRef(block_ref), debug, cfg, phase, &mut report);
+                            self.check_comptime_call(value, block_ref, debug, cfg, phase, &mut report);
                         }
                     }
                     Statement::VarMove { var: _, value: _, uid: _, debug: _ } => {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(block_ref) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -942,7 +952,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(block_ref) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -952,7 +962,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(block_ref) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -962,7 +972,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(block_ref) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
@@ -972,7 +982,7 @@ impl ConstEval {
                         if !matches!(block.ctx, Context::Comptime) {
                             continue;
                         }
-                        let Some(_start_of_block) = cfg.find_begin_comptime_block(MirBlockRef(block_ref)) else {
+                        let Some(_start_of_block) = cfg.find_begin_comptime_block(block_ref) else {
                             continue; // don't report this for comptime functions; in those every parameter is
                             // comptime, because the function itself can only be called during comptime ;)
                         };
